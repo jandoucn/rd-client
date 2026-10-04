@@ -5354,7 +5354,7 @@ pub mod peer_online {
             Ok(s) => s,
             Err(e) => {
                 log::debug!("Failed to create peers online stream, {e}");
-                return Ok((vec![], ids.clone()));
+                return Err(e);
             }
         };
         // TODO: Use long connections to avoid socket creation
@@ -5363,7 +5363,7 @@ pub mod peer_online {
         // An established connection was aborted by the software in your host machine. (os error 10053)
         if let Err(e) = socket.send(&msg_out).await {
             log::debug!("Failed to send peers online states query, {e}");
-            return Ok((vec![], ids.clone()));
+            return Err(e.into());
         }
         // Retry for 2 times to get the online response
         for _ in 0..2 {
@@ -5373,28 +5373,7 @@ pub mod peer_online {
             {
                 match msg_in.union {
                     Some(rendezvous_message::Union::OnlineResponse(online_response)) => {
-                        let states = online_response.states;
-                        // One bit per ID, rounded up to whole bytes:
-                        // 0 IDs -> 0 bytes; 1..=8 -> 1; 9..=16 -> 2; 17..=24 -> 3.
-                        let required_len = ids.len().div_ceil(u8::BITS as usize);
-                        if states.len() < required_len {
-                            bail!(
-                                "Invalid online response: expected at least {required_len} state bytes, got {}",
-                                states.len()
-                            );
-                        }
-                        let mut onlines = Vec::new();
-                        let mut offlines = Vec::new();
-                        for i in 0..ids.len() {
-                            // bytes index from left to right
-                            let bit_value = 0x01 << (7 - i % 8);
-                            if (states[i / 8] & bit_value) == bit_value {
-                                onlines.push(ids[i].clone());
-                            } else {
-                                offlines.push(ids[i].clone());
-                            }
-                        }
-                        return Ok((onlines, offlines));
+                        return decode_online_states(&ids, &online_response.states);
                     }
                     _ => {
                         // ignore
@@ -5407,6 +5386,33 @@ pub mod peer_online {
         }
 
         bail!("Failed to query online states, no online response");
+    }
+
+    fn decode_online_states(
+        ids: &[String],
+        states: &[u8],
+    ) -> ResultType<(Vec<String>, Vec<String>)> {
+        // One bit per ID, rounded up to whole bytes:
+        // 0 IDs -> 0 bytes; 1..=8 -> 1; 9..=16 -> 2; 17..=24 -> 3.
+        let required_len = ids.len().div_ceil(u8::BITS as usize);
+        if states.len() < required_len {
+            bail!(
+                "Invalid online response: expected at least {required_len} state bytes, got {}",
+                states.len()
+            );
+        }
+        let mut onlines = Vec::new();
+        let mut offlines = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            // bytes index from left to right
+            let bit_value = 0x01 << (7 - i % 8);
+            if (states[i / 8] & bit_value) == bit_value {
+                onlines.push(id.clone());
+            } else {
+                offlines.push(id.clone());
+            }
+        }
+        Ok((onlines, offlines))
     }
 
     #[cfg(test)]
@@ -5441,6 +5447,28 @@ pub mod peer_online {
                 },
             )
             .await;
+        }
+
+        #[test]
+        fn rejects_truncated_online_state_without_marking_peers_offline() {
+            let ids = vec!["peer-a".to_owned(), "peer-b".to_owned()];
+
+            assert!(super::decode_online_states(&ids, &[]).is_err());
+        }
+
+        #[test]
+        fn decodes_online_state_bits_in_peer_order() {
+            let ids = vec![
+                "peer-a".to_owned(),
+                "peer-b".to_owned(),
+                "peer-c".to_owned(),
+            ];
+
+            let (onlines, offlines) = super::decode_online_states(&ids, &[0b1010_0000])
+                .expect("complete online state bitmap");
+
+            assert_eq!(onlines, vec!["peer-a", "peer-c"]);
+            assert_eq!(offlines, vec!["peer-b"]);
         }
     }
 }

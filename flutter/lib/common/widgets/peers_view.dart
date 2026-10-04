@@ -294,7 +294,7 @@ class _PeersViewState extends State<_PeersView>
             if (updateEvent == UpdateEvent.load) {
               _curPeers.clear();
               _curPeers.addAll(peers.map((e) => e.id));
-              _queryOnlines(true);
+              unawaited(_queryOnlines(true));
             }
             return child;
           } else {
@@ -311,6 +311,7 @@ class _PeersViewState extends State<_PeersView>
   }
 
   var _queryInterval = const Duration(seconds: 20);
+  bool _onlineQueryInFlight = false;
 
   void _startCheckOnlines() {
     () async {
@@ -322,7 +323,7 @@ class _PeersViewState extends State<_PeersView>
         final now = DateTime.now();
         if (!setEquals(_curPeers, _lastQueryPeers)) {
           if (now.difference(_lastChangeTime) > const Duration(seconds: 1)) {
-            _queryOnlines(false);
+            unawaited(_queryOnlines(false));
           }
         } else {
           final skipIfIsWeb =
@@ -345,16 +346,28 @@ class _PeersViewState extends State<_PeersView>
     }();
   }
 
-  _queryOnlines(bool isLoadEvent) {
-    if (_curPeers.isNotEmpty) {
-      bind.queryOnlines(ids: _curPeers.toList(growable: false));
-      _queryCount = 0;
+  Future<void> _queryOnlines(bool isLoadEvent) async {
+    if (_onlineQueryInFlight || _curPeers.isEmpty) {
+      return;
     }
-    _lastQueryPeers = {..._curPeers};
-    if (isLoadEvent) {
-      _lastChangeTime = DateTime.now();
-    } else {
-      _lastQueryTime = DateTime.now().subtract(_queryInterval);
+
+    _onlineQueryInFlight = true;
+    final queriedPeers = {..._curPeers};
+    try {
+      await bind.queryOnlines(ids: queriedPeers.toList(growable: false));
+      _queryCount = 0;
+      _lastQueryPeers = queriedPeers;
+      if (isLoadEvent) {
+        _lastChangeTime = DateTime.now();
+      } else {
+        _lastQueryTime = DateTime.now().subtract(_queryInterval);
+      }
+    } catch (e) {
+      // A full native query queue means no request was accepted. Keep the
+      // previous bookkeeping so the polling loop retries it automatically.
+      debugPrint('query peers online state failed: $e');
+    } finally {
+      _onlineQueryInFlight = false;
     }
   }
 
