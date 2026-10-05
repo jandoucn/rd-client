@@ -83,6 +83,12 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         self.assertIn("sc config RustDeskManagementAgent", source)
         self.assertIn("sc start RustDeskManagementAgent", source)
 
+    def test_windows_agent_entry_passes_os_arguments_to_recovery_helper(self):
+        source = self.read("src/management_agent_bin.rs")
+        self.assertIn("std::env::args_os().skip(1)", source)
+        self.assertNotIn("std::env::args().skip(1)", source)
+        self.assertIn("run_recovery_helper(&arguments)", source)
+
     def test_msi_recovery_uses_detached_helper_and_restores_agent(self):
         source = self.read("src/management_agent.rs")
         self.assertIn("spawn_msi_recovery_helper", source)

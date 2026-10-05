@@ -12,10 +12,10 @@ fn main() {
 
 #[cfg(windows)]
 fn windows_main() {
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let command = arguments
         .first()
-        .cloned()
+        .map(|argument| argument.to_string_lossy().into_owned())
         .unwrap_or_else(|| "--service".to_owned());
     if command == "--management-agent-recovery-helper" {
         if let Err(error) = management_agent::run_recovery_helper(&arguments) {
