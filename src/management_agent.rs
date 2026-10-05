@@ -675,7 +675,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
             &paths,
             config.normal_install_path.as_deref(),
         ) {
-            log::error!("management agent recovery failed: {error}");
+            hbb_common::log::error!("management agent recovery failed: {error}");
         }
     }
     status_handle.set_service_status(ServiceStatus {
@@ -693,7 +693,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
 #[cfg(windows)]
 pub fn purge(paths: &AgentPaths) -> Result<(), String> {
     use std::process::Command;
-    if unsafe { winapi::um::shellapi::IsUserAnAdmin() } == 0 {
+    if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
         return Err("administrator privileges are required".to_owned());
     }
     ensure_agent_layout(paths).map_err(|e| e.to_string())?;
