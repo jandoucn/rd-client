@@ -634,16 +634,18 @@ fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
     let client_uuid = STANDARD.encode(hbb_common::get_uuid());
     let base_url = std::env::var("RUSTDESK_API_BASE_URL")
         .unwrap_or_else(|_| "https://rdapi.yan.life".to_owned());
-    let mut url = format!(
-        "{}/rd/update/v1/agent/policy?client_id={}&client_uuid={}",
-        base_url.trim_end_matches('/'),
-        urlencoding::encode(&client_id),
-        urlencoding::encode(&client_uuid),
-    );
-    url.push_str(&format!(
-        "&after_revision={}",
-        state.management_agent_policy_revision
-    ));
+    let mut url = url::Url::parse(&format!(
+        "{}/rd/update/v1/agent/policy",
+        base_url.trim_end_matches('/')
+    ))
+    .map_err(|error| error.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("client_id", &client_id)
+        .append_pair("client_uuid", &client_uuid)
+        .append_pair(
+            "after_revision",
+            &state.management_agent_policy_revision.to_string(),
+        );
     let timestamp = unix_timestamp() as i64;
     let nonce = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
     let body_sha256 = hex::encode(Sha256::digest(b""));
@@ -709,7 +711,7 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
     let installed_exe = install_dir.join("RustDesk.exe");
     let script = format!(
         "$ErrorActionPreference='Stop'; $dir={dir}; $src={src}; $dst={dst}; "
-        "+$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; "
+        "$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; "
         "if($service){{Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue; "
         "try{{$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}; "
         "New-Item -ItemType Directory -Force -Path $dir | Out-Null; "
@@ -872,7 +874,6 @@ windows_service::define_windows_service!(ffi_service_main, service_main);
 #[cfg(windows)]
 fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<()> {
     use std::sync::mpsc;
-    use std::time::Duration;
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType,
