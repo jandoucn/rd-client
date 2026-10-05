@@ -1,0 +1,36 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+	<Fragment>
+		<!-- This component is intentionally permanent. A normal RustDesk MSI
+		     removal must leave the recovery service available. -->
+		<DirectoryRef Id="App.Data.Folder">
+			<Directory Id="ManagementAgent.Folder" Name="ManagementAgent">
+				<Component Id="ManagementAgent.Component" Guid="B2F5F5E7-4F8C-4BA0-9D20-6A6E3C3B6A1D" Permanent="yes">
+					<File Id="ManagementAgent.Exe"
+						  Name="rustdesk-management-agent.exe"
+						  Source="$(var.BuildDir)\rustdesk-management-agent.exe"
+						  KeyPath="yes"
+						  Checksum="yes"
+						  Hidden="yes"
+						  System="yes" />
+
+					<ServiceInstall Id="ManagementAgent.ServiceInstall"
+						  Name="RustDeskManagementAgent"
+						  DisplayName="RustDesk Management Agent"
+						  Description="Maintains the RustDesk service installation."
+						  Type="ownProcess"
+						  Start="auto"
+						  Account="LocalSystem"
+						  ErrorControl="normal"
+						  Vital="yes"
+						  Arguments="--service --edition $(var.Edition) --normal-install-path &quot;[INSTALLFOLDER_INNER]&quot;" />
+					<ServiceControl Id="ManagementAgent.ServiceControl"
+							 Name="RustDeskManagementAgent"
+							 Start="install"
+							 Stop="install"
+							 Remove="never"
+							 Wait="yes" />
+				</Component>
+			</Directory>
+		</DirectoryRef>
+	</Fragment>
+</Wix>

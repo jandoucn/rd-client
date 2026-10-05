@@ -23,6 +23,9 @@
 		<Property Id="ARPURLUPDATEINFO" Value="https://github.com/rustdesk/rustdesk" />-->
 
 		<Property Id="ARPPRODUCTICON" Value="AppIcon" />
+		<!-- Keep the native ARP registration visible, but require the dedicated
+		     Management Agent purge command for complete removal. -->
+		<Property Id="ARPNOREMOVE" Value="1" />
 
 		<!--$ArpStart$-->
 		<!--$ArpEnd$-->
