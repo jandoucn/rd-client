@@ -571,6 +571,7 @@ pub fn run_recovery_helper(arguments: &[std::ffi::OsString]) -> Result<(), Strin
         }
         Ok(())
     })();
+    remove_download_file(&cache);
 
     let mut state = std::fs::read(&state_path)
         .ok()
@@ -681,6 +682,30 @@ pub fn ensure_agent_layout(paths: &AgentPaths) -> std::io::Result<()> {
         set_hidden_system_attribute(&paths.client)?;
     }
     Ok(())
+}
+
+fn replace_verified_download(cache: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    remove_download_file(cache);
+    let temporary = cache.with_extension(format!("download-{}", std::process::id()));
+    remove_download_file(&temporary);
+    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, cache) {
+        remove_download_file(&temporary);
+        remove_download_file(cache);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn remove_download_file(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn unix_timestamp() -> u64 {
@@ -884,9 +909,14 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
         std::process::id()
     ));
     let installed_exe = install_dir.join("RustDesk.exe");
+    let result_path = std::env::temp_dir().join(format!(
+        "rustdesk-exe-recovery-{}-{}.txt",
+        std::process::id(),
+        unix_timestamp()
+    ));
     let script = format!(
         concat!(
-            "$ErrorActionPreference='Stop'; $dir={dir}; $tmp={tmp}; $backup={backup}; $src={src}; $dst={dst}; ",
+            "$ErrorActionPreference='Stop'; $dir={dir}; $tmp={tmp}; $backup={backup}; $src={src}; $dst={dst}; $result={result}; ",
             "Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; ",
             "$extract=Start-Process -FilePath $src -ArgumentList ('--management-agent-extract-path='+$tmp) -Wait -PassThru -WindowStyle Hidden; ",
             "if($extract.ExitCode -ne 0){{throw \"portable EXE extraction failed: $($extract.ExitCode)\"}}; ",
@@ -899,18 +929,23 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
             "if(Test-Path -LiteralPath $backup){{Remove-Item -LiteralPath $backup -Recurse -Force}}; ",
             "if(Test-Path -LiteralPath $dir){{Move-Item -LiteralPath $dir -Destination $backup}}; ",
             "Move-Item -LiteralPath $tmp -Destination $dir; ",
+            "$recovery_ok=$false; $recovery_error=''; ",
             "try{{New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; ",
-            "Start-Service -Name 'RustDesk'; Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}}catch{{",
+            "Start-Service -Name 'RustDesk'; Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue; $recovery_ok=$true}}catch{{",
+            "$recovery_error=$_.Exception.Message; ",
             "if(Test-Path -LiteralPath $dir){{Remove-Item -LiteralPath $dir -Recurse -Force}}; ",
             "if(Test-Path -LiteralPath $backup){{Move-Item -LiteralPath $backup -Destination $dir}}; ",
-            "if($old_bin){{New-Service -Name 'RustDesk' -BinaryPathName $old_bin -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; Start-Service -Name 'RustDesk'}}; throw}}"
+            "if($old_bin){{New-Service -Name 'RustDesk' -BinaryPathName $old_bin -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; Start-Service -Name 'RustDesk'}}}}; ",
+            "Set-Content -LiteralPath $result -Value $(if ($recovery_ok) {{'ok'}} else {{$recovery_error}}) -Encoding ASCII; exit $(if ($recovery_ok) {{0}} else {{1}})"
         ),
         dir = powershell_literal(install_dir),
         tmp = powershell_literal(&temporary_dir),
         backup = powershell_literal(&backup_dir),
         src = powershell_literal(package),
         dst = powershell_literal(&installed_exe),
+        result = powershell_literal(&result_path),
     );
+    let _ = std::fs::remove_file(&result_path);
     let status = std::process::Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -922,10 +957,20 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
         ])
         .status()
         .map_err(|error| error.to_string())?;
-    if status.success() {
+    let detail = std::fs::read_to_string(&result_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&result_path);
+    if status.success() && detail.trim() == "ok" && recovery_client_present(paths) {
         Ok(())
+    } else if detail.trim().is_empty() {
+        Err(format!(
+            "EXE service installer exited with exit code: {}",
+            status.code().unwrap_or(-1)
+        ))
     } else {
-        Err(format!("EXE service installer exited with {status}"))
+        Err(format!(
+            "EXE service installer failed: {}",
+            detail.trim()
+        ))
     }
 }
 
@@ -1022,20 +1067,20 @@ pub fn check_now_with_package(
             edition.name(),
             state.package_kind.extension()
         ));
-        let temporary = cache.with_extension(format!("download-{}", std::process::id()));
-        std::fs::write(&temporary, &bytes).map_err(|e| e.to_string())?;
-        if cache.exists() {
-            std::fs::remove_file(&cache).map_err(|e| e.to_string())?;
-        }
-        std::fs::rename(&temporary, &cache).map_err(|e| e.to_string())?;
+        replace_verified_download(&cache, &bytes)?;
         #[cfg(windows)]
         set_hidden_system_attribute(&cache).map_err(|e| e.to_string())?;
         if state.package_kind == PackageKind::Msi {
-            spawn_msi_recovery_helper(&cache, paths, &state, target)?;
+            let spawned = spawn_msi_recovery_helper(&cache, paths, &state, target);
+            if spawned.is_err() {
+                remove_download_file(&cache);
+            }
+            spawned?;
             return Err(RECOVERY_DEFERRED.to_owned());
-        } else {
-            install_exe_package(&cache, paths)?;
         }
+        let installed = install_exe_package(&cache, paths);
+        remove_download_file(&cache);
+        installed?;
         record_success(&mut state, target);
         Ok(())
     })();

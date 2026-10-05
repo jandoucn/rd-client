@@ -77,6 +77,23 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         self.assertNotIn("& $src ('--management-agent-extract-path=' + $tmp)", agent)
         self.assertIn("Move-Item -LiteralPath $tmp -Destination $dir", agent)
         self.assertNotIn("Copy-Item -LiteralPath $src -Destination $dst -Force", agent)
+        self.assertIn("exit $(if ($recovery_ok) {{0}} else {{1}})", agent)
+        self.assertNotIn("EXE service installer exited with {status}", agent)
+        self.assertIn("$result={result}", agent)
+        self.assertIn("result = powershell_literal(&result_path)", agent)
+        self.assertNotIn("rustdesk-exe-recovery-'+$PID", agent)
+
+    def test_recovery_deletes_verified_download_before_and_after_install(self):
+        agent = self.read("src/management_agent.rs")
+        exe = agent.split("fn check_now_with_package(", 1)[1].split("fn run_service(", 1)[0]
+        msi = agent.split("pub fn run_recovery_helper(", 1)[1].split("pub fn recovery_exe_args(", 1)[0]
+        self.assertIn("fn replace_verified_download", agent)
+        self.assertIn("remove_download_file(cache);", agent)
+        self.assertIn("remove_download_file(&temporary);", agent)
+        self.assertIn("remove_download_file(&cache);", exe)
+        self.assertLess(exe.index("remove_download_file(&cache);"), exe.index("installed?"))
+        self.assertIn("})();\n    remove_download_file(&cache);", msi)
+        self.assertLess(msi.index("if !status.success()"), msi.index("remove_download_file(&cache);"))
 
     def test_exe_install_registers_management_agent_for_compiled_edition(self):
         source = self.read("src/platform/windows.rs")
