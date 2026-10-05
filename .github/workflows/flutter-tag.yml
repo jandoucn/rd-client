@@ -104,11 +104,17 @@ jobs:
         env:
           PLATFORMS: ${{ inputs.platforms }}
           ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+          ANDROID_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          ANDROID_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if { [ "$PLATFORMS" = "all" ] || [[ ",$PLATFORMS," == *,android,* ]]; } && \
-             [ -z "$ANDROID_SIGNING_KEY" ]; then
-            echo "Android 发布必须配置长期签名证书" >&2
+             { [ -z "$ANDROID_SIGNING_KEY" ] || \
+               [ -z "$ANDROID_ALIAS" ] || \
+               [ -z "$ANDROID_KEY_STORE_PASSWORD" ] || \
+               [ -z "$ANDROID_KEY_PASSWORD" ]; }; then
+            echo "Android 发布必须配置长期签名证书及完整签名参数" >&2
             exit 1
           fi
 

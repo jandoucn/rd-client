@@ -1,6 +1,8 @@
 ## 版本变化
 
-本次发布版本为 `1.5.2`，构建号为 `20261003.8`，构建序号为 `2026100308`。
+本次发布版本为 `1.5.3`，构建号为 `20261005.1`，构建序号为 `2026100501`。
+
+- 修复 Windows/macOS 控制端通讯录在在线查询失败或查询队列拥塞时把全部客户端误显示为橙色离线；查询恢复后自动刷新，真实离线设备仍保持离线状态。
 
 - Android 在线更新完成 APK 校验后，改由前台 Activity 通过 `FileProvider` 直接打开系统覆盖安装界面，避免 `PackageInstaller` 异步广播被 ROM 后台启动限制拦截。
 - Android 更新会持久化目标 `versionCode` 和安装阶段，在未知来源授权、安装器返回或新版本首次启动时核对实际安装结果；成功上报 `installed`，取消或拒绝上报 `failed` 并清理暂存 APK。
@@ -34,7 +36,7 @@
 - 更新请求改为使用每台设备实时 ID；服务端检查命令只在主窗口可见时在应用内提示，隐藏到托盘时延迟到恢复窗口后提示。
 - 服务端「立即检查更新」在主窗口可见时显示精简更新卡片；「立即更新」继续执行签名校验、下载和安装，并回报带 `command_id` 的完整状态。
 - Android 控制 Windows 或 macOS 多显示器时，鼠标坐标按当前远端显示器映射；主屏关闭或显示器数量变化后按实时屏幕拓扑重新判断。
-- 发布构建支持单平台、多平台或全部平台构建，并始终组装 standard/SOS 共 8 个目标的完整发布快照。
+- 发布构建支持单平台、多平台或全部平台构建，并始终组装 Windows/macOS standard/SOS 与 Android standard 共 7 个目标的完整发布快照。
 
 本包基于 RustDesk 1.5.0。下面是相对官方客户端的变化。
 
@@ -74,7 +76,7 @@
 - standard 版隐藏设置里的录屏选项、首页底部的自建服务器提示和通讯录的「我的地址簿」栏目；标签入口移动到搜索、刷新和多选操作区，默认使用一行多项的紧凑视图。
 - 通讯录设备卡片只显示备注名和客户端 ID，不再显示用户名、主机名或大写字母头像。
 - 终端应用默认允许复制到剪贴板。
-- standard 和 SOS 构建成功后会把八个 Release 安装包同步到阿里云 OSS，并只保留最近五个稳定版本。GitHub Actions 上传使用上海 OSS 传输加速 endpoint `oss-accelerate.aliyuncs.com`；客户端仍通过 `https://download.yan.life` 下载，CNAME 保持指向上海普通 OSS endpoint `rustdesk-release.oss-cn-shanghai.aliyuncs.com`。
+- standard 和 SOS 构建成功后会把七个 Release 安装包同步到阿里云 OSS，并只保留最近五个稳定版本。GitHub Actions 上传使用上海 OSS 传输加速 endpoint `oss-accelerate.aliyuncs.com`；客户端仍通过 `https://download.yan.life` 下载，CNAME 保持指向上海普通 OSS endpoint `rustdesk-release.oss-cn-shanghai.aliyuncs.com`。
 - 同一 GitHub runner 的 32 MiB multipart 实测：上海传输加速约 8.40-8.48 MiB/s，香港 OSS 约 8.48 MiB/s，差异约 1%；因此保留上海 Bucket，不迁移香港。
 
 ## 在线版本检测与升级
@@ -91,7 +93,7 @@
 | Windows x86_64 | MSI | `windows-x86_64-msi` |
 | macOS arm64 | DMG | `macos-aarch64-dmg` |
 
-Android arm64 使用 `android-aarch64-apk`。每个 target 还会带 `standard` 或 `sos` edition 后缀。下载前会校验 HTTPS 地址、文件大小、SHA-256、签名和 manifest 身份；主地址失败时回退到 GitHub Release mirror。
+Android arm64 使用 `android-aarch64-apk`，当前只发布 `standard` edition；桌面 target 带 `standard` 或 `sos` edition 后缀。下载前会校验 HTTPS 地址、文件大小、SHA-256、签名和 manifest 身份；主地址失败时回退到 GitHub Release mirror。
 
 ### 客户端入口
 
@@ -112,14 +114,14 @@ Android arm64 使用 `android-aarch64-apk`。每个 target 还会带 `standard` 
 1. 每次必须同时生成 `standard` 和 `SOS`，可选择单平台、多平台或 `all`。
 2. 本轮选中的平台从最新 `master` 构建；未参与本轮构建的平台沿用上一份 stable manifest 中的安装包与 target 元数据。
 3. 继承包保留其真实版本号和构建序号，不得改名伪装成本轮新包。
-4. GitHub Release 的安装包快照固定为 8 个：standard/SOS 各自包含 Windows x86_64 EXE、Windows x86_64 MSI、Android arm64 APK、macOS arm64 DMG。
-5. 本轮新包上传 OSS；继承包通过同 Bucket 的 `copy_object` 汇总到新 tag 目录，最终目录同样固定包含 8 个安装包和一个 `catalog.json`。
+4. GitHub Release 的安装包快照固定为 7 个：standard/SOS 各自包含 Windows x86_64 EXE、Windows x86_64 MSI、macOS arm64 DMG，另含一个 Android arm64 standard APK。
+5. 本轮新包上传 OSS；继承包通过同 Bucket 的 `copy_object` 汇总到新 tag 目录，最终目录同样固定包含 7 个安装包和一个 `catalog.json`。
 6. macOS 继续使用现有签名和公证流程，不在发布器中重新签名。
 
 发布 Action 的顺序是：
 
 ```text
-选中平台构建并组装 8 包 Release 快照
+选中平台构建并组装 7 包 Release 快照
     -> 新包 4 线程上传、继承包 OSS 服务端复制
     -> 每个资产计算 SHA-256 并签名
     -> 生成 stable manifest

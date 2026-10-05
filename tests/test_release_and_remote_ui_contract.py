@@ -129,6 +129,16 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         )
         self.assertIn("校验 Android 发布签名", caller)
         self.assertIn("Android 发布必须配置长期签名证书", caller)
+        for secret in (
+            "ANDROID_SIGNING_KEY",
+            "ANDROID_ALIAS",
+            "ANDROID_KEY_STORE_PASSWORD",
+            "ANDROID_KEY_PASSWORD",
+        ):
+            self.assertIn(f"{secret}: ${{{{ secrets.{secret} }}}}", caller)
+        self.assertIn('"$ANDROID_ALIAS"', caller)
+        self.assertIn('"$ANDROID_KEY_STORE_PASSWORD"', caller)
+        self.assertIn('"$ANDROID_KEY_PASSWORD"', caller)
         self.assertIn("Android 发布必须始终使用固定长期签名证书", agents)
         self.assertIn(
             "71:11:D7:30:EC:A2:C7:98:47:41:53:04:59:DD:38:97:20:16:2F:7B:FE:B7:39:FA:96:8F:2E:D7:4E:6F:0B:D8",
