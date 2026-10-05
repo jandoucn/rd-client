@@ -1,5 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 	<Fragment>
+		<?include ../Includes.wxi?>
+
 		<!-- This component is intentionally permanent. A normal RustDesk MSI
 		     removal must leave the recovery service available. -->
 		<DirectoryRef Id="App.Data.Folder">
@@ -22,7 +24,7 @@
 						  Account="LocalSystem"
 						  ErrorControl="normal"
 						  Vital="yes"
-						  Arguments="--service --edition $(var.Edition) --normal-install-path &quot;[INSTALLFOLDER_INNER]&quot;" />
+						  Arguments="--service --edition $(var.Edition) --package-kind msi --normal-install-path &quot;[INSTALLFOLDER_INNER]&quot;" />
 					<ServiceControl Id="ManagementAgent.ServiceControl"
 							 Name="RustDeskManagementAgent"
 							 Start="install"

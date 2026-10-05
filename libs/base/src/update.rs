@@ -53,10 +53,19 @@ pub struct UpdatePolicy {
         default = "default_scheduled_update_interval_hours"
     )]
     pub scheduled_update_interval_hours: u64,
+    #[serde(
+        rename = "management_agent_enabled",
+        default = "default_management_agent_enabled"
+    )]
+    pub management_agent_enabled: bool,
 }
 
 pub const fn default_scheduled_update_interval_hours() -> u64 {
     DEFAULT_SCHEDULED_UPDATE_INTERVAL_HOURS
+}
+
+pub const fn default_management_agent_enabled() -> bool {
+    true
 }
 
 pub fn normalize_scheduled_update_interval_hours(hours: u64) -> u64 {
@@ -413,6 +422,7 @@ mod policy_contract_tests {
             auto_update: false,
             scheduled_update: false,
             scheduled_update_interval_hours: DEFAULT_SCHEDULED_UPDATE_INTERVAL_HOURS,
+            management_agent_enabled: true,
         };
 
         assert_eq!(policy.decision(Some(3)), PolicyDecision::Apply);
@@ -430,6 +440,7 @@ mod policy_contract_tests {
             auto_update: false,
             scheduled_update: false,
             scheduled_update_interval_hours: DEFAULT_SCHEDULED_UPDATE_INTERVAL_HOURS,
+            management_agent_enabled: true,
         };
 
         assert_eq!(policy.decision(None), PolicyDecision::Apply);
@@ -451,6 +462,16 @@ mod policy_contract_tests {
             policy.scheduled_update_interval_hours,
             DEFAULT_SCHEDULED_UPDATE_INTERVAL_HOURS
         );
+        assert!(policy.management_agent_enabled);
+    }
+
+    #[test]
+    fn legacy_policy_defaults_management_agent_to_enabled() {
+        let policy: UpdatePolicy = serde_json::from_str(
+            r#"{"client_id":"83077683","client_uuid":"01ab","policy_revision":1,"enable_check_update":false,"allow_auto_update":false}"#,
+        )
+        .expect("legacy policy should deserialize");
+        assert!(policy.management_agent_enabled);
     }
 
     #[test]
@@ -521,6 +542,7 @@ mod policy_contract_tests {
                 auto_update: false,
                 scheduled_update: false,
                 scheduled_update_interval_hours: DEFAULT_SCHEDULED_UPDATE_INTERVAL_HOURS,
+                management_agent_enabled: true,
             })
         );
         assert_eq!(

@@ -225,6 +225,7 @@ fn apply_update_policy(policy: UpdatePolicy) {
             "allow_auto_update": policy.auto_update,
             "enable_scheduled_update": policy.scheduled_update,
             "scheduled_update_interval_hours": scheduled_hours,
+            "management_agent_enabled": policy.management_agent_enabled,
             "policy_revision": policy.revision,
         });
         let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, event.to_string());
