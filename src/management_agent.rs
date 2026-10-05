@@ -888,8 +888,8 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
         concat!(
             "$ErrorActionPreference='Stop'; $dir={dir}; $tmp={tmp}; $backup={backup}; $src={src}; $dst={dst}; ",
             "Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; ",
-            "& $src ('--management-agent-extract-path=' + $tmp); ",
-            "if($LASTEXITCODE -ne 0){{throw 'portable EXE extraction failed'}}; ",
+            "$extract=Start-Process -FilePath $src -ArgumentList ('--management-agent-extract-path='+$tmp) -Wait -PassThru -WindowStyle Hidden; ",
+            "if($extract.ExitCode -ne 0){{throw \"portable EXE extraction failed: $($extract.ExitCode)\"}}; ",
             "if(!(Test-Path -LiteralPath $dst.Replace($dir,$tmp))){{throw 'portable EXE did not extract RustDesk.exe'}}; ",
             "$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; ",
             "$old_bin=(Get-CimInstance Win32_Service -Filter \"Name='RustDesk'\" -ErrorAction SilentlyContinue).PathName; ",

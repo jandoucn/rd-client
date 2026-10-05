@@ -70,6 +70,11 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         self.assertIn("--management-agent-extract-path=", self.read("libs/portable/src/main.rs"))
         self.assertIn("portable EXE extraction failed", agent)
         self.assertIn("portable EXE did not extract RustDesk.exe", agent)
+        self.assertIn("$extract=Start-Process -FilePath $src -ArgumentList", agent)
+        self.assertIn("-Wait -PassThru -WindowStyle Hidden", agent)
+        self.assertIn("throw \\\"portable EXE extraction failed:", agent)
+        self.assertIn("$($extract.ExitCode)\\\"", agent)
+        self.assertNotIn("& $src ('--management-agent-extract-path=' + $tmp)", agent)
         self.assertIn("Move-Item -LiteralPath $tmp -Destination $dir", agent)
         self.assertNotIn("Copy-Item -LiteralPath $src -Destination $dst -Force", agent)
 
