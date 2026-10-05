@@ -27,11 +27,51 @@ pub enum Edition {
     Sos,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageKind {
+    Msi,
+    Exe,
+}
+
+impl Default for PackageKind {
+    fn default() -> Self {
+        Self::Msi
+    }
+}
+
+impl PackageKind {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Msi => "msi",
+            Self::Exe => "exe",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "msi" => Some(Self::Msi),
+            "exe" => Some(Self::Exe),
+            _ => None,
+        }
+    }
+}
+
 impl Edition {
     pub fn target_key(self) -> &'static str {
+        self.target_key_for(PackageKind::Msi)
+    }
+
+    pub fn target_key_for(self, package_kind: PackageKind) -> &'static str {
         match self {
-            Self::Standard => "windows-x86_64-msi-standard",
-            Self::Sos => "windows-x86_64-msi-sos",
+            Self::Standard => match package_kind {
+                PackageKind::Msi => "windows-x86_64-msi-standard",
+                PackageKind::Exe => "windows-x86_64-exe-standard",
+            },
+            Self::Sos => match package_kind {
+                PackageKind::Msi => "windows-x86_64-msi-sos",
+                PackageKind::Exe => "windows-x86_64-exe-sos",
+            },
         }
     }
 
@@ -80,7 +120,11 @@ impl AgentPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentState {
+    #[serde(default = "default_agent_schema_version")]
+    pub schema_version: u32,
     pub edition: Edition,
+    #[serde(default)]
+    pub package_kind: PackageKind,
     pub target_key: String,
     pub manifest_url: String,
     #[serde(default)]
@@ -99,13 +143,30 @@ pub struct AgentState {
     pub last_error: String,
     #[serde(default)]
     pub disabled: bool,
+    #[serde(default = "default_management_agent_enabled")]
+    pub management_agent_enabled: bool,
+    #[serde(default)]
+    pub management_agent_policy_revision: u64,
+    #[serde(default)]
+    pub last_policy_check_at: Option<String>,
+    #[serde(default)]
+    pub last_policy_error: String,
+}
+
+const fn default_agent_schema_version() -> u32 {
+    1
+}
+const fn default_management_agent_enabled() -> bool {
+    true
 }
 
 impl AgentState {
     pub fn new(edition: Edition, paths: &AgentPaths) -> Self {
         Self {
+            schema_version: default_agent_schema_version(),
             edition,
-            target_key: edition.target_key().to_owned(),
+            package_kind: PackageKind::Msi,
+            target_key: edition.target_key_for(PackageKind::Msi).to_owned(),
             manifest_url: MANIFEST_URL.to_owned(),
             normal_install_path: String::new(),
             recovery_install_path: paths.client.to_string_lossy().into_owned(),
@@ -115,6 +176,10 @@ impl AgentState {
             last_primary_url: String::new(),
             last_error: String::new(),
             disabled: false,
+            management_agent_enabled: true,
+            management_agent_policy_revision: 0,
+            last_policy_check_at: None,
+            last_policy_error: String::new(),
         }
     }
 }
@@ -173,6 +238,7 @@ pub enum ManifestError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
     pub edition: Edition,
+    pub package_kind: PackageKind,
     pub normal_install_path: Option<PathBuf>,
 }
 
@@ -180,6 +246,7 @@ impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             edition: Edition::Standard,
+            package_kind: PackageKind::Msi,
             normal_install_path: None,
         }
     }
@@ -203,6 +270,14 @@ where
                     Edition::parse(value).ok_or_else(|| format!("unsupported edition: {value}"))?;
                 index += 2;
             }
+            "--package-kind" => {
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| "--package-kind requires a value".to_owned())?;
+                config.package_kind = PackageKind::parse(value)
+                    .ok_or_else(|| format!("unsupported package kind: {value}"))?;
+                index += 2;
+            }
             "--normal-install-path" => {
                 let value = arguments
                     .get(index + 1)
@@ -223,10 +298,20 @@ pub fn select_oss_target<'a>(
     manifest: &'a Manifest,
     edition: Edition,
 ) -> Result<&'a ManifestTarget, ManifestError> {
+    select_oss_target_for(manifest, edition, PackageKind::Msi)
+}
+
+pub fn select_oss_target_for<'a>(
+    manifest: &'a Manifest,
+    edition: Edition,
+    package_kind: PackageKind,
+) -> Result<&'a ManifestTarget, ManifestError> {
     let target = manifest
         .targets
-        .get(edition.target_key())
-        .ok_or_else(|| ManifestError::MissingTarget(edition.target_key().to_owned()))?;
+        .get(edition.target_key_for(package_kind))
+        .ok_or_else(|| {
+            ManifestError::MissingTarget(edition.target_key_for(package_kind).to_owned())
+        })?;
     if !target.primary.starts_with(OSS_DOWNLOAD_PREFIX) {
         return Err(ManifestError::InvalidPrimary(target.primary.clone()));
     }
@@ -379,6 +464,19 @@ pub fn recovery_msi_args(paths: &AgentPaths) -> Vec<String> {
     ]
 }
 
+pub fn recovery_exe_args(paths: &AgentPaths) -> Vec<String> {
+    vec![
+        "--management-agent-install".into(),
+        format!("--management-agent-install-path={}", paths.client.display()),
+        "--management-agent-no-shortcuts".into(),
+        "--management-agent-no-tray".into(),
+    ]
+}
+
+pub fn recovery_allowed(management_agent_enabled: bool, marker_exists: bool) -> bool {
+    management_agent_enabled && !marker_exists
+}
+
 pub fn purge_marker_path(paths: &AgentPaths) -> PathBuf {
     paths.state.join("disable-recovery")
 }
@@ -494,6 +592,153 @@ pub fn write_state(path: &Path, state: &AgentState) -> std::io::Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct AgentPolicyResponse {
+    client_id: String,
+    client_uuid: String,
+    policy_revision: u64,
+    #[serde(default = "default_management_agent_enabled")]
+    management_agent_enabled: bool,
+}
+
+fn apply_agent_policy(
+    state: &mut AgentState,
+    policy: AgentPolicyResponse,
+    client_id: &str,
+    client_uuid: &str,
+) -> Result<(), String> {
+    if policy.client_id != client_id || policy.client_uuid != client_uuid {
+        return Err("agent policy identity mismatch".to_owned());
+    }
+    if policy.policy_revision < state.management_agent_policy_revision {
+        return Err("agent policy revision rollback".to_owned());
+    }
+    state.management_agent_enabled = policy.management_agent_enabled;
+    state.management_agent_policy_revision = policy.policy_revision;
+    state.last_policy_check_at = Some(unix_timestamp().to_string());
+    state.last_policy_error.clear();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
+    if purge_marker_path(&AgentPaths::from_program_data(
+        std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into()),
+        state.edition,
+    ))
+    .exists()
+    {
+        return Ok(());
+    }
+    let client_id = hbb_common::config::Config::get_id();
+    let client_uuid = STANDARD.encode(hbb_common::get_uuid());
+    let base_url = std::env::var("RUSTDESK_API_BASE_URL")
+        .unwrap_or_else(|_| "https://rdapi.yan.life".to_owned());
+    let mut url = format!(
+        "{}/rd/update/v1/agent/policy?client_id={}&client_uuid={}",
+        base_url.trim_end_matches('/'),
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&client_uuid),
+    );
+    url.push_str(&format!(
+        "&after_revision={}",
+        state.management_agent_policy_revision
+    ));
+    let timestamp = unix_timestamp() as i64;
+    let nonce = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
+    let body_sha256 = hex::encode(Sha256::digest(b""));
+    let canonical = update_device_auth_payload_for_agent(
+        "GET",
+        "/rd/update/v1/agent/policy",
+        &client_id,
+        &client_uuid,
+        timestamp,
+        &nonce,
+        &body_sha256,
+    );
+    let (secret_key, public_key) = hbb_common::config::Config::get_key_pair();
+    let secret_key = hbb_common::sodiumoxide::crypto::sign::SecretKey::from_slice(&secret_key)
+        .ok_or_else(|| "invalid device signing key".to_owned())?;
+    let signature = hbb_common::sodiumoxide::crypto::sign::sign_detached(&canonical, &secret_key);
+    let response = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(url)
+        .header("X-RustDesk-Device-ID", &client_id)
+        .header("X-RustDesk-Device-Public-Key", STANDARD.encode(public_key))
+        .header("X-RustDesk-Device-Timestamp", timestamp.to_string())
+        .header("X-RustDesk-Device-Nonce", nonce)
+        .header(
+            "X-RustDesk-Device-Signature",
+            STANDARD.encode(signature.to_bytes()),
+        )
+        .send()
+        .map_err(|error| error.to_string())?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|error| error.to_string())?;
+    let policy = response
+        .json::<AgentPolicyResponse>()
+        .map_err(|error| error.to_string())?;
+    apply_agent_policy(state, policy, &client_id, &client_uuid)
+}
+
+fn update_device_auth_payload_for_agent(
+    method: &str,
+    path: &str,
+    client_id: &str,
+    client_uuid: &str,
+    timestamp: i64,
+    nonce: &str,
+    body_sha256: &str,
+) -> Vec<u8> {
+    format!(
+        "rustdesk-update-auth-v1\nmethod={method}\npath={path}\nclient_id={client_id}\nclient_uuid={client_uuid}\ntimestamp={timestamp}\nnonce={nonce}\ncommand_id=\nbody_sha256={body_sha256}\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(windows)]
+fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String> {
+    let install_dir = &paths.client;
+    let installed_exe = install_dir.join("RustDesk.exe");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $dir={dir}; $src={src}; $dst={dst}; "
+        "+$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; "
+        "if($service){{Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue; "
+        "try{{$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}; "
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null; "
+        "Copy-Item -LiteralPath $src -Destination $dst -Force; "
+        "if(Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue){{sc.exe delete RustDesk | Out-Null; Start-Sleep -Seconds 2}}; "
+        "New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; "
+        "Start-Service -Name 'RustDesk'",
+        dir = powershell_literal(install_dir),
+        src = powershell_literal(package),
+        dst = powershell_literal(&installed_exe),
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("EXE service installer exited with {status}"))
+    }
+}
+
 #[cfg(windows)]
 pub fn check_now(edition: Edition, paths: &AgentPaths) -> Result<(), String> {
     check_now_with_normal_path(edition, paths, None)
@@ -502,6 +747,16 @@ pub fn check_now(edition: Edition, paths: &AgentPaths) -> Result<(), String> {
 #[cfg(windows)]
 pub fn check_now_with_normal_path(
     edition: Edition,
+    paths: &AgentPaths,
+    normal_install_path: Option<&Path>,
+) -> Result<(), String> {
+    check_now_with_package(edition, PackageKind::Msi, paths, normal_install_path)
+}
+
+#[cfg(windows)]
+pub fn check_now_with_package(
+    edition: Edition,
+    package_kind: PackageKind,
     paths: &AgentPaths,
     normal_install_path: Option<&Path>,
 ) -> Result<(), String> {
@@ -514,9 +769,18 @@ pub fn check_now_with_normal_path(
         AgentState::new(edition, paths)
     };
     state.edition = edition;
-    state.target_key = edition.target_key().to_owned();
-    if state.disabled || purge_marker_path(paths).exists() {
+    state.package_kind = package_kind;
+    state.target_key = edition.target_key_for(package_kind).to_owned();
+    if purge_marker_path(paths).exists() {
         return Err("recovery is disabled".to_owned());
+    }
+    #[cfg(windows)]
+    if let Err(error) = refresh_agent_policy(&mut state) {
+        state.last_policy_error = error;
+        let _ = write_state(&state_path, &state);
+    }
+    if !recovery_allowed(state.management_agent_enabled && !state.disabled, false) {
+        return Err("management agent is disabled".to_owned());
     }
     if state.normal_install_path.is_empty() {
         let discovered = normal_install_path
@@ -544,9 +808,9 @@ pub fn check_now_with_normal_path(
             return Err(format!("manifest HTTP {}", response.status()));
         }
         let manifest = response.json::<Manifest>().map_err(|e| e.to_string())?;
-        let target =
-            select_oss_target(&manifest, edition).map_err(|e| format!("manifest: {e:?}"))?;
-        verify_manifest_signature(&manifest, edition.target_key(), target)
+        let target = select_oss_target_for(&manifest, edition, state.package_kind)
+            .map_err(|e| format!("manifest: {e:?}"))?;
+        verify_manifest_signature(&manifest, state.target_key.as_str(), target)
             .map_err(|e| format!("manifest signature: {e:?}"))?;
         let response = client
             .get(&target.primary)
@@ -557,9 +821,11 @@ pub fn check_now_with_normal_path(
         }
         let bytes = response.bytes().map_err(|e| e.to_string())?;
         verify_download(&bytes, target).map_err(|e| format!("package: {e:?}"))?;
-        let cache = paths
-            .cache
-            .join(format!("rustdesk-{}-latest.msi", edition.name()));
+        let cache = paths.cache.join(format!(
+            "rustdesk-{}-latest.{}",
+            edition.name(),
+            state.package_kind.extension()
+        ));
         let temporary = cache.with_extension(format!("download-{}", std::process::id()));
         std::fs::write(&temporary, &bytes).map_err(|e| e.to_string())?;
         if cache.exists() {
@@ -568,14 +834,18 @@ pub fn check_now_with_normal_path(
         std::fs::rename(&temporary, &cache).map_err(|e| e.to_string())?;
         #[cfg(windows)]
         set_hidden_system_attribute(&cache).map_err(|e| e.to_string())?;
-        let status = std::process::Command::new("msiexec.exe")
-            .arg("/i")
-            .arg(&cache)
-            .args(recovery_msi_args(paths))
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("msiexec exited with {status}"));
+        if state.package_kind == PackageKind::Msi {
+            let status = std::process::Command::new("msiexec.exe")
+                .arg("/i")
+                .arg(&cache)
+                .args(recovery_msi_args(paths))
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("msiexec exited with {status}"));
+            }
+        } else {
+            install_exe_package(&cache, paths)?;
         }
         record_success(&mut state, target);
         Ok(())
@@ -650,6 +920,11 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
             .ok()
             .and_then(|bytes| serde_json::from_slice::<AgentState>(&bytes).ok())
             .unwrap_or_else(|| AgentState::new(config.edition, &paths));
+        state.package_kind = config.package_kind;
+        state.target_key = config
+            .edition
+            .target_key_for(config.package_kind)
+            .to_owned();
         if let Some(path) = config.normal_install_path.as_deref() {
             state.normal_install_path = path.to_string_lossy().into_owned();
         }
@@ -658,11 +933,20 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                 state.normal_install_path = path.to_string_lossy().into_owned();
             }
         }
+        if purge_marker_path(&paths).exists() {
+            continue;
+        }
+        if let Err(error) = refresh_agent_policy(&mut state) {
+            state.last_policy_error = error;
+            let _ = write_state(&state_path, &state);
+        }
         if normal_client_present(&state) {
             let _ = write_state(&state_path, &state);
             continue;
         }
-        if state.disabled || !check_due(&state) {
+        if !recovery_allowed(state.management_agent_enabled && !state.disabled, false)
+            || !check_due(&state)
+        {
             continue;
         }
         if state.next_check_at.is_none() {
@@ -670,8 +954,9 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
             let _ = write_state(&state_path, &state);
             continue;
         }
-        if let Err(error) = check_now_with_normal_path(
+        if let Err(error) = check_now_with_package(
             config.edition,
+            config.package_kind,
             &paths,
             config.normal_install_path.as_deref(),
         ) {
@@ -814,6 +1099,42 @@ mod tests {
     }
 
     #[test]
+    fn target_key_and_recovery_args_cover_msi_and_exe() {
+        assert_eq!(
+            Edition::Standard.target_key_for(PackageKind::Msi),
+            "windows-x86_64-msi-standard"
+        );
+        assert_eq!(
+            Edition::Sos.target_key_for(PackageKind::Exe),
+            "windows-x86_64-exe-sos"
+        );
+        let paths = AgentPaths::from_program_data("/tmp", Edition::Standard);
+        assert!(recovery_exe_args(&paths)
+            .iter()
+            .any(|arg| arg == "--management-agent-install"));
+    }
+
+    #[test]
+    fn old_agent_state_migrates_to_enabled_msi_defaults() {
+        let value = serde_json::json!({
+            "edition": "standard",
+            "target_key": "windows-x86_64-msi-standard",
+            "manifest_url": MANIFEST_URL
+        });
+        let state: AgentState = serde_json::from_value(value).expect("legacy state should parse");
+        assert_eq!(state.schema_version, 1);
+        assert_eq!(state.package_kind, PackageKind::Msi);
+        assert!(state.management_agent_enabled);
+    }
+
+    #[test]
+    fn local_disable_marker_wins_over_api_enable() {
+        assert!(!recovery_allowed(false, false));
+        assert!(!recovery_allowed(true, true));
+        assert!(recovery_allowed(true, false));
+    }
+
+    #[test]
     fn manifest_must_use_oss_primary() {
         let mut targets = BTreeMap::new();
         targets.insert(
@@ -882,11 +1203,14 @@ mod tests {
             "--service",
             "--edition",
             "sos",
+            "--package-kind",
+            "exe",
             "--normal-install-path",
             r"C:\Program Files\RustDesk\",
         ])
         .expect("service arguments should parse");
         assert_eq!(config.edition, Edition::Sos);
+        assert_eq!(config.package_kind, PackageKind::Exe);
         assert_eq!(
             config.normal_install_path,
             Some(PathBuf::from(r"C:\Program Files\RustDesk\"))
@@ -897,7 +1221,32 @@ mod tests {
     fn service_arguments_reject_missing_or_unknown_values() {
         assert!(parse_service_arguments(["--edition"]).is_err());
         assert!(parse_service_arguments(["--edition", "enterprise"]).is_err());
+        assert!(parse_service_arguments(["--package-kind", "zip"]).is_err());
         assert!(parse_service_arguments(["--normal-install-path"]).is_err());
+    }
+
+    #[test]
+    fn agent_policy_requires_matching_identity_and_monotonic_revision() {
+        let paths = AgentPaths::from_program_data("/tmp", Edition::Standard);
+        let mut state = AgentState::new(Edition::Standard, &paths);
+        let policy = AgentPolicyResponse {
+            client_id: "client".into(),
+            client_uuid: "uuid".into(),
+            policy_revision: 2,
+            management_agent_enabled: false,
+        };
+        assert!(apply_agent_policy(&mut state, policy.clone(), "other", "uuid").is_err());
+        assert!(apply_agent_policy(&mut state, policy, "client", "uuid").is_ok());
+        assert!(!state.management_agent_enabled);
+        assert_eq!(state.management_agent_policy_revision, 2);
+        let rollback = AgentPolicyResponse {
+            client_id: "client".into(),
+            client_uuid: "uuid".into(),
+            policy_revision: 1,
+            management_agent_enabled: true,
+        };
+        assert!(apply_agent_policy(&mut state, rollback, "client", "uuid").is_err());
+        assert!(!state.management_agent_enabled);
     }
 
     #[test]

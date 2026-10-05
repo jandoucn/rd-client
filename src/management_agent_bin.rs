@@ -30,8 +30,9 @@ fn windows_main() {
     match command.as_str() {
         "status" => println!("RustDesk Management Agent root: {}", paths.root.display()),
         "check-now" => {
-            if let Err(error) = management_agent::check_now_with_normal_path(
+            if let Err(error) = management_agent::check_now_with_package(
                 config.edition,
+                config.package_kind,
                 &paths,
                 config.normal_install_path.as_deref(),
             ) {
