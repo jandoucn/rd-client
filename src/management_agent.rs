@@ -452,6 +452,19 @@ pub fn record_success(state: &mut AgentState, target: &ManifestTarget) {
     state.next_check_at = None;
 }
 
+fn apply_service_config(state: &mut AgentState, config: &ServiceConfig, paths: &AgentPaths) {
+    state.edition = config.edition;
+    state.package_kind = config.package_kind;
+    state.target_key = config
+        .edition
+        .target_key_for(config.package_kind)
+        .to_owned();
+    state.recovery_install_path = paths.client.to_string_lossy().into_owned();
+    if let Some(path) = config.normal_install_path.as_deref() {
+        state.normal_install_path = path.to_string_lossy().into_owned();
+    }
+}
+
 pub fn recovery_msi_args(paths: &AgentPaths) -> Vec<String> {
     vec![
         "/qn".into(),
@@ -462,6 +475,152 @@ pub fn recovery_msi_args(paths: &AgentPaths) -> Vec<String> {
         "STARTUPSHORTCUTS=0".into(),
         "LAUNCH_TRAY_APP=N".into(),
     ]
+}
+
+#[cfg(windows)]
+const RECOVERY_DEFERRED: &str = "management agent recovery delegated to helper";
+
+#[cfg(windows)]
+fn spawn_msi_recovery_helper(
+    cache: &Path,
+    paths: &AgentPaths,
+    state: &AgentState,
+    target: &ManifestTarget,
+) -> Result<(), String> {
+    let source = std::env::current_exe().map_err(|error| error.to_string())?;
+    let helper = paths
+        .agent
+        .join(format!("recovery-helper-{}.exe", std::process::id()));
+    std::fs::copy(&source, &helper).map_err(|error| error.to_string())?;
+    let result = std::process::Command::new(&helper)
+        .arg("--management-agent-recovery-helper")
+        .arg("--edition")
+        .arg(state.edition.name())
+        .arg("--package-kind")
+        .arg(state.package_kind.extension())
+        .arg("--recovery-cache")
+        .arg(cache)
+        .arg("--recovery-version")
+        .arg(&target.version)
+        .arg("--recovery-primary-url")
+        .arg(&target.primary)
+        .spawn();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&helper);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn run_recovery_helper(arguments: &[std::ffi::OsString]) -> Result<(), String> {
+    fn value(arguments: &[std::ffi::OsString], name: &str) -> Result<String, String> {
+        arguments
+            .windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].to_string_lossy().into_owned())
+            .ok_or_else(|| format!("{name} requires a value"))
+    }
+
+    let config = parse_service_arguments(
+        arguments
+            .iter()
+            .skip(1)
+            .map(|argument| argument.to_string_lossy().into_owned()),
+    )?;
+    let cache = PathBuf::from(value(arguments, "--recovery-cache")?);
+    let version = value(arguments, "--recovery-version")?;
+    let primary_url = value(arguments, "--recovery-primary-url")?;
+    let helper = std::env::current_exe().map_err(|error| error.to_string())?;
+    let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
+    let paths = AgentPaths::from_program_data(program_data, config.edition);
+    let state_path = paths.state.join("agent.json");
+
+    let stop_script = "$ErrorActionPreference='Stop'; $s=Get-Service -Name 'RustDeskManagementAgent' -ErrorAction SilentlyContinue; if($s -and $s.Status -ne 'Stopped'){ Stop-Service -InputObject $s -Force; $s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90)) }";
+    let stop_status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            stop_script,
+        ])
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !stop_status.success() {
+        let _ = std::fs::remove_file(&helper);
+        return Err(format!("failed to stop management agent: {stop_status}"));
+    }
+
+    let result = (|| {
+        let status = std::process::Command::new("msiexec.exe")
+            .arg("/i")
+            .arg(&cache)
+            .args(recovery_msi_args(&paths))
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!(
+                "msiexec exited with exit code: {}",
+                status.code().unwrap_or(-1)
+            ));
+        }
+        if !recovery_client_present(&paths) {
+            return Err("MSI completed without RustDesk.exe".to_owned());
+        }
+        Ok(())
+    })();
+
+    let mut state = std::fs::read(&state_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<AgentState>(&bytes).ok())
+        .unwrap_or_else(|| AgentState::new(config.edition, &paths));
+    apply_service_config(&mut state, &config, &paths);
+    let result = match result {
+        Ok(()) => {
+            let target = ManifestTarget {
+                version,
+                build_seq: 0,
+                build_number: String::new(),
+                source_commit: String::new(),
+                source_tag: String::new(),
+                primary: primary_url,
+                mirrors: Vec::new(),
+                size: 0,
+                sha256: String::new(),
+                signature: String::new(),
+                signature_key_id: String::new(),
+            };
+            record_success(&mut state, &target);
+            Ok(())
+        }
+        Err(error) => {
+            record_failure(&mut state, error.clone());
+            Err(error)
+        }
+    };
+    let start_script = "$ErrorActionPreference='Stop'; $s=Get-Service -Name 'RustDeskManagementAgent' -ErrorAction SilentlyContinue; if($s){ if($s.Status -ne 'Running'){ Start-Service -InputObject $s }; $s.WaitForStatus('Running',[TimeSpan]::FromSeconds(90)) }";
+    let start_status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            start_script,
+        ])
+        .status()
+        .map_err(|error| error.to_string())?;
+    let _ = std::fs::remove_file(helper);
+    if !start_status.success() {
+        let error = format!("failed to restart management agent: {start_status}");
+        record_failure(&mut state, error.clone());
+        let _ = write_state(&state_path, &state);
+        return Err(error);
+    }
+    write_state(&state_path, &state).map_err(|error| error.to_string())?;
+    result
 }
 
 pub fn recovery_exe_args(paths: &AgentPaths) -> Vec<String> {
@@ -708,20 +867,47 @@ fn update_device_auth_payload_for_agent(
 #[cfg(windows)]
 fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String> {
     let install_dir = &paths.client;
+    let temporary_dir = install_dir.with_file_name(format!(
+        "{}-download-{}",
+        install_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("RustDesk"),
+        std::process::id()
+    ));
+    let backup_dir = install_dir.with_file_name(format!(
+        "{}-backup-{}",
+        install_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("RustDesk"),
+        std::process::id()
+    ));
     let installed_exe = install_dir.join("RustDesk.exe");
     let script = format!(
         concat!(
-            "$ErrorActionPreference='Stop'; $dir={dir}; $src={src}; $dst={dst}; ",
+            "$ErrorActionPreference='Stop'; $dir={dir}; $tmp={tmp}; $backup={backup}; $src={src}; $dst={dst}; ",
+            "Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue; ",
+            "& $src ('--management-agent-extract-path=' + $tmp); ",
+            "if($LASTEXITCODE -ne 0){{throw 'portable EXE extraction failed'}}; ",
+            "if(!(Test-Path -LiteralPath $dst.Replace($dir,$tmp))){{throw 'portable EXE did not extract RustDesk.exe'}}; ",
             "$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; ",
+            "$old_bin=(Get-CimInstance Win32_Service -Filter \"Name='RustDesk'\" -ErrorAction SilentlyContinue).PathName; ",
             "if($service){{Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue; ",
             "try{{$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}; ",
-            "New-Item -ItemType Directory -Force -Path $dir | Out-Null; ",
-            "Copy-Item -LiteralPath $src -Destination $dst -Force; ",
             "if(Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue){{sc.exe delete RustDesk | Out-Null; Start-Sleep -Seconds 2}}; ",
-            "New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; ",
-            "Start-Service -Name 'RustDesk'"
+            "if(Test-Path -LiteralPath $backup){{Remove-Item -LiteralPath $backup -Recurse -Force}}; ",
+            "if(Test-Path -LiteralPath $dir){{Move-Item -LiteralPath $dir -Destination $backup}}; ",
+            "Move-Item -LiteralPath $tmp -Destination $dir; ",
+            "try{{New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; ",
+            "Start-Service -Name 'RustDesk'; Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}}catch{{",
+            "if(Test-Path -LiteralPath $dir){{Remove-Item -LiteralPath $dir -Recurse -Force}}; ",
+            "if(Test-Path -LiteralPath $backup){{Move-Item -LiteralPath $backup -Destination $dir}}; ",
+            "if($old_bin){{New-Service -Name 'RustDesk' -BinaryPathName $old_bin -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; Start-Service -Name 'RustDesk'}}; throw}}"
         ),
         dir = powershell_literal(install_dir),
+        tmp = powershell_literal(&temporary_dir),
+        backup = powershell_literal(&backup_dir),
         src = powershell_literal(package),
         dst = powershell_literal(&installed_exe),
     );
@@ -772,9 +958,15 @@ pub fn check_now_with_package(
     } else {
         AgentState::new(edition, paths)
     };
-    state.edition = edition;
-    state.package_kind = package_kind;
-    state.target_key = edition.target_key_for(package_kind).to_owned();
+    apply_service_config(
+        &mut state,
+        &ServiceConfig {
+            edition,
+            package_kind,
+            normal_install_path: normal_install_path.map(PathBuf::from),
+        },
+        paths,
+    );
     if purge_marker_path(paths).exists() {
         return Err("recovery is disabled".to_owned());
     }
@@ -839,15 +1031,8 @@ pub fn check_now_with_package(
         #[cfg(windows)]
         set_hidden_system_attribute(&cache).map_err(|e| e.to_string())?;
         if state.package_kind == PackageKind::Msi {
-            let status = std::process::Command::new("msiexec.exe")
-                .arg("/i")
-                .arg(&cache)
-                .args(recovery_msi_args(paths))
-                .status()
-                .map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("msiexec exited with {status}"));
-            }
+            spawn_msi_recovery_helper(&cache, paths, &state, target)?;
+            return Err(RECOVERY_DEFERRED.to_owned());
         } else {
             install_exe_package(&cache, paths)?;
         }
@@ -855,6 +1040,9 @@ pub fn check_now_with_package(
         Ok(())
     })();
     if let Err(error) = result {
+        if error == RECOVERY_DEFERRED {
+            return Ok(());
+        }
         record_failure(&mut state, error.clone());
         let _ = write_state(&state_path, &state);
         return Err(error);
@@ -882,12 +1070,9 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
-    let config = parse_service_arguments(
-        _arguments
-            .into_iter()
-            .map(|argument| argument.to_string_lossy().into_owned()),
-    )
-    .map_err(|error| {
+    // SCM callback arguments are not the service ImagePath. Read the original
+    // process command line so edition/package parameters survive SCM dispatch.
+    let config = parse_service_arguments(std::env::args().skip(1)).map_err(|error| {
         windows_service::Error::Winapi(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     })?;
     let paths = AgentPaths::from_program_data(program_data, config.edition);
@@ -923,14 +1108,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
             .ok()
             .and_then(|bytes| serde_json::from_slice::<AgentState>(&bytes).ok())
             .unwrap_or_else(|| AgentState::new(config.edition, &paths));
-        state.package_kind = config.package_kind;
-        state.target_key = config
-            .edition
-            .target_key_for(config.package_kind)
-            .to_owned();
-        if let Some(path) = config.normal_install_path.as_deref() {
-            state.normal_install_path = path.to_string_lossy().into_owned();
-        }
+        apply_service_config(&mut state, &config, &paths);
         if state.normal_install_path.is_empty() {
             if let Some(path) = discover_normal_install_path() {
                 state.normal_install_path = path.to_string_lossy().into_owned();
@@ -1226,6 +1404,28 @@ mod tests {
         assert!(parse_service_arguments(["--edition", "enterprise"]).is_err());
         assert!(parse_service_arguments(["--package-kind", "zip"]).is_err());
         assert!(parse_service_arguments(["--normal-install-path"]).is_err());
+    }
+
+    #[test]
+    fn service_config_sync_keeps_edition_package_target_and_recovery_path_aligned() {
+        let paths = AgentPaths::from_program_data("/tmp/program-data", Edition::Sos);
+        let mut state = AgentState::new(Edition::Standard, &paths);
+        let config = ServiceConfig {
+            edition: Edition::Sos,
+            package_kind: PackageKind::Exe,
+            normal_install_path: Some(PathBuf::from(r"C:\Program Files\RustDesk")),
+        };
+
+        apply_service_config(&mut state, &config, &paths);
+
+        assert_eq!(state.edition, Edition::Sos);
+        assert_eq!(state.package_kind, PackageKind::Exe);
+        assert_eq!(state.target_key, "windows-x86_64-exe-sos");
+        assert_eq!(
+            state.recovery_install_path,
+            paths.client.to_string_lossy().as_ref()
+        );
+        assert_eq!(state.normal_install_path, r"C:\Program Files\RustDesk");
     }
 
     #[test]

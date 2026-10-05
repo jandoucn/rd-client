@@ -65,6 +65,34 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         ):
             self.assertIn(value, agent)
 
+    def test_exe_recovery_extracts_portable_payload_before_service_registration(self):
+        agent = self.read("src/management_agent.rs")
+        self.assertIn("--management-agent-extract-path=", self.read("libs/portable/src/main.rs"))
+        self.assertIn("portable EXE extraction failed", agent)
+        self.assertIn("portable EXE did not extract RustDesk.exe", agent)
+        self.assertIn("Move-Item -LiteralPath $tmp -Destination $dir", agent)
+        self.assertNotIn("Copy-Item -LiteralPath $src -Destination $dst -Force", agent)
+
+    def test_exe_install_registers_management_agent_for_compiled_edition(self):
+        source = self.read("src/platform/windows.rs")
+        self.assertIn("rustdesk-management-agent.exe", source)
+        self.assertIn("RustDeskManagementAgent", source)
+        self.assertIn("--package-kind exe", source)
+        self.assertIn('option_env!("RUSTDESK_SOS")', source)
+        self.assertIn("WaitForStatus('Stopped'", source)
+        self.assertIn("sc config RustDeskManagementAgent", source)
+        self.assertIn("sc start RustDeskManagementAgent", source)
+
+    def test_msi_recovery_uses_detached_helper_and_restores_agent(self):
+        source = self.read("src/management_agent.rs")
+        self.assertIn("spawn_msi_recovery_helper", source)
+        self.assertIn("--management-agent-recovery-helper", source)
+        self.assertIn("failed to stop management agent", source)
+        self.assertIn("failed to restart management agent", source)
+        self.assertIn("msiexec exited with exit code:", source)
+        self.assertIn('const RECOVERY_DEFERRED: &str', source)
+        self.assertIn('if error == RECOVERY_DEFERRED', source)
+
 
 if __name__ == "__main__":
     unittest.main()

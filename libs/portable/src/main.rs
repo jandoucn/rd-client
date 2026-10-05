@@ -269,6 +269,19 @@ fn execute(path: PathBuf, args: Vec<String>, _ui: bool) {
     }
 }
 
+fn management_agent_extract_path(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .position(|arg| arg == "--management-agent-extract-path")
+        .and_then(|index| args.get(index + 1))
+        .map(PathBuf::from)
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("--management-agent-extract-path="))
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
 fn main() -> Result<(), String> {
     let mut args = Vec::new();
     let mut arg_exe = Default::default();
@@ -289,6 +302,11 @@ fn main() -> Result<(), String> {
 
     let mut ui = false;
     let reader = BinaryReader::new()?;
+    if let Some(extract_dir) = management_agent_extract_path(&args) {
+        setup(reader, Some(extract_dir), true, &args, &mut ui)
+            .ok_or_else(|| "portable extraction failed".to_owned())?;
+        return Ok(());
+    }
     if let Some(exe) = setup(
         reader,
         None,
@@ -304,6 +322,31 @@ fn main() -> Result<(), String> {
         execute(exe, args, ui);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::management_agent_extract_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn management_agent_extract_path_accepts_equals_and_split_forms() {
+        assert_eq!(
+            management_agent_extract_path(&[
+                "--management-agent-extract-path".into(),
+                r"C:\ProgramData\RustDesk\Client\sos\RustDesk".into(),
+            ]),
+            Some(PathBuf::from(
+                r"C:\ProgramData\RustDesk\Client\sos\RustDesk"
+            ))
+        );
+        assert_eq!(
+            management_agent_extract_path(&[
+                r"--management-agent-extract-path=C:\tmp\rustdesk".into(),
+            ]),
+            Some(PathBuf::from(r"C:\tmp\rustdesk"))
+        );
+    }
 }
 
 #[cfg(windows)]

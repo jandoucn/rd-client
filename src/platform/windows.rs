@@ -1640,8 +1640,47 @@ fn get_after_install(
     netsh advfirewall firewall add rule name=\"{app_name} Service\" dir=out action=allow program=\"{exe}\" enable=yes
     netsh advfirewall firewall add rule name=\"{app_name} Service\" dir=in action=allow program=\"{exe}\" enable=yes
     {create_service}
+    {management_agent}
     reg add HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /f /v SoftwareSASGeneration /t REG_DWORD /d 1
-    ", create_service=get_create_service(&exe))
+    ",
+        create_service = get_create_service(&exe),
+        management_agent = get_management_agent_install_commands(&exe)
+    )
+}
+
+fn get_management_agent_install_commands(exe: &str) -> String {
+    let Some(install_dir) = Path::new(exe).parent() else {
+        return String::new();
+    };
+    let install_dir = escape_nested_cmd_ampersands(&install_dir.to_string_lossy());
+    let source = format!(r#"{}\rustdesk-management-agent.exe"#, install_dir);
+    let destination = r#"%PROGRAMDATA%\RustDesk\ManagementAgent\rustdesk-management-agent.exe"#;
+    let edition = if option_env!("RUSTDESK_SOS") == Some("1") {
+        "sos"
+    } else {
+        "standard"
+    };
+    format!(
+        r#"
+if exist "{source}" (
+    md "%PROGRAMDATA%\RustDesk\ManagementAgent" 2>nul
+    copy /Y "{source}" "{destination}" >nul
+    sc query RustDeskManagementAgent >nul 2>&1
+    if not errorlevel 1 (
+        sc stop RustDeskManagementAgent >nul 2>&1
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$s=Get-Service -Name 'RustDeskManagementAgent' -ErrorAction SilentlyContinue; if($s){{try{{$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}"
+        sc config RustDeskManagementAgent binpath= "\"{destination}\" --service --edition {edition} --package-kind exe --normal-install-path \"{install_dir}\"" start= auto DisplayName= "RustDesk Management Agent"
+    ) else (
+        sc create RustDeskManagementAgent binpath= "\"{destination}\" --service --edition {edition} --package-kind exe --normal-install-path \"{install_dir}\"" start= auto DisplayName= "RustDesk Management Agent"
+    )
+    sc start RustDeskManagementAgent
+)
+"#,
+        source = source,
+        destination = destination,
+        edition = edition,
+        install_dir = install_dir,
+    )
 }
 
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {

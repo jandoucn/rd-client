@@ -17,9 +17,20 @@ fn windows_main() {
         .first()
         .cloned()
         .unwrap_or_else(|| "--service".to_owned());
+    if command == "--management-agent-recovery-helper" {
+        if let Err(error) = management_agent::run_recovery_helper(&arguments) {
+            eprintln!("management agent recovery helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
-    let config = match management_agent::parse_service_arguments(arguments.iter().skip(1).cloned())
-    {
+    let config = match management_agent::parse_service_arguments(
+        arguments
+            .iter()
+            .skip(1)
+            .map(|argument| argument.to_string_lossy().into_owned()),
+    ) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("invalid management agent arguments: {error}");
