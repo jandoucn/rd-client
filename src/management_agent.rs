@@ -710,15 +710,17 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
     let install_dir = &paths.client;
     let installed_exe = install_dir.join("RustDesk.exe");
     let script = format!(
-        "$ErrorActionPreference='Stop'; $dir={dir}; $src={src}; $dst={dst}; "
-        "$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; "
-        "if($service){{Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue; "
-        "try{{$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}; "
-        "New-Item -ItemType Directory -Force -Path $dir | Out-Null; "
-        "Copy-Item -LiteralPath $src -Destination $dst -Force; "
-        "if(Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue){{sc.exe delete RustDesk | Out-Null; Start-Sleep -Seconds 2}}; "
-        "New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; "
-        "Start-Service -Name 'RustDesk'",
+        concat!(
+            "$ErrorActionPreference='Stop'; $dir={dir}; $src={src}; $dst={dst}; ",
+            "$service=Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue; ",
+            "if($service){{Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue; ",
+            "try{{$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}; ",
+            "New-Item -ItemType Directory -Force -Path $dir | Out-Null; ",
+            "Copy-Item -LiteralPath $src -Destination $dst -Force; ",
+            "if(Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue){{sc.exe delete RustDesk | Out-Null; Start-Sleep -Seconds 2}}; ",
+            "New-Service -Name 'RustDesk' -BinaryPathName ('\"'+$dst+'\" --service') -DisplayName 'RustDesk' -StartupType Automatic | Out-Null; ",
+            "Start-Service -Name 'RustDesk'"
+        ),
         dir = powershell_literal(install_dir),
         src = powershell_literal(package),
         dst = powershell_literal(&installed_exe),
