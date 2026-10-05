@@ -21,6 +21,7 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
 
     def test_management_agent_is_permanent_programdata_component(self):
         source = self.read("res/msi/Package/Components/ManagementAgent.wxs")
+        self.assertIn("<?include ../Includes.wxi?>", source)
         self.assertIn('DirectoryRef Id="App.Data.Folder"', source)
         self.assertIn('Directory Id="ManagementAgent.Folder" Name="ManagementAgent"', source)
         self.assertIn('Permanent="yes"', source)

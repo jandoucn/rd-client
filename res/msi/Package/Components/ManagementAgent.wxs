@@ -1,5 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 	<Fragment>
+		<?include ../Includes.wxi?>
+
 		<!-- This component is intentionally permanent. A normal RustDesk MSI
 		     removal must leave the recovery service available. -->
 		<DirectoryRef Id="App.Data.Folder">
