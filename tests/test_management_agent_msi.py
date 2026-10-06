@@ -78,7 +78,16 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         self.assertIn("Move-Item -LiteralPath $tmp -Destination $dir", agent)
         self.assertNotIn("Copy-Item -LiteralPath $src -Destination $dst -Force", agent)
         self.assertIn("exit $(if ($recovery_ok) {{0}} else {{1}})", agent)
+        self.assertIn("fn windows_powershell_exe", agent)
+        self.assertIn("WindowsPowerShell\\v1.0\\powershell.exe", agent)
+        self.assertIn("fn wait_for_exe_recovery_result", agent)
         self.assertNotIn("EXE service installer exited with {status}", agent)
+        exe_installer = agent.split("fn install_exe_package(", 1)[1].split(
+            "fn windows_powershell_exe(", 1
+        )[0]
+        self.assertNotIn("Command::new(\"powershell.exe\")", exe_installer)
+        self.assertIn("windows_powershell_exe()", exe_installer)
+        self.assertIn("wait_for_exe_recovery_result(", exe_installer)
         self.assertIn("$result={result}", agent)
         self.assertIn("result = powershell_literal(&result_path)", agent)
         self.assertNotIn("rustdesk-exe-recovery-'+$PID", agent)

@@ -946,20 +946,20 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
         result = powershell_literal(&result_path),
     );
     let _ = std::fs::remove_file(&result_path);
-    let status = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .status()
-        .map_err(|error| error.to_string())?;
-    let detail = std::fs::read_to_string(&result_path).unwrap_or_default();
+    let mut command = std::process::Command::new(windows_powershell_exe());
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    let detail = wait_for_exe_recovery_result(&result_path, status.success());
     let _ = std::fs::remove_file(&result_path);
-    if status.success() && detail.trim() == "ok" && recovery_client_present(paths) {
+    if detail.trim() == "ok" && recovery_client_present(paths) {
         Ok(())
     } else if detail.trim().is_empty() {
         Err(format!(
@@ -972,6 +972,28 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
             detail.trim()
         ))
     }
+}
+
+#[cfg(windows)]
+fn windows_powershell_exe() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+}
+
+#[cfg(windows)]
+fn wait_for_exe_recovery_result(path: &Path, exited_cleanly: bool) -> String {
+    let waits = if exited_cleanly { 1 } else { 90 };
+    for _ in 0..waits {
+        if let Ok(detail) = std::fs::read_to_string(path) {
+            if !detail.trim().is_empty() {
+                return detail;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 #[cfg(windows)]
