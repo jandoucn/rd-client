@@ -645,13 +645,21 @@ pub fn recovery_client_present(paths: &AgentPaths) -> bool {
     paths.client.join("RustDesk.exe").is_file()
 }
 
-pub fn normal_client_present(state: &AgentState) -> bool {
-    if state.normal_install_path.is_empty() {
-        return false;
+pub fn normal_client_exe(install_path: &str) -> Option<PathBuf> {
+    let mut path = install_path.trim();
+    while path.ends_with('\\') || path.ends_with('/') {
+        path = path.trim_end_matches(['\\', '/']).trim_end();
     }
-    Path::new(&state.normal_install_path)
-        .join("RustDesk.exe")
-        .is_file()
+    if path.is_empty() {
+        return None;
+    }
+    Some(Path::new(path).join("RustDesk.exe"))
+}
+
+pub fn normal_client_present(state: &AgentState) -> bool {
+    normal_client_exe(&state.normal_install_path)
+        .map(|path| path.is_file())
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]
@@ -1493,6 +1501,17 @@ mod tests {
             paths.client.to_string_lossy().as_ref()
         );
         assert_eq!(state.normal_install_path, r"C:\Program Files\RustDesk");
+    }
+
+    #[test]
+    fn trailing_separator_stays_inside_normal_install_dir() {
+        let exe = normal_client_exe(r"C:\Program Files\RustDesk\").unwrap();
+        assert_eq!(exe, PathBuf::from(r"C:\Program Files\RustDesk\RustDesk.exe"));
+        assert_eq!(
+            normal_client_exe(r"C:\Program Files\RustDesk\\\").unwrap(),
+            PathBuf::from(r"C:\Program Files\RustDesk\RustDesk.exe")
+        );
+        assert!(normal_client_exe("  ").is_none());
     }
 
     #[test]
