@@ -34,6 +34,8 @@ class ManagementAgentMsiContractTests(unittest.TestCase):
         self.assertIn('System="yes"', source)
         self.assertIn('--edition $(var.Edition)', source)
         self.assertIn('--normal-install-path', source)
+        self.assertIn('[ProgramFiles6432Folder]RustDesk', source)
+        self.assertNotIn('[INSTALLFOLDER_INNER]', source)
         self.assertIn('"/qn".into()', self.read("src/management_agent.rs"))
 
     def test_management_agent_component_is_in_main_feature(self):

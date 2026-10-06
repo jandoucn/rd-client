@@ -282,6 +282,11 @@ where
                 let value = arguments
                     .get(index + 1)
                     .ok_or_else(|| "--normal-install-path requires a value".to_owned())?;
+                let value = value.trim().trim_matches('"').trim();
+                let mut value = value.trim_end_matches(['\\', '/']);
+                while value.ends_with('\\') || value.ends_with('/') {
+                    value = value.trim_end_matches(['\\', '/']);
+                }
                 if value.is_empty() {
                     return Err("--normal-install-path must not be empty".to_owned());
                 }
@@ -1479,6 +1484,15 @@ mod tests {
         assert!(parse_service_arguments(["--edition", "enterprise"]).is_err());
         assert!(parse_service_arguments(["--package-kind", "zip"]).is_err());
         assert!(parse_service_arguments(["--normal-install-path"]).is_err());
+        let quoted = parse_service_arguments([
+            "--normal-install-path",
+            r#"C:\Program Files\RustDesk"\"#,
+        ])
+        .expect("quoted trailing separator should parse");
+        assert_eq!(
+            quoted.normal_install_path,
+            Some(PathBuf::from(r"C:\Program Files\RustDesk"))
+        );
     }
 
     #[test]

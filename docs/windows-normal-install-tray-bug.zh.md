@@ -16,10 +16,10 @@
 
 ## 原因
 
-`normal_client_present` 直接把 `normal_install_path` 和 `RustDesk.exe` 拼起来。路径末尾有反斜杠时，检查路径变成 `C:\Program Files\RustDesk\\RustDesk.exe`。文件实际存在，但判断结果是不存在。
+MSI 服务参数使用了 `[INSTALLFOLDER_INNER]`。这个目录值末尾自带反斜杠，再包进引号后，Windows 命令行把结尾的 `\"` 当成转义引号。解析出来的 `normal_install_path` 最后一个字符是 `"`，不是目录分隔符。
 
-管理代理因此在普通安装还在时下载并重装 MSI。重装失败码是 `1603/1316`，过程中会停掉 `RustDesk` 服务和窗口。服务停着时，双击不会拉起 `--tray`。
+用这个带引号的路径去找 `RustDesk.exe` 必然失败。普通安装还在，管理代理也会下载并重装 MSI。重装失败码是 `1603/1316`，过程中会停掉 `RustDesk` 服务和窗口。服务停着时，双击不会拉起 `--tray`。
 
 ## 修复
 
-判断正常安装前去掉路径首尾空白和末尾斜杠。MSI 服务参数里的末尾反斜杠不能再让正常客户端被当成缺失。
+MSI 服务参数改为 `[ProgramFiles6432Folder]RustDesk`，不再使用末尾带反斜杠的目录值。解析服务参数时去掉首尾引号和末尾斜杠，避免已经写入服务配置的错误引号继续触发重装。

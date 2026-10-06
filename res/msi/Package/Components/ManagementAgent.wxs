@@ -24,7 +24,7 @@
 						  Account="LocalSystem"
 						  ErrorControl="normal"
 						  Vital="yes"
-						  Arguments="--service --edition $(var.Edition) --package-kind msi --normal-install-path &quot;[INSTALLFOLDER_INNER]&quot;" />
+						  Arguments="--service --edition $(var.Edition) --package-kind msi --normal-install-path &quot;[ProgramFiles6432Folder]RustDesk&quot;" />
 					<ServiceControl Id="ManagementAgent.ServiceControl"
 							 Name="RustDeskManagementAgent"
 							 Start="install"
