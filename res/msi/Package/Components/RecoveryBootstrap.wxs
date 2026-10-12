@@ -1,0 +1,23 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+	<Fragment>
+		<?include ../Includes.wxi?>
+		<CustomAction Id="InspectBootstrapUpgrade" DllEntry="InspectBootstrapUpgrade" Execute="immediate" Return="check" BinaryRef="Custom_Actions_Dll" />
+		<CustomAction Id="SetBootstrapEdition" Property="RdBootstrapEdition" Value="$(var.Edition)" />
+		<CustomAction Id="StopMainForBootstrapRollback" DllEntry="StopMainForBootstrapRollback" Execute="rollback" Impersonate="no" Return="check" BinaryRef="Custom_Actions_Dll" />
+		<InstallExecuteSequence>
+			<Custom Action="SetBootstrapEdition" Before="InspectBootstrapUpgrade" Condition="NOT REMOVE AND NOT RUSTDESK_AGENT_RECOVERY" />
+			<Custom Action="InspectBootstrapUpgrade" Before="CostFinalize" Condition="NOT REMOVE AND NOT RUSTDESK_AGENT_RECOVERY" />
+			<Custom Action="StopMainForBootstrapRollback" Before="CreateStartService" Condition="RdBootstrapUpgradeReady = 1 AND RdBootstrapMainWasRunning = 1 AND NOT REMOVE AND NOT RUSTDESK_AGENT_RECOVERY" />
+		</InstallExecuteSequence>
+		<DirectoryRef Id="App.Data.Folder">
+			<Directory Id="RecoveryBootstrap.Folder" Name="RecoveryBootstrap">
+				<!-- Only an existing verified directory is adopted. Initial creation
+				     and task registration remain owned by the gated agent startup. -->
+				<Component Id="RecoveryBootstrap.Component" Guid="CA92C1B4-7581-44CB-A6B3-36414C9DE495" Permanent="yes" Condition="RdBootstrapUpgradeReady = 1 AND NOT RUSTDESK_AGENT_RECOVERY">
+					<File Id="RecoveryBootstrap.Exe" Name="rustdesk-recovery-bootstrap.exe" Source="$(var.BuildDir)\rustdesk-management-agent.exe" KeyPath="yes" Checksum="yes" />
+					<File Id="RecoveryBootstrap.Manifest" Name="bootstrap.json" Source="Resources\bootstrap.json" CompanionFile="RecoveryBootstrap.Exe" />
+				</Component>
+			</Directory>
+		</DirectoryRef>
+	</Fragment>
+</Wix>

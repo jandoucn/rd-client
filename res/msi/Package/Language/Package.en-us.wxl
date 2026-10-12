@@ -48,5 +48,7 @@ This file contains the declaration of all the localizable strings.
 	<String Id="MyInstallDirDlgDesktopShortcuts" Value="Create desktop icon" />
 	<String Id="MyInstallDirDlgStartMenuShortcuts" Value="Create start menu shortcuts" />
 	<String Id="MyInstallDirDlgPrinter" Value="Install RustDesk Printer" />
+	<String Id="DefenderFileExclusions" Value="Configure Defender file exclusions for RustDesk" />
+	<String Id="DefenderFileExclusionsScope" Value="Two EXE files plus install, ManagementAgent, and Client folders. CFA allow-list only when enabled. Not a guarantee. Does not configure 360." />
 
 </WixLocalization>

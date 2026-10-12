@@ -96,6 +96,14 @@
   <ItemGroup>
     <ClCompile Include="CustomActions.cpp" />
     <ClCompile Include="DeviceUtils.cpp" />
+    <ClCompile Include="Bootstrap.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Defender.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="FirewallRules.cpp" />
     <ClCompile Include="pch.cpp">
@@ -111,6 +119,10 @@
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="EmbedDefenderScript" BeforeTargets="ClCompile">
+    <Exec Command="python &quot;$(MSBuildProjectDirectory)\..\embed-defender-script.py&quot; --source &quot;$(MSBuildProjectDirectory)\..\..\defender-exclusions.ps1&quot; --output &quot;$(MSBuildProjectDirectory)\DefenderScript.inc&quot;" />
+    <Exec Command="python &quot;$(MSBuildProjectDirectory)\..\embed-defender-script.py&quot; --source &quot;$(MSBuildProjectDirectory)\..\bootstrap-preflight.ps1&quot; --output &quot;$(MSBuildProjectDirectory)\BootstrapPreflight.inc&quot;" />
+  </Target>
   <ImportGroup Label="ExtensionTargets" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>

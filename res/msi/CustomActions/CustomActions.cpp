@@ -427,6 +427,8 @@ UINT __stdcall AddFirewallRules(
     WCHAR exeNameNoExt[500] = { 0, };
     LPWSTR pwz = NULL;
     LPWSTR pwzData = NULL;
+    LPWSTR extra = NULL;
+    WCHAR agentRuleName[] = L"RustDesk Management Agent";
     size_t szNameLen = 0;
 
     hr = WcaInitialize(hInstall, "AddFirewallRules");
@@ -439,6 +441,8 @@ UINT __stdcall AddFirewallRules(
     hr = WcaReadStringFromCaData(&pwz, &exeFile);
     ExitOnFailure(hr, "failed to read database key from custom action data: %ls", pwz);
     WcaLog(LOGMSG_STANDARD, "Try add firewall exceptions for file : %ls", exeFile);
+    extra = wcschr(exeFile, L'|');
+    if (extra) *extra++ = L'\0';
 
     exeName = PathFindFileNameW(exeFile + 1);
     hr = StringCchPrintfW(exeNameNoExt, 500, exeName);
@@ -457,6 +461,9 @@ UINT __stdcall AddFirewallRules(
     //}
 
     AddFirewallRule(exeFile[0] == L'1', exeNameNoExt, exeFile + 1);
+    if (extra && extra[0]) {
+        AddFirewallRule(exeFile[0] == L'1', agentRuleName, extra);
+    }
 
 LExit:
     if (pwzData) {

@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/desktop/widgets/defender_install_option.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
@@ -66,6 +67,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
   final RxBool startmenu = true.obs;
   final RxBool desktopicon = true.obs;
   final RxBool printer = false.obs;
+  final RxBool defender = false.obs;
   final RxBool showProgress = false.obs;
   final RxBool btnEnabled = true.obs;
 
@@ -81,6 +83,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
     startmenu.value = installOptions['STARTMENUSHORTCUTS'] != '0';
     desktopicon.value = installOptions['DESKTOPSHORTCUTS'] != '0';
     printer.value = installOptions['PRINTER'] == '1';
+    defender.value = defenderConsentFromOptions(installOptions);
   }
 
   @override
@@ -166,6 +169,12 @@ class _InstallPageBodyState extends State<_InstallPageBody>
               Option(desktopicon, label: 'Create desktop icon')
                   .marginOnly(bottom: 7),
               Option(printer, label: 'Install {$appName} Printer'),
+              if (isWindows)
+                Obx(() => DefenderInstallOption(
+                  selected: defender.value,
+                  enabled: btnEnabled.value,
+                  onChanged: (value) => defender.value = value,
+                )),
               Container(
                   padding: EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -258,6 +267,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
       if (startmenu.value) args += ' startmenu';
       if (desktopicon.value) args += ' desktopicon';
       if (printer.value) args += ' printer';
+      if (isWindows) args += defenderInstallToken(defender.value);
       bind.installInstallMe(options: args, path: controller.text);
     }
 

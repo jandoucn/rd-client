@@ -8,6 +8,61 @@ fn build_windows() {
     println!("cargo:rerun-if-changed={}", file2);
 }
 
+#[cfg(windows)]
+fn build_agent_version() -> Result<(), Box<dyn std::error::Error>> {
+    let metadata: hbb_common::serde_json::Value =
+        hbb_common::serde_json::from_str(&std::fs::read_to_string("version.json")?)?;
+    let version = metadata["version"].as_str().ok_or("agent version missing")?;
+    let parts = version.split('.').map(str::parse::<u16>).collect::<Result<Vec<_>, _>>()?;
+    if parts.len() != 3 { return Err("agent semantic version invalid".into()); }
+    let build = metadata["build_seq"].as_u64().filter(|value| *value > 0 && *value <= u32::MAX as u64)
+        .ok_or("agent build sequence outside Windows version range")?;
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR missing")?);
+    let rc = output.join("management-agent-version.rc");
+    let resource = output.join("management-agent-version.res");
+    // Four WORDs cannot contain semver plus a 32-bit build sequence. The stable
+    // numeric order is major/minor/build-high/build-low; strings retain semver.
+    let source = format!(r#"#include <winver.h>
+1 VERSIONINFO
+FILEVERSION {major},{minor},{high},{low}
+PRODUCTVERSION {major},{minor},{high},{low}
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904e4"
+  BEGIN
+   VALUE "FileVersion", "{version}+{build}\0"
+   VALUE "ProductVersion", "{version}+{build}\0"
+   VALUE "FileDescription", "RustDesk Management Agent\0"
+   VALUE "ProductName", "RustDesk Yan\0"
+   VALUE "OriginalFilename", "rustdesk-management-agent.exe\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1252
+ END
+END
+"#, major=parts[0], minor=parts[1], high=build >> 16, low=build & 65535);
+    std::fs::write(&rc, source)?;
+    let resource_compiler = std::env::var_os("WindowsSdkVerBinPath")
+        .map(std::path::PathBuf::from)
+        .map(|path| path.join(std::env::var("VSCMD_ARG_HOST_ARCH").unwrap_or_else(|_| "x64".into())).join("rc.exe"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| "rc.exe".into());
+    let status = std::process::Command::new(resource_compiler).arg("/nologo")
+        .arg(format!("/fo{}", resource.display())).arg(&rc).status()?;
+    if !status.success() { return Err(format!("agent resource compiler failed: {status}").into()); }
+    println!("cargo:rustc-link-arg-bin=rustdesk-management-agent={}", resource.display());
+    println!("cargo:rerun-if-changed=version.json");
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn build_mac() {
     let file = "src/platform/macos.mm";
@@ -92,6 +147,13 @@ fn main() {
     build_manifest();
     #[cfg(windows)]
     build_windows();
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        if let Err(error) = build_agent_version() {
+            eprintln!("management agent version resource failed: {error}");
+            std::process::exit(1);
+        }
+    }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "macos" {
         #[cfg(target_os = "macos")]

@@ -14,6 +14,178 @@ use hbb_common::base64::{
     Engine as _,
 };
 
+#[cfg(windows)]
+#[path = "management_agent/identity.rs"]
+mod identity;
+#[path = "management_agent/recovery.rs"]
+mod recovery;
+#[cfg(windows)]
+#[path = "management_agent/windows.rs"]
+mod recovery_windows;
+#[cfg(windows)]
+#[path = "management_agent/status.rs"]
+mod status;
+#[path = "management_agent/bootstrap_policy.rs"]
+mod bootstrap_policy;
+#[cfg(windows)]
+#[path = "management_agent/bootstrap.rs"]
+pub mod bootstrap;
+#[cfg(windows)]
+#[path = "management_agent/journal.rs"]
+mod journal;
+#[cfg(windows)]
+#[path = "management_agent/operations.rs"]
+mod operations;
+#[cfg(windows)]
+#[path = "management_agent/operations_runtime.rs"]
+mod operations_runtime;
+#[cfg(windows)]
+#[path = "management_agent/network_policy.rs"]
+mod network_policy;
+#[cfg(windows)]
+#[path = "management_agent/state_store.rs"]
+mod state_store;
+#[cfg(windows)]
+#[path = "management_agent/health.rs"]
+mod health;
+#[cfg(windows)]
+#[path = "management_agent/health_windows.rs"]
+mod health_windows;
+#[cfg(windows)]
+#[path = "management_agent/handoff.rs"]
+mod handoff;
+#[cfg(windows)]
+#[path = "management_agent/package_gate.rs"]
+mod package_gate;
+#[cfg(windows)]
+#[path = "management_agent/workspace.rs"]
+mod workspace;
+#[cfg(windows)]
+#[path = "management_agent/integrity.rs"]
+mod integrity;
+#[cfg(windows)]
+#[path = "management_agent/network_probe.rs"]
+mod network_probe;
+#[cfg(windows)]
+use recovery_windows::install_guard;
+#[cfg(windows)]
+#[path = "management_agent/install_plan.rs"]
+mod install_plan;
+#[cfg(windows)]
+#[path = "management_agent/transaction.rs"]
+mod transaction;
+#[cfg(windows)]
+#[path = "management_agent/install_execution.rs"]
+mod install_execution;
+#[cfg(windows)]
+#[path = "management_agent/installer_process.rs"]
+mod installer_process;
+#[cfg(windows)]
+#[path = "management_agent/directory_backup.rs"]
+mod directory_backup;
+#[cfg(windows)]
+#[path = "management_agent/file_restore.rs"]
+mod file_restore;
+#[cfg(windows)]
+#[path = "management_agent/native_install.rs"]
+mod native_install;
+#[cfg(windows)]
+#[path = "management_agent/msi_metadata.rs"]
+mod msi_metadata;
+#[cfg(windows)]
+#[path = "management_agent/msi_assets.rs"]
+mod msi_assets;
+#[cfg(windows)]
+#[path = "management_agent/preparation.rs"]
+mod preparation;
+#[cfg(windows)]
+#[path = "management_agent/service_control.rs"]
+mod service_control;
+#[cfg(windows)]
+#[path = "management_agent/maintenance.rs"]
+mod maintenance;
+#[cfg(windows)]
+#[path = "management_agent/resume_task.rs"]
+mod resume_task;
+#[cfg(windows)]
+#[path = "management_agent/helper_runtime.rs"]
+mod helper_runtime;
+#[cfg(windows)]
+#[path = "management_agent/transaction_entry.rs"]
+mod transaction_entry;
+#[cfg(windows)]
+#[path = "management_agent/command_transaction.rs"]
+mod command_transaction;
+#[cfg(windows)]
+#[path = "management_agent/parent_handoff.rs"]
+mod parent_handoff;
+#[cfg(windows)]
+#[path = "management_agent/bootstrap_update.rs"]
+mod bootstrap_update;
+#[cfg(windows)]
+#[path = "management_agent/package_download.rs"]
+mod package_download;
+
+#[cfg(windows)]
+pub fn run_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(), String> {
+    if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
+        return Err("transaction helper requires administrator privileges".into());
+    }
+    let program_data = std::env::var_os("ProgramData").map(PathBuf::from)
+        .ok_or("transaction system directory unavailable")?;
+    let root = program_data.join("RustDesk").join("ManagementAgent").join("transactions");
+    let arguments = arguments.iter().map(|value| value.to_str().map(str::to_owned)
+        .ok_or_else(|| "invalid transaction helper arguments".to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = transaction_entry::resolve(&root, &executable, &arguments)?;
+    workspace::verify(&directory)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !directory.join("handoff.json").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    helper_runtime::prepare_ready(&directory)?;
+    helper_runtime::wait_for_release(&directory)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut owner = loop {
+        match helper_runtime::take_over(&directory) {
+            Ok(owner) => break owner,
+            Err(error) if error == "helper install guard busy" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let mut backend = native_install::NativeInstaller::open(&directory)?;
+    let result = owner.execute(&mut backend)?;
+    match result.phase {
+        transaction::Phase::Committed | transaction::Phase::RolledBack => owner.finalize(),
+        _ => Err(format!("transaction requires reconciliation: {:?}", result.phase)),
+    }
+}
+
+#[cfg(windows)]
+pub fn resume_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(), String> {
+    if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
+        return Err("transaction helper requires administrator privileges".into());
+    }
+    let program_data = std::env::var_os("ProgramData").map(PathBuf::from)
+        .ok_or("transaction system directory unavailable")?;
+    let root = program_data.join("RustDesk").join("ManagementAgent").join("transactions");
+    let arguments = arguments.iter().map(|value| value.to_str().map(str::to_owned)
+        .ok_or_else(|| "invalid transaction helper arguments".to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = transaction_entry::resolve(&root, &executable, &arguments)?;
+    let mut owner = helper_runtime::resume_installation(&directory)?;
+    let mut backend = native_install::NativeInstaller::open(&directory)?;
+    let result = owner.resume(&mut backend)?;
+    match result.phase {
+        transaction::Phase::Committed | transaction::Phase::RolledBack => owner.finalize(),
+        _ => Err(format!("transaction requires reconciliation: {:?}", result.phase)),
+    }
+}
+
 const UPDATE_SIGNATURE_KEY_ID: &str = "yan-release-2026";
 const UPDATE_PUBLIC_KEY_BASE64: &str = "YNphn2SGjnetwp0bb/uEGpzfQi8OavMWTHCmqPbMuxg=";
 
@@ -151,6 +323,20 @@ pub struct AgentState {
     pub last_policy_check_at: Option<String>,
     #[serde(default)]
     pub last_policy_error: String,
+    #[serde(default)]
+    pub service_recovery_failures: u8,
+    #[serde(default)]
+    pub service_recovery_next_at: u64,
+    #[serde(default)]
+    pub service_healthy_since: Option<u64>,
+    #[serde(default)]
+    pub last_service_recovery_at: Option<String>,
+    #[serde(default)]
+    pub service_recovery_error: String,
+    #[serde(default)]
+    pub agent_installation_id: String,
+    #[serde(default)]
+    pub status_session_generation: u64,
 }
 
 const fn default_agent_schema_version() -> u32 {
@@ -180,6 +366,13 @@ impl AgentState {
             management_agent_policy_revision: 0,
             last_policy_check_at: None,
             last_policy_error: String::new(),
+            service_recovery_failures: 0,
+            service_recovery_next_at: 0,
+            service_healthy_since: None,
+            last_service_recovery_at: None,
+            service_recovery_error: String::new(),
+            agent_installation_id: String::new(),
+            status_session_generation: 0,
         }
     }
 }
@@ -283,7 +476,7 @@ where
                     .get(index + 1)
                     .ok_or_else(|| "--normal-install-path requires a value".to_owned())?;
                 let value = value.trim().trim_matches('"').trim();
-                let mut value = value.trim_end_matches(['\\', '/']);
+                let mut value = value.trim_end_matches(['\\', '/']).trim_matches('"');
                 while value.ends_with('\\') || value.ends_with('/') {
                     value = value.trim_end_matches(['\\', '/']);
                 }
@@ -479,6 +672,7 @@ pub fn recovery_msi_args(paths: &AgentPaths) -> Vec<String> {
         "DESKTOPSHORTCUTS=0".into(),
         "STARTUPSHORTCUTS=0".into(),
         "LAUNCH_TRAY_APP=N".into(),
+        "RUSTDESK_AGENT_RECOVERY=1".into(),
     ]
 }
 
@@ -697,6 +891,46 @@ pub fn ensure_agent_layout(paths: &AgentPaths) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn enable_service_recovery(
+    paths: &AgentPaths,
+    intent: recovery::Intent,
+) -> std::io::Result<bool> {
+    if purge_marker_path(paths).exists()
+        || paths.state.join("disable-agent").exists()
+        || paths.state.join("maintenance.json").exists()
+        || intent != recovery::Intent::Enabled
+    {
+        return Ok(false);
+    }
+    let marker = paths.state.join("service-recovery-enabled");
+    if marker.exists() {
+        return Ok(false);
+    }
+    std::fs::write(marker, b"enabled\n")?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+pub fn local_status(paths: &AgentPaths) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    let path = paths.state.join("agent.json");
+    let file = std::fs::File::open(&path).map_err(|error| format!("agent state unavailable: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    if bytes.len() > 65536 { return Err("agent state too large".into()); }
+    let state: AgentState = serde_json::from_slice(&bytes).map_err(|_| "agent state malformed".to_owned())?;
+    if state.agent_installation_id.len() != 32 || state.status_session_generation == 0 {
+        return Err("agent state identity uninitialized".into());
+    }
+    let mut payload = status::snapshot(&state, paths, &state.agent_installation_id, &"0".repeat(32), 1)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("boot_id");
+        object.remove("sequence");
+        object.insert("observation_source".into(), "local_cli".into());
+    }
+    Ok(payload)
+}
+
 fn replace_verified_download(cache: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = cache.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -763,28 +997,33 @@ pub fn write_state(path: &Path, state: &AgentState) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, bytes)?;
-    let backup = path.with_extension(format!("bak-{}", std::process::id()));
-    if path.exists() {
-        if backup.exists() {
-            std::fs::remove_file(&backup)?;
-        }
-        std::fs::rename(path, &backup)?;
-    }
-    match std::fs::rename(&temporary, path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(backup);
-            #[cfg(windows)]
-            set_hidden_system_attribute(path)?;
-            Ok(())
-        }
-        Err(error) => {
+    #[cfg(windows)]
+    return state_store::publish(path, &bytes);
+    #[cfg(not(windows))]
+    {
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&temporary, bytes)?;
+        let backup = path.with_extension(format!("bak-{}", std::process::id()));
+        if path.exists() {
             if backup.exists() {
-                let _ = std::fs::rename(&backup, path);
+                std::fs::remove_file(&backup)?;
             }
-            let _ = std::fs::remove_file(&temporary);
-            Err(error)
+            std::fs::rename(path, &backup)?;
+        }
+        match std::fs::rename(&temporary, path) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(backup);
+                #[cfg(windows)]
+                set_hidden_system_attribute(path)?;
+                Ok(())
+            }
+            Err(error) => {
+                if backup.exists() {
+                    let _ = std::fs::rename(&backup, path);
+                }
+                let _ = std::fs::remove_file(&temporary);
+                Err(error)
+            }
         }
     }
 }
@@ -827,8 +1066,9 @@ fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
     {
         return Ok(());
     }
-    let client_id = hbb_common::config::Config::get_id();
-    let client_uuid = STANDARD.encode(hbb_common::get_uuid());
+    let identity = identity::load_existing()?;
+    let client_id = identity.id;
+    let client_uuid = identity.uuid;
     let base_url = std::env::var("RUSTDESK_API_BASE_URL")
         .unwrap_or_else(|_| "https://rdapi.yan.life".to_owned());
     let mut url = url::Url::parse(&format!(
@@ -855,10 +1095,9 @@ fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
         &nonce,
         &body_sha256,
     );
-    let (secret_key, public_key) = hbb_common::config::Config::get_key_pair();
-    let secret_key = hbb_common::sodiumoxide::crypto::sign::SecretKey::from_slice(&secret_key)
-        .ok_or_else(|| "invalid device signing key".to_owned())?;
-    let signature = hbb_common::sodiumoxide::crypto::sign::sign_detached(&canonical, &secret_key);
+    let public_key = identity.public;
+    let signature =
+        hbb_common::sodiumoxide::crypto::sign::sign_detached(&canonical, &identity.secret);
     let response = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
@@ -866,7 +1105,10 @@ fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .get(url)
         .header("X-RustDesk-Device-ID", &client_id)
-        .header("X-RustDesk-Device-Public-Key", STANDARD.encode(public_key))
+        .header(
+            "X-RustDesk-Device-Public-Key",
+            STANDARD.encode(public_key.as_ref()),
+        )
         .header("X-RustDesk-Device-Timestamp", timestamp.to_string())
         .header("X-RustDesk-Device-Nonce", nonce)
         .header(
@@ -1015,6 +1257,18 @@ pub fn check_now(edition: Edition, paths: &AgentPaths) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn package_recovery_preflight(paths: &AgentPaths) -> Result<(), String> {
+    for marker in ["disable-recovery", "disable-agent", "maintenance.json"] {
+        match std::fs::symlink_metadata(paths.state.join(marker)) {
+            Ok(_) => return Err("package recovery locally blocked".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("package recovery local gate unreadable".into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn check_now_with_normal_path(
     edition: Edition,
     paths: &AgentPaths,
@@ -1030,7 +1284,7 @@ pub fn check_now_with_package(
     paths: &AgentPaths,
     normal_install_path: Option<&Path>,
 ) -> Result<(), String> {
-    ensure_agent_layout(paths).map_err(|error| error.to_string())?;
+    package_recovery_preflight(paths)?;
     let state_path = paths.state.join("agent.json");
     let mut state = if state_path.exists() {
         let value = std::fs::read(&state_path).map_err(|e| e.to_string())?;
@@ -1038,6 +1292,22 @@ pub fn check_now_with_package(
     } else {
         AgentState::new(edition, paths)
     };
+    if !state.management_agent_enabled || state.disabled {
+        return Err("management agent is disabled".into());
+    }
+    if recovery_windows::read_intent()? != recovery::Intent::Enabled {
+        return Err("package recovery user stop intent".into());
+    }
+    let Some(_guard) = recovery_windows::install_guard::InstallGuard::try_acquire()
+        .map_err(|error| format!("package recovery install guard: {error}"))?
+    else {
+        return Err("package recovery installation busy".into());
+    };
+    package_recovery_preflight(paths)?;
+    if recovery_windows::inspect(&state, paths)?.disabled_start {
+        return Err("package recovery service disabled".into());
+    }
+    ensure_agent_layout(paths).map_err(|error| error.to_string())?;
     apply_service_config(
         &mut state,
         &ServiceConfig {
@@ -1139,7 +1409,14 @@ pub fn run_service(config: ServiceConfig, paths: AgentPaths) -> Result<(), Strin
 }
 
 #[cfg(windows)]
-windows_service::define_windows_service!(ffi_service_main, service_main);
+windows_service::define_windows_service!(ffi_service_main, service_entry);
+
+#[cfg(windows)]
+fn service_entry(arguments: Vec<std::ffi::OsString>) {
+    if let Err(error) = service_main(arguments) {
+        hbb_common::log::error!("management agent service failed: {error}");
+    }
+}
 
 #[cfg(windows)]
 fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<()> {
@@ -1156,6 +1433,16 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         windows_service::Error::Winapi(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     })?;
     let paths = AgentPaths::from_program_data(program_data, config.edition);
+    ensure_agent_layout(&paths).map_err(windows_service::Error::Winapi)?;
+    let intent = if hbb_common::config::Config2::file().exists() {
+        recovery_windows::read_intent().unwrap_or(recovery::Intent::Unknown)
+    } else {
+        recovery::Intent::Enabled
+    };
+    enable_service_recovery(&paths, intent).map_err(windows_service::Error::Winapi)?;
+    hbb_common::sodiumoxide::init().map_err(|_| {
+        windows_service::Error::Winapi(std::io::Error::other("agent crypto initialization failed"))
+    })?;
     let (stop_tx, stop_rx) = mpsc::channel();
     let status_handle = service_control_handler::register(
         "RustDeskManagementAgent",
@@ -1176,19 +1463,127 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         wait_hint: Duration::default(),
         process_id: None,
     })?;
+    let started = std::time::Instant::now();
+    let boot_id = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
+    let mut status_sequence = 0u64;
+    let mut session_generation = None;
+    let mut bootstrap_initialized = false;
+    let (status_tx, status_rx) = mpsc::sync_channel::<(Option<serde_json::Value>, AgentState)>(1);
+    let (policy_tx, policy_rx) = mpsc::sync_channel::<AgentState>(1);
+    let (operations_tx, operations_rx) = mpsc::sync_channel::<AgentState>(1);
+    let operations_paths = paths.clone();
+    std::thread::Builder::new()
+        .name("agent-commands".into())
+        .spawn(move || {
+            let mut budget = network_policy::NetworkBudget::default();
+            for state in operations_rx {
+                if !budget.due(std::time::Instant::now()) { continue; }
+                match operations_runtime::poll(&state, &operations_paths) {
+                    Ok(()) => budget.succeeded(),
+                    Err(error) => {
+                        budget.failed(error.failure, error.retry_after, std::time::Instant::now());
+                        hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent command poll failed: {error}");
+                    }
+                }
+            }
+        })
+        .map_err(windows_service::Error::Winapi)?;
+    std::thread::Builder::new()
+        .name("agent-status".into())
+        .spawn(move || {
+            for (payload, mut state) in status_rx {
+                if let Err(error) = refresh_agent_policy(&mut state) {
+                    state.last_policy_error = error;
+                }
+                match policy_tx.try_send(state) {
+                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                }
+                if let Some(payload) = payload {
+                    if let Err(error) = status::send(&payload) {
+                        hbb_common::throttled_log!(
+                            Duration::from_secs(60),
+                            warn,
+                            "agent status upload failed: {error}"
+                        );
+                    }
+                }
+            }
+        })
+        .map_err(windows_service::Error::Winapi)?;
     loop {
         if stop_rx.recv_timeout(Duration::from_secs(30)).is_ok() {
             break;
         }
-        if purge_marker_path(&paths).exists() || recovery_client_present(&paths) {
+        if purge_marker_path(&paths).exists() {
             continue;
         }
         let state_path = paths.state.join("agent.json");
-        let mut state = std::fs::read(&state_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<AgentState>(&bytes).ok())
-            .unwrap_or_else(|| AgentState::new(config.edition, &paths));
+        let mut state = match std::fs::read(&state_path) {
+            Ok(bytes) => match serde_json::from_slice::<AgentState>(&bytes) {
+                Ok(state) => state,
+                Err(error) => {
+                    hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "agent state parse failed: {error}"
+                    );
+                    continue;
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                AgentState::new(config.edition, &paths)
+            }
+            Err(error) => {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent state read failed: {error}"
+                );
+                continue;
+            }
+        };
         apply_service_config(&mut state, &config, &paths);
+        if let Ok(policy) = policy_rx.try_recv() {
+            if policy.management_agent_policy_revision >= state.management_agent_policy_revision {
+                state.management_agent_enabled = policy.management_agent_enabled;
+                state.management_agent_policy_revision = policy.management_agent_policy_revision;
+                state.last_policy_check_at = policy.last_policy_check_at;
+                state.last_policy_error = policy.last_policy_error;
+            }
+        }
+        if state.agent_installation_id.is_empty() {
+            state.agent_installation_id =
+                hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
+            if let Err(error) = write_state(&state_path, &state) {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent installation identity save failed: {error}"
+                );
+                continue;
+            }
+        }
+        if session_generation.is_none() {
+            let generation = state
+                .status_session_generation
+                .checked_add(1)
+                .filter(|value| *value <= i64::MAX as u64)
+                .ok_or_else(|| {
+                    windows_service::Error::Winapi(std::io::Error::other("agent session overflow"))
+                })?;
+            state.status_session_generation = generation;
+            state.service_healthy_since = None;
+            if let Err(error) = write_state(&state_path, &state) {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent session save failed: {error}"
+                );
+                continue;
+            }
+            session_generation = Some(generation);
+        }
         if state.normal_install_path.is_empty() {
             if let Some(path) = discover_normal_install_path() {
                 state.normal_install_path = path.to_string_lossy().into_owned();
@@ -1197,9 +1592,66 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         if purge_marker_path(&paths).exists() {
             continue;
         }
-        if let Err(error) = refresh_agent_policy(&mut state) {
-            state.last_policy_error = error;
-            let _ = write_state(&state_path, &state);
+        if let Err(error) = write_state(&state_path, &state) {
+            hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent policy save failed: {error}");
+            continue;
+        }
+        if !bootstrap_initialized {
+            match bootstrap::initialize_if_allowed(&config, &paths, &state) {
+                Ok(initialized) => bootstrap_initialized = initialized,
+                Err(error) => hbb_common::throttled_log!(Duration::from_secs(300), warn, "agent bootstrap initialization failed: {error}"),
+            }
+        }
+        if let Err(error) = inspect_and_start_service(&mut state, &paths, started.elapsed()) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(60),
+                warn,
+                "agent service observation failed: {error}"
+            );
+        }
+        status_sequence = status_sequence.saturating_add(1);
+        match operations_tx.try_send(state.clone()) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent command worker unavailable");
+            }
+        }
+        let payload = match status::snapshot(
+            &state,
+            &paths,
+            &state.agent_installation_id,
+            &boot_id,
+            status_sequence,
+        ) {
+            Ok(payload) => Some(payload),
+            Err(error) => {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent status collection failed: {error}"
+                );
+                None
+            }
+        };
+        match status_tx.try_send((payload, state.clone())) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent status worker unavailable"
+                );
+            }
+        }
+        if recovery_client_present(&paths) {
+            if let Err(error) = write_state(&state_path, &state) {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent state save failed: {error}"
+                );
+            }
+            continue;
         }
         if normal_client_present(&state) {
             let _ = write_state(&state_path, &state);
@@ -1237,6 +1689,112 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
 }
 
 #[cfg(windows)]
+fn inspect_and_start_service(
+    state: &mut AgentState,
+    paths: &AgentPaths,
+    elapsed: Duration,
+) -> Result<(), String> {
+    let observed = recovery_windows::inspect(state, paths)?;
+    let intent = recovery_windows::read_intent()?;
+    let mut budget = recovery::RetryBudget {
+        failures: state.service_recovery_failures,
+        next_at: state.service_recovery_next_at,
+        healthy_since: state.service_healthy_since,
+    };
+    budget.observe_health(
+        observed.state == recovery::ServiceState::Running && observed.trusted_path,
+        unix_timestamp(),
+    );
+    state.service_recovery_failures = budget.failures;
+    state.service_recovery_next_at = budget.next_at;
+    state.service_healthy_since = budget.healthy_since;
+    let decision = recovery::decide(&recovery::Observation {
+        // New recovery is enabled only after the coordinated updater is installed and verified.
+        enabled: state.management_agent_enabled
+            && !state.disabled
+            && paths.state.join("service-recovery-enabled").is_file(),
+        locally_blocked: purge_marker_path(paths).exists() || paths.state.join("disable-agent").exists(),
+        intent,
+        maintenance: paths.state.join("maintenance.json").exists() || observed.disabled_start,
+        startup_grace: elapsed < Duration::from_secs(180),
+        retry_due: budget.due(unix_timestamp()),
+        service: observed.state,
+        trusted_service_path: observed.trusted_path,
+        normal_available: observed.normal_present,
+        fallback_available: observed.fallback_present,
+    });
+    match decision {
+        recovery::Action::Observe => return Ok(()),
+        recovery::Action::Start => {}
+        recovery::Action::RepairNormal => {
+            persist_recovery_attempt(state, paths, unix_timestamp())?;
+            let result = recovery_windows::repair_service(state, paths, false);
+            return persist_recovery_result(state, paths, result, unix_timestamp());
+        }
+        recovery::Action::RepairFallback => {
+            persist_recovery_attempt(state, paths, unix_timestamp())?;
+            let result = recovery_windows::repair_service(state, paths, true);
+            return persist_recovery_result(state, paths, result, unix_timestamp());
+        }
+        recovery::Action::RecoverPackage => {
+            // The service loop owns package recovery and its independently persisted
+            // retry state. A nested check here would be overwritten by this snapshot.
+            return Ok(());
+        }
+    }
+    // Save the retry boundary before a side effect so process restarts cannot cause a start storm.
+    budget.record_failure(unix_timestamp());
+    state.service_recovery_failures = budget.failures;
+    state.service_recovery_next_at = budget.next_at;
+    state.service_healthy_since = budget.healthy_since;
+    write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())?;
+    match recovery_windows::start_existing(state, paths) {
+        Ok(true) => {
+            state.last_service_recovery_at = Some(unix_timestamp().to_string());
+            state.service_recovery_error.clear();
+        }
+        Ok(false) => {}
+        Err(error) => {
+            state.service_recovery_error = error;
+        }
+    }
+    write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn persist_recovery_attempt(state: &mut AgentState, paths: &AgentPaths, now: u64) -> Result<(), String> {
+    let mut budget = recovery::RetryBudget {
+        failures: state.service_recovery_failures,
+        next_at: state.service_recovery_next_at,
+        healthy_since: state.service_healthy_since,
+    };
+    budget.record_failure(now);
+    let mut next = state.clone();
+    next.service_recovery_failures = budget.failures;
+    next.service_recovery_next_at = budget.next_at;
+    next.service_healthy_since = budget.healthy_since;
+    write_state(&paths.state.join("agent.json"), &next).map_err(|error| error.to_string())?;
+    *state = next;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn persist_recovery_result(state: &mut AgentState, paths: &AgentPaths, result: Result<bool, String>, now: u64) -> Result<(), String> {
+    let mut next = state.clone();
+    match result {
+        Ok(true) => {
+            next.last_service_recovery_at = Some(now.to_string());
+            next.service_recovery_error.clear();
+        }
+        Ok(false) => next.service_recovery_error = "local recovery action refused".into(),
+        Err(error) => next.service_recovery_error = error,
+    }
+    write_state(&paths.state.join("agent.json"), &next).map_err(|error| error.to_string())?;
+    *state = next;
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn purge(paths: &AgentPaths) -> Result<(), String> {
     use std::process::Command;
     if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
@@ -1250,6 +1808,9 @@ pub fn purge(paths: &AgentPaths) -> Result<(), String> {
         .map(|state| state.normal_install_path)
         .filter(|path| !path.is_empty());
     std::fs::write(purge_marker_path(paths), b"disabled\n").map_err(|e| e.to_string())?;
+    if paths.root.join("RecoveryBootstrap").exists() {
+        bootstrap::remove_task()?;
+    }
     let normal_install_path =
         normal_install_path.filter(|path| approved_normal_install_path(Path::new(path)));
     let _ = Command::new("sc.exe")
@@ -1376,6 +1937,28 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn state_updates_keep_installation_and_generation_without_a_backup_rename_window() {
+        let root = std::env::temp_dir().join(format!(
+            "rustdesk-agent-state-{}-{}",
+            std::process::id(),
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        let path = paths.state.join("agent.json");
+        let mut state = AgentState::new(Edition::Standard, &paths);
+        state.agent_installation_id = "a".repeat(32);
+        for generation in 1..=3 {
+            state.status_session_generation = generation;
+            write_state(&path, &state).unwrap();
+            let saved: AgentState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved, state);
+            assert!(!path.with_extension(format!("bak-{}", std::process::id())).exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn old_agent_state_migrates_to_enabled_msi_defaults() {
         let value = serde_json::json!({
             "edition": "standard",
@@ -1393,6 +1976,131 @@ mod tests {
         assert!(!recovery_allowed(false, false));
         assert!(!recovery_allowed(true, true));
         assert!(recovery_allowed(true, false));
+    }
+
+    #[test]
+    fn service_recovery_marker_requires_enabled_intent_and_is_idempotent() {
+        let root = std::env::temp_dir().join(format!(
+            "rustdesk-agent-recovery-marker-{}-{}",
+            std::process::id(),
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        ensure_agent_layout(&paths).unwrap();
+        assert!(!enable_service_recovery(&paths, recovery::Intent::Disabled).unwrap());
+        assert!(!paths.state.join("service-recovery-enabled").exists());
+        assert!(!enable_service_recovery(&paths, recovery::Intent::Unknown).unwrap());
+        assert!(!paths.state.join("service-recovery-enabled").exists());
+        assert!(enable_service_recovery(&paths, recovery::Intent::Enabled).unwrap());
+        assert!(!enable_service_recovery(&paths, recovery::Intent::Enabled).unwrap());
+        std::fs::write(paths.state.join("disable-agent"), b"disabled\n").unwrap();
+        std::fs::remove_file(paths.state.join("service-recovery-enabled")).unwrap();
+        assert!(!enable_service_recovery(&paths, recovery::Intent::Enabled).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn local_status_rejects_missing_or_corrupt_state_without_replacing_it() {
+        let root = std::env::temp_dir().join(format!("agent-status-readonly-{}", std::process::id()));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        assert!(local_status(&paths).unwrap_err().starts_with("agent state unavailable"));
+        assert!(!paths.state.exists());
+        std::fs::create_dir_all(&paths.state).unwrap();
+        let path = paths.state.join("agent.json");
+        std::fs::write(&path, b"invalid-state").unwrap();
+        assert_eq!(local_status(&paths).unwrap_err(), "agent state malformed");
+        assert_eq!(std::fs::read(&path).unwrap(), b"invalid-state");
+        let large = vec![b'x'; 65537];
+        std::fs::write(&path, &large).unwrap();
+        assert_eq!(local_status(&paths).unwrap_err(), "agent state too large");
+        assert_eq!(std::fs::read(&path).unwrap(), large);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn repair_attempt_persists_cooldown_and_failure_without_erasing_identity() {
+        let root = std::env::temp_dir().join(format!("agent-repair-budget-{}", std::process::id()));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        std::fs::create_dir_all(&paths.state).unwrap();
+        let mut state = AgentState::new(Edition::Standard, &paths);
+        state.agent_installation_id = "a".repeat(32);
+        state.status_session_generation = 7;
+        let original = state.agent_installation_id.clone();
+        persist_recovery_attempt(&mut state, &paths, 1000).unwrap();
+        let bytes = std::fs::read(paths.state.join("agent.json")).unwrap();
+        let before: AgentState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(before.service_recovery_failures, 1);
+        assert_eq!(before.service_recovery_next_at, 1030);
+        persist_recovery_result(&mut state, &paths, Err("fixture repair failed".into()), 1001).unwrap();
+        let failed: AgentState = serde_json::from_slice(&std::fs::read(paths.state.join("agent.json")).unwrap()).unwrap();
+        assert_eq!(failed.service_recovery_error, "fixture repair failed");
+        assert_eq!(failed.service_recovery_next_at, 1030);
+        assert_eq!(failed.agent_installation_id, original);
+        assert_eq!(failed.status_session_generation, 7);
+        persist_recovery_result(&mut state, &paths, Ok(false), 1002).unwrap();
+        assert_eq!(state.service_recovery_error, "local recovery action refused");
+        persist_recovery_result(&mut state, &paths, Ok(true), 1003).unwrap();
+        assert_eq!(state.last_service_recovery_at, Some("1003".into()));
+        assert!(state.service_recovery_error.is_empty());
+        assert_eq!(state.service_recovery_failures, 1);
+        let persisted = std::fs::read(paths.state.join("agent.json")).unwrap();
+        let unchanged = serde_json::to_vec(&state).unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(1)
+            .open(paths.state.join("agent.json")).unwrap();
+        assert!(persist_recovery_attempt(&mut state, &paths, 1030).is_err());
+        assert_eq!(serde_json::to_vec(&state).unwrap(), unchanged);
+        assert_eq!(std::fs::read(paths.state.join("agent.json")).unwrap(), persisted);
+        assert!(persist_recovery_result(&mut state, &paths, Ok(true), 1040).is_err());
+        assert_eq!(serde_json::to_vec(&state).unwrap(), unchanged);
+        assert_eq!(std::fs::read(paths.state.join("agent.json")).unwrap(), persisted);
+        drop(locked);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn local_package_blocks_fail_before_layout_network_or_state_mutation() {
+        let root = std::env::temp_dir().join(format!("agent-package-preflight-{}", std::process::id()));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        std::fs::create_dir_all(&paths.state).unwrap();
+        let state_file = paths.state.join("agent.json");
+        std::fs::write(&state_file, b"preserve-original-state").unwrap();
+        for marker in ["disable-agent", "maintenance.json", "disable-recovery"] {
+            let path = paths.state.join(marker);
+            std::fs::write(&path, b"preserve-local-intent").unwrap();
+            assert!(package_recovery_preflight(&paths).is_err(), "{marker} must block");
+            assert_eq!(check_now_with_package(Edition::Standard, PackageKind::Msi, &paths, None).unwrap_err(), "package recovery locally blocked");
+            assert_eq!(std::fs::read(&path).unwrap(), b"preserve-local-intent");
+            assert_eq!(std::fs::read(&state_file).unwrap(), b"preserve-original-state");
+            assert!(!paths.cache.exists());
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn disabled_package_state_is_preserved_before_policy_refresh() {
+        let root = std::env::temp_dir().join(format!("agent-disabled-package-state-{}", std::process::id()));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        std::fs::create_dir_all(&paths.state).unwrap();
+        for disabled in [false, true] {
+            let mut state = AgentState::new(Edition::Standard, &paths);
+            state.agent_installation_id = "a".repeat(32);
+            state.disabled = disabled;
+            state.management_agent_enabled = disabled;
+            state.last_policy_error = "preserve-previous-error".into();
+            let bytes = serde_json::to_vec(&state).unwrap();
+            let file = paths.state.join("agent.json");
+            std::fs::write(&file, &bytes).unwrap();
+            assert_eq!(check_now_with_package(Edition::Standard, PackageKind::Msi, &paths, None).unwrap_err(), "management agent is disabled");
+            assert_eq!(std::fs::read(&file).unwrap(), bytes);
+            assert!(!paths.cache.exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

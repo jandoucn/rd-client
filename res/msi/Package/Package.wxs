@@ -11,6 +11,7 @@
 		<!--<PropertyRef Id="UpgradesFile" />-->
 
 		<PropertyRef Id="AddRemovePropertiesFile" />
+		<PropertyRef Id="DEFENDER_EXCLUSIONS" />
 
 		<Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" CompressionLevel="high" />
 		<!--$Media2Start$-->
@@ -48,6 +49,7 @@
 		<Feature Id="App" Level="1" AllowAdvertise="no" Display="expand" Title="!(loc.F_App)" Description="!(loc.F_App_Desc)" AllowAbsent="no">
 			<ComponentGroupRef Id="Components" />
 			<ComponentRef Id="ManagementAgent.Component" />
+			<ComponentRef Id="RecoveryBootstrap.Component" />
 
 			<ComponentRef Id="Product.Registry.InstallFolder" />
 			<ComponentRef Id="Product.Registry.DefaultIcon" />

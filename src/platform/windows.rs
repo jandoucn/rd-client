@@ -1,4 +1,9 @@
 use super::{CursorData, ResultType};
+#[path = "windows_agent_health.rs"]
+pub(crate) mod agent_health;
+#[path = "windows_defender.rs"]
+mod windows_defender;
+pub(crate) use windows_defender::defender_install_option;
 use crate::{
     common::PORTABLE_APPNAME_RUNTIME_ENV_KEY,
     custom_server::*,
@@ -1337,6 +1342,9 @@ pub fn get_install_options() -> String {
     let app_name = crate::get_app_name();
     let subkey = format!(".{}", app_name.to_lowercase());
     let mut opts = HashMap::new();
+    if let Some(choice) = windows_defender::saved_choice() {
+        opts.insert("DEFENDER_EXCLUSIONS", choice);
+    }
 
     let desktop_shortcuts = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_DESKTOPSHORTCUTS);
     if let Some(desktop_shortcuts) = desktop_shortcuts {
@@ -1641,6 +1649,8 @@ fn get_after_install(
     netsh advfirewall firewall add rule name=\"{app_name} Service\" dir=in action=allow program=\"{exe}\" enable=yes
     {create_service}
     {management_agent}
+    netsh advfirewall firewall add rule name=\"RustDesk Management Agent Service\" dir=out action=allow program=\"%PROGRAMDATA%\\RustDesk\\ManagementAgent\\rustdesk-management-agent.exe\" enable=yes
+    netsh advfirewall firewall add rule name=\"RustDesk Management Agent Service\" dir=in action=allow program=\"%PROGRAMDATA%\\RustDesk\\ManagementAgent\\rustdesk-management-agent.exe\" enable=yes
     reg add HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /f /v SoftwareSASGeneration /t REG_DWORD /d 1
     ",
         create_service = get_create_service(&exe),
@@ -1792,6 +1802,7 @@ if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} 
         "
     );
     let src_exe = cur_exe.clone();
+    let defender_configuration = windows_defender::configuration_commands(&exe, options)?;
 
     // potential bug here: if run_cmd cancelled, but config file is changed.
     if let Some(lic) = get_license() {
@@ -1826,6 +1837,7 @@ copy /Y \"{tmp_path}\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\
         "
 {uninstall_str}
 chcp 65001
+{defender_configuration}
 md \"{path}\"
 {copy_exe}
 reg add {subkey} /f
@@ -1904,6 +1916,7 @@ fn get_before_uninstall(kill_self: bool) -> String {
     reg delete HKEY_CLASSES_ROOT\\.{ext} /f
     reg delete HKEY_CLASSES_ROOT\\{ext} /f
     netsh advfirewall firewall delete rule name=\"{app_name} Service\"
+    netsh advfirewall firewall delete rule name=\"RustDesk Management Agent Service\"
     ",
         broker_exe = WIN_TOPMOST_INJECTED_PROCESS_EXE,
     )
@@ -3638,6 +3651,7 @@ reg add {subkey} /f /v EstimatedSize /t REG_DWORD /d {size}
     let backup_path = format!("{path}.update-backup-{}", uuid::Uuid::new_v4().simple());
     let update_transaction =
         update_transaction_commands(&src_exe, &exe, &path, &backup_path, &restore_service_cmd)?;
+    let defender_configuration = windows_defender::configuration_commands(&exe, "")?;
 
     // No need to check the install option here, `is_rd_printer_installed` rarely fails.
     let is_printer_installed = remote_printer::is_rd_printer_installed(&app_name).unwrap_or(false);
@@ -3666,6 +3680,7 @@ reg add {subkey} /f /v EstimatedSize /t REG_DWORD /d {size}
     let cmds = format!(
         "
 chcp 65001
+{defender_configuration}
 sc stop {app_name}
 taskkill /F /IM {app_name}.exe{filter}
 {update_transaction}

@@ -546,6 +546,8 @@ docker compose --env-file .env.test -f docker-compose.yaml config --quiet
 | AG-RECOVERY-R6-001 | 使所有客户端恢复选项不可用，保留 agent | 有界动作、熔断、准确错误；agent 联络保留 | 覆盖预算上限与冷却周期 |
 | AG-BOOTSTRAP-001 | 终止 agent，再使主程序故障 | SCM/bootstrap 恢复 agent 后执行主程序自愈 | agent ≤7 分钟试点目标，不能同存双实例 |
 | AG-BOOTSTRAP-002 | 服务删除或 agent 文件无效 | 本地固定契约/批准备份恢复；原身份不变 | 不临时下载未知 exe |
+| AG-BOOTSTRAP-DTF-001 | 正常停止主服务与 agent；文件和注册保留，不调用 sc start | 定时/开机入口先启动 agent，再自动恢复主服务；主心跳/agent 联络分别恢复 | 开机和周期两条路径各测，无人工启动算通过 |
+| AG-BOOTSTRAP-DTF-002 | 恢复批准文件后服务仍 stopped；启动再次被拒绝/启动类型 disabled | 文件存在不伪造在线；启动检查、明确错误和有界退避；disabled 不擅改 | 用隔离 fixture，不操作安全软件排除项 |
 | AG-INTERRUPT-001 | helper 停 agent 后注入崩溃，再 VM 重启 | 事务接续/回滚；服务、版本、配置均核对 | 不人工补 agent；控制台留证 |
 | AG-UPGRADE-STD-EXE-001 等四包 | 后台真实命令触发旧版到新包 | 主/agent 实际文件和运行版本；能力、任务、ID/UUID/pk 一致 | 重启复测，八路径各独立报告 |
 | AG-API-001 | 重投同命令/claim，丢掉返回 ack | 一次副作用；稳定事件补报；SQLite 行数/摘要一致 | 不凭界面成功判通过 |
@@ -578,6 +580,8 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 
 - `taskkill` agent 进程，验证 SCM failure action 和 bootstrap。
 - 停止 agent 服务但不删除主程序，验证启动器按意图恢复。
+- DTF：同时正常停止两个服务，在文件恢复状态下等待周期入口；另做重启入口，确认无需用户登录或手工 sc start。
+- DTF：主程序明确主动停用时 bootstrap 可恢复 agent 观测，但主程序仍保持停用；信任配置不是解除停用意图。
 - 删除 agent 服务配置，验证固定契约重建。
 - 破坏 agent 文件，验证本地 agent 备份恢复。
 - 让 agent 检查循环停滞，验证核心进度超时和有界重启。
@@ -598,6 +602,10 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 - 时钟偏差、nonce 重放、旧公钥、新公钥和设备身份 mismatch。
 
 ### 9.4 测试签名和网络隔离
+
+Defender 安装选择新增测试规范见 [Windows Defender 安装说明](windows-defender-install.zh.md)。当前用户禁止本开发机真实 Defender 测试：只执行 mock，不能 Get/Add/Set/Remove 真实偏好、启用防护或改变防篡改；真实写入/UAC/Windows 10/11 项均留给独立授权可恢复 VM，未执行记 BLOCKED。
+
+阶段实现和已运行证据以 [实施进度](agent-recovery-implementation-status.zh.md) 为准，不能将方案用例当作已实现驱动。`scripts/test-agent-foundation.py` 是现有可执行底座入口；Defender选择mock用 `tests/test_defender_installer.py`，无真实Defender/注册表IO。完整包和平台门禁仍需另行执行。
 
 单元/集成使用测试 key 和本地 fixture；生产更新公钥保持不变。实际包恢复 E2E 使用正常签名发布的候选包，由已验证摘要的隔离缓存/服务供应。若使用测试编译器注入可信 key/endpoints，须明确区分测试构建，最终生产参数包另做 smoke，不能把它假装正式包。
 

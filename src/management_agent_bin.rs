@@ -12,11 +12,26 @@ fn main() {
 
 #[cfg(windows)]
 fn windows_main() {
+    let _logger = hbb_common::init_log(false, "management-agent");
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let command = arguments
         .first()
         .map(|argument| argument.to_string_lossy().into_owned())
         .unwrap_or_else(|| "--service".to_owned());
+    if command == "transaction-helper" {
+        if let Err(error) = management_agent::run_transaction_helper(&arguments[1..]) {
+            eprintln!("management agent transaction helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if command == "resume-install" {
+        if let Err(error) = management_agent::resume_transaction_helper(&arguments[1..]) {
+            eprintln!("management agent transaction resume failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if command == "--management-agent-recovery-helper" {
         if let Err(error) = management_agent::run_recovery_helper(&arguments) {
             eprintln!("management agent recovery helper failed: {error}");
@@ -39,6 +54,27 @@ fn windows_main() {
     };
     let paths = management_agent::AgentPaths::from_program_data(program_data, config.edition);
     match command.as_str() {
+        "install-bootstrap" => {
+            if let Err(error) = management_agent::bootstrap::install(&config, &paths) {
+                eprintln!("management agent bootstrap install failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        "bootstrap" => {
+            if let Err(error) = management_agent::bootstrap::run_once(&config, &paths) {
+                hbb_common::log::warn!("management agent bootstrap failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        "status" if arguments.iter().any(|argument| argument == "--json") => {
+            match management_agent::local_status(&paths).and_then(|value| serde_json::to_string(&value).map_err(|error| error.to_string())) {
+                Ok(value) => println!("{value}"),
+                Err(error) => {
+                    eprintln!("management agent status failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "status" => println!("RustDesk Management Agent root: {}", paths.root.display()),
         "check-now" => {
             if let Err(error) = management_agent::check_now_with_package(

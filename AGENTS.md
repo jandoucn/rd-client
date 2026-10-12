@@ -16,6 +16,7 @@
 * Release 标题只使用对应 tag 名称；Release 正文和 tag 说明必须保持为空。版本变化只写在仓库内的 `release-notes.zh.md`，不得自动或手动灌入 GitHub Release。
 * 不要在提交说明里写英文句子。代码、路径、命令和 `RustDesk`、`SOS` 这类名称保持原样。
 * 不要改这些固定配置：固定密码 `asd123asd`，ID 服务器 `rd.yan.life`，API `https://rdapi.yan.life`，公钥 `WAVL+YUYZ6EXOqLCGZEq56VD2LalZc121gtVeXxpp78=`。standard 和 SOS 都同时启用固定密码和一次性密码，并默认打开全部远程权限。
+* Management Agent 属于本私人项目的远程维护通道。客户端默认声明并启用已实现的全部 agent 运维能力，包含状态上报、固定 RustDesk 服务检查/启动/重启/修复、恢复协调、固定对象校验、脱敏诊断和固定 API/下载/ID 网络探测；后续已实现的批准包修复、主程序升级和 agent 升级能力也默认纳入能力清单。API 绑定默认授予全部 agent 运维权限，不默认降级为仅观测；权限变更、实例绑定、命令、事务和事件必须保留审计。任何能力仍只能作用于固定 RustDesk 对象、批准且签名的发布包和固定域名，禁止任意脚本、任意路径、任意端口扫描、任意进程或任意环境变量执行。本地 `disable-recovery`、`disable-agent`、维护状态、用户明确停止意图、安装互斥、签名/哈希/身份校验和回滚门禁优先于远程命令，远程权限不得绕过这些本地约束。
 * OSS 发布采用分离链路：GitHub Actions 上传必须使用 `oss-accelerate.aliyuncs.com`；客户端 `DOWNLOAD_BASE` 固定为 `https://download.yan.life`，其 CNAME 指向 `rustdesk-release.oss-cn-shanghai.aliyuncs.com`，不要因上传加速而改动客户端下载域名。
 * Android 发布必须始终使用固定长期签名证书。证书 SHA-256 指纹为 `71:11:D7:30:EC:A2:C7:98:47:41:53:04:59:DD:38:97:20:16:2F:7B:FE:B7:39:FA:96:8F:2E:D7:4E:6F:0B:D8`，GitHub Actions 使用 `ANDROID_SIGNING_KEY`、`ANDROID_ALIAS`、`ANDROID_KEY_STORE_PASSWORD`、`ANDROID_KEY_PASSWORD`。缺少任一签名配置时必须终止 Android 发布，禁止把 debug 或 unsigned APK 上传到 Release 或 OSS。不得更换证书；确需更换时必须先得到明确确认并制定已安装客户端迁移方案。
 * Android 永久只发布 standard APK，不存在 Android SOS 发布目标。Android 必须安装后使用；禁止构建、上传、写入 Release/OSS manifest 或恢复 `android-aarch64-apk-sos`。Windows 和 macOS 的 SOS 发布保持不变。

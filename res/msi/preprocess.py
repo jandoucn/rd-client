@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import hashlib
 import sys
 import uuid
 import argparse
@@ -469,6 +470,35 @@ def prepare_resources():
         return False
 
 
+def generate_bootstrap_manifest(dist_dir, edition, output_dir):
+    if edition not in ("standard", "sos"):
+        raise ValueError("Invalid bootstrap edition")
+    agent = Path(dist_dir) / "rustdesk-management-agent.exe"
+    digest = hashlib.sha256()
+    size = 0
+    with agent.open("rb") as stream:
+        for block in iter(lambda: stream.read(65536), b""):
+            size += len(block)
+            if size > 512 * 1024 * 1024:
+                raise ValueError("Bootstrap agent exceeds size limit")
+            digest.update(block)
+    if size == 0:
+        raise ValueError("Bootstrap agent is empty")
+    manifest = {
+        "schema": 1,
+        "agent_sha256": digest.hexdigest(),
+        "edition": edition,
+        "package_kind": "msi",
+        "normal_install_path": r"C:\Program Files\RustDesk",
+    }
+    output = Path(output_dir) / "bootstrap.json"
+    temporary = output.with_suffix(".pending")
+    with temporary.open("x", encoding="utf-8") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+    temporary.replace(output)
+    return output
+
+
 def init_global_vars(dist_dir, app_name, args):
     dist_app = dist_dir.joinpath(app_name + ".exe")
 
@@ -552,6 +582,8 @@ if __name__ == "__main__":
 
     if not gen_pre_vars(args, dist_dir):
         sys.exit(-1)
+
+    generate_bootstrap_manifest(dist_dir, args.edition or "standard", Path(sys.argv[0]).parent / "Package/Resources")
 
     if app_name != "RustDesk":
         replace_component_guids_in_wxs()
