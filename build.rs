@@ -50,13 +50,33 @@ BEGIN
 END
 "#, major=parts[0], minor=parts[1], high=build >> 16, low=build & 65535);
     std::fs::write(&rc, source)?;
+    let target = std::env::var("TARGET")?;
+    let toolset = cc::windows_registry::find_tool(&target, "cl.exe")
+        .ok_or("MSVC toolset not found for agent resource compilation")?;
+    let tool_path = toolset
+        .env()
+        .iter()
+        .find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"))
+        .ok_or("MSVC toolset PATH missing for agent resource compilation")?;
     let resource_compiler = std::env::var_os("WindowsSdkVerBinPath")
         .map(std::path::PathBuf::from)
         .map(|path| path.join(std::env::var("VSCMD_ARG_HOST_ARCH").unwrap_or_else(|_| "x64".into())).join("rc.exe"))
         .filter(|path| path.is_file())
-        .unwrap_or_else(|| "rc.exe".into());
-    let status = std::process::Command::new(resource_compiler).arg("/nologo")
-        .arg(format!("/fo{}", resource.display())).arg(&rc).status()?;
+        .or_else(|| {
+            std::env::split_paths(&tool_path)
+                .map(|path| path.join("rc.exe"))
+                .find(|path| path.is_file())
+        })
+        .ok_or("Windows SDK rc.exe not found for agent resource compilation")?;
+    let status = std::process::Command::new(&resource_compiler)
+        .envs(toolset.env().iter().cloned())
+        .arg("/nologo")
+        .arg(format!("/fo{}", resource.display()))
+        .arg(&rc)
+        .status()
+        .map_err(|error| format!("failed to start {}: {error}", resource_compiler.display()))?;
     if !status.success() { return Err(format!("agent resource compiler failed: {status}").into()); }
     println!("cargo:rustc-link-arg-bin=rustdesk-management-agent={}", resource.display());
     println!("cargo:rerun-if-changed=version.json");
