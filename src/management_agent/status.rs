@@ -20,6 +20,20 @@ fn capabilities() -> &'static [&'static str] {
     ]
 }
 
+fn capabilities_for(state: &AgentState) -> Vec<&'static str> {
+    let mut result = capabilities().to_vec();
+    if cfg!(all(windows, target_arch = "x86_64"))
+        && state.package_kind == super::PackageKind::Msi
+        && matches!(
+            state.edition,
+            super::Edition::Standard | super::Edition::Sos
+        )
+    {
+        result.extend(["package.reinstall@1", "package.update@1", "agent.update@1"]);
+    }
+    result
+}
+
 fn recovery_enabled(state: &AgentState, paths: &AgentPaths, intent: recovery::Intent, disabled_start: bool) -> bool {
     state.management_agent_enabled && !state.disabled
         && intent == recovery::Intent::Enabled && !disabled_start
@@ -89,6 +103,17 @@ pub fn snapshot(
 ) -> Result<serde_json::Value, String> {
     let identity = identity::load_existing()?;
     let observed = recovery_windows::inspect(state, paths)?;
+    #[cfg(test)]
+    let observed = {
+        let mut observed = observed;
+        TEST_START_TYPE.with(|value| {
+            if let Some(start_type) = value.borrow().as_ref() {
+                observed.start_type = start_type.clone();
+                observed.disabled_start = start_type == "Disabled";
+            }
+        });
+        observed
+    };
     let intent = recovery_windows::read_intent().unwrap_or(recovery::Intent::Unknown);
     let build: BuildIdentity = serde_json::from_str(include_str!("../../version.json"))
         .map_err(|error| format!("agent build metadata: {error}"))?;
@@ -109,7 +134,7 @@ pub fn snapshot(
             .unwrap_or_else(|| paths.client.join("RustDesk.exe"));
         application = application_snapshot(r"\\.\pipe\RustDesk\management-health-v1", &executable, build.build_seq);
     }
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "schema": 1,
         "client_id": identity.id,
         "client_uuid": identity.uuid,
@@ -118,17 +143,44 @@ pub fn snapshot(
         "sequence": sequence,
         "session_generation": state.status_session_generation,
         "agent": { "version": build.version, "build_seq": build.build_seq, "executor_version": 1 },
-        "capabilities": capabilities(),
+        "capabilities": capabilities_for(state),
         "package_identity": { "edition": state.edition.name(), "arch": std::env::consts::ARCH, "kind": state.package_kind.extension() },
-        "service": { "state": service, "binpath": observed.command, "pid": observed.process_id, "trusted_path": observed.trusted_path, "account": observed.account, "start_type": observed.start_type },
+        "service": { "state": service, "binpath": observed.command, "pid": observed.process_id, "trusted_path": observed.trusted_path, "account": observed.account, "start_type": if observed.disabled_start { "disabled" } else { &observed.start_type } },
         "application": application,
         "recovery": { "effective_enabled": recovery_enabled(state, paths, intent, observed.disabled_start), "applied_policy_revision": state.management_agent_policy_revision },
         "intent": { "state": match intent { recovery::Intent::Enabled => "enabled", recovery::Intent::Disabled => "disabled", recovery::Intent::Unknown => "unknown" } },
         "files": { "normal_present": observed.normal_present, "fallback_present": observed.fallback_present },
+        "rescue": super::rescue_status::snapshot(&paths.agent, installation, &state.target_key),
         "operation": operation_snapshot(paths),
         "last_service_recovery_at": state.last_service_recovery_at,
         "service_recovery_error": state.service_recovery_error,
-    }))
+    });
+    let binding_path = paths.state.join("local-events").join("events.json");
+    let binding_error = match std::fs::symlink_metadata(&binding_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some("binding_store_unavailable"),
+        Ok(_) => {
+            match super::local_events::LocalEvents::open(&binding_path) {
+                Ok(log) => {
+                    if let Some(binding) = log.verified_binding().filter(|binding| {
+                        binding.client_id == identity.id
+                            && binding.client_uuid == identity.uuid
+                            && binding.agent_installation_id == installation
+                    }) {
+                        payload["enrollment_generation"] = binding.enrollment_generation.into();
+                    }
+                    None
+                }
+                Err(super::local_events::EventError::Storage | super::local_events::EventError::DiskFull) => Some("binding_store_unavailable"),
+                Err(_) => Some("binding_store_invalid"),
+            }
+        }
+    };
+    if let Some(code) = binding_error {
+        payload["enrollment_diagnostic"] = serde_json::json!({"state":"unavailable","error_code":code});
+        hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent status enrollment omitted: {code}");
+    }
+    Ok(payload)
 }
 
 pub fn send(payload: &serde_json::Value) -> Result<(), String> {
@@ -209,8 +261,16 @@ fn send_with_identity(
 }
 
 #[cfg(test)]
+std::thread_local! {
+    static TEST_START_TYPE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    mod delivery_contract {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/management_agent_status_contract/mod.rs"));
+    }
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -308,6 +368,78 @@ mod tests {
         for unsupported in ["cmd.execute@1", "package.update@1", "package.reinstall@1", "agent.update@1"] {
             assert!(!actual.contains(&unsupported));
         }
+    }
+
+    #[test]
+    #[ignore = "Win11 SYSTEM read-only installed snapshot; no service mutations"]
+    fn installed_snapshot_declares_msi_package_capabilities() {
+        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        let root = std::path::Path::new(r"C:\ProgramData");
+        let paths = AgentPaths::from_program_data(root, super::super::Edition::Sos);
+        let bytes = std::fs::read(paths.state.join("agent.json")).unwrap();
+        let state: AgentState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            state.agent_installation_id,
+            "dcc73dd2fba22bf04c7df497053ae2df"
+        );
+        assert_eq!(state.package_kind, super::super::PackageKind::Msi);
+        let payload = snapshot(
+            &state,
+            &paths,
+            &state.agent_installation_id,
+            &"b".repeat(32),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(paths.state.join("agent.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(payload["package_identity"]["kind"], "msi");
+        assert_eq!(payload["application"]["state"], "ready");
+        println!("CAPABILITY_SNAPSHOT={}", payload);
+        let actual = payload["capabilities"].as_array().unwrap();
+        for required in ["package.reinstall@1", "package.update@1", "agent.update@1"] {
+            assert!(
+                actual.iter().any(|value| value == required),
+                "missing {required}"
+            );
+        }
+        assert_eq!(actual.len(), 12);
+        for edition in [super::super::Edition::Standard, super::super::Edition::Sos] {
+            for kind in [
+                super::super::PackageKind::Msi,
+                super::super::PackageKind::Exe,
+            ] {
+                let mut variant = state.clone();
+                variant.edition = edition;
+                variant.package_kind = kind;
+                let payload = snapshot(
+                    &variant,
+                    &paths,
+                    &variant.agent_installation_id,
+                    &"b".repeat(32),
+                    2,
+                )
+                .unwrap();
+                let values = payload["capabilities"].as_array().unwrap();
+                let supported = cfg!(all(windows, target_arch = "x86_64"))
+                    && kind == super::super::PackageKind::Msi;
+                assert_eq!(
+                    values.len(),
+                    if supported { 12 } else { 9 },
+                    "{edition:?}/{kind:?}"
+                );
+                for capability in ["package.reinstall@1", "package.update@1", "agent.update@1"] {
+                    assert_eq!(values.iter().any(|v| v == capability), supported);
+                }
+                assert!(!values.iter().any(|v| v == "cmd.execute@1"));
+            }
+        }
+        assert_eq!(
+            std::fs::read(paths.state.join("agent.json")).unwrap(),
+            bytes
+        );
     }
 
     fn test_identity() -> identity::DeviceIdentity {

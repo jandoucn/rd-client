@@ -12,6 +12,9 @@
 
 		<PropertyRef Id="AddRemovePropertiesFile" />
 		<PropertyRef Id="DEFENDER_EXCLUSIONS" />
+		<?ifdef RustDeskMsiAdmission?>
+		<CustomActionRef Id="CheckAgentInstallAdmission" />
+		<?endif?>
 
 		<Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" CompressionLevel="high" />
 		<!--$Media2Start$-->

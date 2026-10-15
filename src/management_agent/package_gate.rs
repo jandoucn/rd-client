@@ -1,5 +1,5 @@
 use hbb_common::{
-    base64::{engine::general_purpose::STANDARD, Engine as _},
+    base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _},
     sodiumoxide::crypto::sign,
     UpdateManifest, UpdateTarget,
 };
@@ -149,6 +149,7 @@ pub fn verify_with_key<'a>(
         sign::PublicKey::from_slice(public).ok_or("install signature public key invalid")?;
     let signature = STANDARD
         .decode(&target.signature)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(&target.signature))
         .map_err(|_| "install signature encoding invalid".to_owned())?;
     let signature = sign::Signature::from_bytes(&signature)
         .map_err(|_| "install signature length invalid".to_owned())?;

@@ -13,6 +13,22 @@ pub struct BootstrapObservation {
 pub enum BootstrapAction {
     Observe,
     StartAgent,
+    RecreateAgent,
+}
+
+pub fn decide_missing(o: &BootstrapObservation, intent_enabled: bool) -> BootstrapAction {
+    if o.agent == ServiceState::Absent
+        && o.trusted_agent
+        && !o.disabled_start
+        && !o.agent_locally_disabled
+        && !o.maintenance
+        && o.retry_due
+        && intent_enabled
+    {
+        BootstrapAction::RecreateAgent
+    } else {
+        BootstrapAction::Observe
+    }
 }
 
 pub fn decide(o: &BootstrapObservation) -> BootstrapAction {

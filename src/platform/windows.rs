@@ -3,6 +3,9 @@ use super::{CursorData, ResultType};
 pub(crate) mod agent_health;
 #[path = "windows_defender.rs"]
 mod windows_defender;
+#[path = "windows_exe_migration.rs"]
+mod windows_exe_migration;
+pub fn migrate_exe_update(args:&[String])->ResultType<()>{windows_exe_migration::run(args).map_err(|e|anyhow!(e))}
 pub(crate) use windows_defender::defender_install_option;
 use crate::{
     common::PORTABLE_APPNAME_RUNTIME_ENV_KEY,

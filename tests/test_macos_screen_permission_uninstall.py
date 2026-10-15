@@ -10,6 +10,7 @@ SCRIPT = REPO_ROOT / "macos-screen-permission-uninstall.sh"
 
 
 class MacosScreenPermissionUninstallTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix" and Path("/bin/sh").is_file(), "POSIX shell fixture requires /bin/sh and POSIX paths")
     def test_dry_run_never_executes_destructive_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -36,6 +37,7 @@ class MacosScreenPermissionUninstallTest(unittest.TestCase):
             self.assertIn("计划：删除应用", result.stdout)
             self.assertFalse(command_log.exists())
 
+    @unittest.skipUnless(os.name == "posix" and Path("/bin/sh").is_file(), "POSIX shell fixture requires /bin/sh and POSIX paths")
     def test_uninstall_resets_permissions_and_removes_app(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

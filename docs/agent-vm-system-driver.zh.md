@@ -1,5 +1,60 @@
 # VM SYSTEM 测试驱动
 
+## 最新并行验收检查点（2026-10-14）
+
+### 后续增量核验
+
+- 首次打包交付约束：Android 仅 standard，Windows/macOS 各 standard/SOS；Windows 各 profile 包含 EXE 和 MSI，因此完整矩阵为七个包。当前 `.github`、build.py/build.rs、Cargo 清单/锁及 Android/macOS 签名配置相对本轮基线未改；未核验 Actions Secret 内实际 Android 证书，不能称证书指纹已验收。macOS 两个指定成功 run 的签名方法比对保持；历史同 run 同名 artifact 成功证据已取得，撤回此前“必定冲突”的静态判断。
+- Windows 发布 Rust 1.75 兼容性：两处新增 is_none_or 已改为等价 map_or，真实 1.75 最小编译 RED→GREEN，生产 agent debug build 和 source 测试 target no-run 成功；不扩大为 Flutter release 或七包完整构建通过。purge 测试 cfg 不一致另外修复，标准 agentbin 测试编译通过。
+- 默认在线更新兼容：旧 --update 不再自动注入 agent 事务参数，保留原提取/broker/异步行为；新事务仅显式入口使用。Win10 参数六项、PendingEvent parser、MSI gate 六项及签名双 Base64 编码回归已执行。真实 portable 外包搭配受控 inner 两次验证参数/目录/异步退出语义，不替代真实 Flutter 安装验收。显式入口携带尚不支持的旧事件时提前拒绝；禁用安装时显式入口退出 1 而非误报成功，独立复审关闭该 P2。
+- 对已发布 API 7181 的状态契约已完成标准源码七项验证：可信 enroll generation 仅在设备/实例匹配时投影，Disabled wire 规范化，回滚固定脱敏错误码；事件库损坏或不可读时省略代次并继续基础状态，同实例可接纳、新实例仍 409 且旧 SQL 保留。没有猜测代次或修改损坏存储，独立复审关闭。证据 `client-contract-7181/binding-green-guest.json`；原临时 panic 隔离制品仅为历史，不作为当前标准验证。
+
+- MSI purge 修复仍未接通生产路径。新增独立 policy、批准身份 reader、preflight 和执行顺序模块已分别取得 fixture/只读查询证据及标准非测试编译；发现并修复了自身文件锁阻塞同步 cleanup，以及持锁后未检查 maintenance 两项接入前缺陷，独立复审关闭。主动卸载身份识别与恢复 disable/stop 策略分离，原恢复门禁未放宽。实际身份探针用正式 key 拒绝实验室批准资料的结果保留，不算签名成功。
+- purge 执行顺序 fixture 3 项通过，但 native backend 的外部 helper 生命周期、自删除结果回执、原 purge 薄接线和真实 MSI 注销验收仍未完成。native 执行入口在副作用前明确拒绝；未通过手工删除 MSI 注册表来消除残留。相关源码及证据边界见 `tests/management_agent_purge_policy.zh.md`、TEMP `purge-identity-checkpoint.json`。不得把新增模块的编译或 fixture 通过扩大成完整卸载修复。
+
+- purge 后 MSI 注册已补只读核验：在原 purge 证据快照中，产品 `{71A6889B-6003-42DB-989F-B7AE68260DDB}` 仍注册为 machine context，64 位 ARP 条目存在，Installer 缓存与原安装源均存在且摘要匹配。两服务、任务及目录已消失，说明“不复活”通过不能等同于“MSI 完整注销”。未执行 Win32_Product、msiexec 或注册表写入；恢复原健康现场后 396 文件摘要、身份、服务/任务及源包保持。见 `purge-registration-win11/`。当前 purge 源码没有 MSI 卸载调用，完整卸载修复仍待 TDD 和实际验收。
+- 继续按新增行归属整理格式：累计 10 个已跟踪文件中 241 个纯新增格式片段已处理，mixed/旧基线不覆盖。代表 agentbin、portable-packer、helper-runtime 测试目标 no-run 编译通过；该结果不表示全仓 fmt 已通过。见 `remaining-pure-resume-20261015/`。
+
+- 最新新增 Rust 文件限定格式检查 41/41 通过；仅新增段的 status/workspace 格式及新增测试文件已整理，并以定向 no-run 编译验证。格式映射供原业务证据关联，不代表全仓旧格式、Clippy、覆盖率或全部测试执行通过。见 `tracked-format-close-20261015/`、`last-two-test-format-20261015/`。
+- standard 导航复测：首次 TEMP driver 使用保留变量导致初始化失败，修复后完成 AST 变量检查与 6 项无 GUI fixture，再在真实 standard/MSI0504 上扫描 UIA。仅取得 Window、Pane 两个节点，未截断，首页语义后置条件缺失，未发送导航动作；此为自动化能力阻塞，不是产品导航通过或失败。配置前后仅 salt 不同，ID/密钥/密码存储相同，认证影响未测。最后恢复原 SOS 保护快照，八项摘要、任务、安装来源、服务和原进程保持。见 `nav2-navigation.json`、`nav2-profile-compare.json`、`nav2-sos-after.json`。
+
+- 非 cfg(test) 常驻 SCM agent 在隔离实验室 API 完成真实 status/enroll/poll/claim/events，service.inspect 仅领取一次，SQLite 为 receipt_persisted→running→succeeded，pending 清零后自然轮询 70 秒无重复。首次未授权 403 后遵守原退避重试，没有测试 poll 替身。实验室仅在冻结源码替换四处 API URL，正式配置未改；完整 MSI 更新后的新常驻进程仍缺本地 API payload 隔离验收。见 `resident-agent-lab/acceptance.json`。
+- 已保全并清理的全失 RollingBack 不再无条件阻挡另一合法批准来源：严格验证旧保全与对账链、旧 owner 退出、任务清理及本地门禁后才可放行不同来源，同来源仍 Existing，不改 phase、不删历史。随后补齐新事务合法 maintenance 与普通 resume 的阶段区分：OriginalHelper 核原 PID/create，ResumeAuthorized 由私有构造器验证固定 helper、资产、交接、恢复策略、任务及本地门禁后授权新进程。真实子进程 RED→GREEN，父＋7 次 child 拒绝/通过矩阵，最终复审关闭。任务检查在这组测试中为隔离回调，完整原生 Task Scheduler/run_checked 组合另待验收。见 `completed-preservation-final-sealed/`、`completed-preservation-owner-sealed/`、`completed-preservation-resume-sealed/`。
+
+- MSI 包能力漏声明已修复并独立复审关闭：仅 Windows x86_64 的 standard/SOS MSI 实例增加 package.reinstall@1、package.update@1、agent.update@1，基础 9 项保留，EXE 仍为 9 项。真实 snapshot 矩阵完成 RED→GREEN；没有开启 admission 或远程 EXE，也没有修改权限、批准包及本地门禁。
+- agent.update 完整 MSI 场景通过：0502→0503 成功 214.55 秒，验证失败恢复旧 client/agent/bootstrap/配置/身份 226.89 秒；两场各 1 passed，同一 EXE `82594b815d19066fa259e20107cde43f2f89ffb27f1c29c29a70cd88afa0fff1`。SQLite 终态各一次；真实旧 9 项 snapshot 创建命令为 409 且零新增，新 12 项创建成功。创建对照调用生产 PHP 函数和 SQLite，终态由新测试 poll 进程补报，不能称常驻 agent 自主轮询或管理 HTTP 创建路由已验收。见 `agent-update-prep/acceptance-final.json`、`checkpoint.zh.md`。
+- 彻底 purge 后自然周期和真实重启观察未复活，原恢复任务及两服务由 purge 自身删除；开机最初约 1 分 46 秒无连续采样，MSI 产品注册清除未独立验证。恢复原健康快照只是测试清理。见 `purge-win11/验收.zh.md`。
+- 最新插桩安全批次 47 个业务用例全部通过，51 份 profraw 已合并；stable Rust 1.90 未生成分支计数，完整模块行覆盖不足 80%，不能以此宣称业务分支覆盖达标。旧未插桩安装 E2E 不能补充该 profile。见 `coverage-final-20261014/`。
+
+- 全失恢复后续已接通专属 prepare/launch/run、worker 与保全对账：无客户端锚点失败保持 RollingBack 和 `client_recovered=false`，只有核验 agent、身份及绑定凭据后才清理所属维护/任务；Applying 不明结果仍要求协调，不另起安装。固定 agent 目录 ACL 在授权事务内保留原描述符、移除 Users 创建两位并保护 DACL，写入及停服前均复查撤权，未放宽通用 verifier。ACL 撤权缺陷独立复审关闭。
+- 全失源码/制品绑定已重新封存：`r4-current-source-sealed-20261014/acceptance-manifest.json` 摘要 `766c0b88093589450e4a54bd0b0c912698bcfae25930f18df6aa84f7c11d5148`，1257 文件清单、构建前后及实测后无漂移。EXE `619bab760af562521333af8d8cbdf99b162b1d6409211358377840da3a7d6627` 的真实 worker 成功 74.17 秒、失败保全 74.07 秒分别通过，独立证据复核关闭原版本绑定缺口。旧制品不能自动扩展为该版本已验收。
+- 全失事件新增 Started 接线后，报告写锁/容量/存储故障可先落盘绑定的独立审计收据，再继续原授权动作；正常 poll 有界验证后补录。坏独立收据仅保留并诊断，不再阻塞其他合法 pending 上传；17 个业务用例（另 1 个空 child 入口不计）和普通 R4 9 项通过，复审关闭。即时 GREEN after 曾因外来后台任务被拒，后续健康一致不能补作缺失的即时证据。见 `full-loss-degraded/`、`unreported-isolation/`。
+- 新事件 hook 的真实 worker→helper→MSI 正常场景 86.58 秒通过；Started 写锁竞争场景 76.94 秒通过，独立审计收据后实际安装 Committed，随后 poll 补出原 Started 和 succeeded。初次 PHP 入库为 0，上传另行定位到测试数据库名称不符合 router 限制、HTTP 500；只改 fixture 名称后，用真实事务 pending 副本签名上传，数据库两行、丢 ACK 重传不增行、ACK 后队列清零，1 项通过、1.76 秒。安装与上传为分段证据，不冒称同次部署整链。见 `r4-event-runtime-final-20261014/`、`r4-event-lock-sealed-20261014/upload-only-acceptance-manifest.json`。
+- 最新统一 workspace 冻结 `34c9cb7999216619f9bfffab3082c81e64be84a6e48bee8005c291e539fe12e0` 的 56/56 测试目标 --no-run 编译成功，535.60 秒；该构建不代表测试全部运行。全仓 fmt 仍失败，strict Clippy 和其他适用最终门禁未关闭。见 `workspace-unified-20261014-121755-32aa46/`。
+
+- 全失主用例已补得有效业务 RED：恢复首次批准且无执行事务的基线后，签名、登记源、agent 健康及 normal/fallback 明确缺失等前置均通过，真实 run_once 返回 `service installed contract mismatch`，0 passed/1 failed、39.72 秒。未删除或移动历史事务，收尾恢复原现场且原事务字节保持。证据 `r4-total-loss-main-v221/`；此前前置短路的 BLOCKED 记录仍保留。
+- 全失专属实现目前仅有计划前态、保全凭据及未接通入口的明确拒绝：plan RED 2 passed/1 failed→GREEN 3 passed；旧入口拒绝红绿单项通过；保全凭据纯逻辑 3 项通过但没有有效 guest 行为 RED；Pending 既有执行器回归单项通过，确认 Applying/未知结果不触发竞争回滚且事务字节保持。专属测试目标 --no-run 已通过，任务残留检查完成。专属 prepare/launch/run、真实 agent 缺失恢复、实际全失安装成功和失败保全仍未完成，不能标记全失 GREEN。证据 `r4-total-loss-execution-checkpoint.zh.md`、`r4-total-loss-plan-slice/`、`r4-total-loss-pending-regression.json`。
+- 桌面配置摘要变化已做受保护前后副本比较：唯一变化字段为 salt（string），enc_id、key_pair、key_confirmed、password 存储值相同；没有输出秘密值。写入发生在 GUI 启动后约 6.93 秒、窗口探针前。只读源码找到既有首页取 ID→IPC 取 salt→内存 salt 为空时生成并存盘的候选链，相关代码本轮未改；旧 salt 是否为空和具体写入进程未获证明，认证影响未实测，不能将配置保全改记为完全一致。证据 `ui-hash-result.zh.md`、`ui-live-hash-compare.json`、`ui-live-hash-audit.json`。
+
+- 标准 rescue 测试目标实际复现 poll 测试模块根引用错误（E0433/E0432/E0412）。将 9 项 poll 测试移入真实 agent 测试上下文，并将内部对账函数改为接收实际使用的 state/agent 路径后，rescue 与 agentbin 的标准 `--no-run` 均通过；9 项测试体保持不变，独立复审无新增问题。新标准 agentbin 在 Win11 SYSTEM 实测 9 passed、0 failed、0 ignored，5.01 秒，前后健康与 8 文件摘要保持。证据 `r4-poll-green-final-20261014/`、`r4-standard-vm-20261014/`。
+- 最新统一冻结编译 55/55 测试目标通过，490.76 秒，sourcehash `1230dfbd1cd0bb71cc971c59d5fdd529a918d6eaff9b9781d78ee47c187b3062`，证据 `workspace-unified-20261014-060004-19289c/`。此快照不包含编译期间新增的全失恢复测试；该测试后续单独 `--no-run` 编译通过，不能据此声称 56 目标同一快照已验证。
+- 全失恢复候选在 Win11 分场景执行：disabled、stop intent、normal reparse 三项各通过；主用例因已有事务 `d9c041beca18488f957238579f542934` 在前置断言处退出，未调用真实 run_once，因此为 BLOCKED，不计业务 RED。既有事务未移动或删除，未实现全失 GREEN，未执行 MSI。测试后恢复原健康快照，392 文件摘要、身份、配置、登记源、服务/任务均保持；这仅是测试清理。证据 `r4-total-loss-red/验收.zh.md`、`tests.json`、`negative.json`、`restored.json`。
+- Win10 有限桌面实测：普通用户 GDI 采集成功，最小化/还原的 iconic 状态 false→true→false 已验证；首页仅 OCR 识别 RustDesk，设置/关于因 UIA 无可调用入口未执行，不能算完整桌面 E2E。服务和身份健康保持，但 LocalService 的 RustDesk.toml 摘要发生变化、原因尚未核实，保留 CHANGED_hashes，未回写配置。证据 `ui-live-result.zh.md`、`ui-live-handoff.json`；后续只读差异任务受到上游中断，尚无可采信的新结论。
+
+以下结果按各自冻结源码和原始回执记录，不累加为一次全仓通过；后续历史段落保留当时失败和限制。
+
+- Flutter：Win10 SYSTEM 全量 19 个 suite、172 个唯一单元/widget 用例通过，0 失败、0 跳过。证据 `flutter-full-win10.result.json`、`flutter-full-win10-case-audit.json`；当前源码已绑定，不再仅引用缺少摘要的历史日志。严格 analyze 仍为 exit 1、247 issues，真实桌面 E2E 未完成。
+- Rust：统一冻结摘要 `fd5d77437084b29d9760f5a7f8c624dea94ca65c837bd2840ab57ff93eb8d2ef` 的 workspace `--no-run` 编译 exit 0，54/54 测试目标生成。证据目录 `workspace-unified-20261013-221409-2d4042`。此前安全批 136 项和事件标准 target 41 项实际通过，但各有独立源码身份，不能当作这份统一快照的全量执行；早先事件 4 项属于 41 项子集。
+- schema2 来源：保留批准 manifest 原字节，解决 typed 序列化补默认字段导致 reference 改变的问题；5 项冻结测试和 14 项来源回归通过，独立复审关闭。失败准备留下部分目录时仍需对账，不能声称任意早失败都会自动重试。
+- schema2 实机成功：Win10 实验室 MSI 基线真实执行修复，事务 `7f5c33a79cb147d79bdbc1a615e80cbf` 为 Committed，1 项通过，273.29 秒；R3/R4 各 running→succeeded，维护标记及接续任务已清理。原 helper 启动失败为测试运行库路径缺失（0xC0000135），只修测试环境。证据 `r4-diagnose-win10/checkpoint.zh.md`。
+- schema2 实机失败回滚：1 项通过，220.60 秒；事务 `3cfa07c263174f978088e90e8eccb28c` 为 RolledBack，保留 `installation target validation failed`。恢复 VM 快照之前已验证实际 fallback ready、旧 agent/bootstrap/身份/config 摘要和任务清理，R4 rolled_back 事件仅一条。证据 `r4-validationfail-win10/rollback.evidence.zip` 中的 `actual-fallback-rollback.json`；没有用测试快照恢复冒充产品回滚。两场均未验证完整部署服务循环或生产 HTTP ACK。
+- R4 终态事件故障：11 项有效红测后，18 项定向绿测及 1 项旧回归通过。事件存储失败不再吞掉 ExecutionResult 或阻断结果保存和清理；原错误保留。随后补齐生产 poll 的仅事件对账入口，6 项红测中 5 项失败、最终 9 项通过；独立复审关闭自动补报 P2。每轮最多处理 8 个 active R4 receipt，核验终态证据后补报，不执行 Backend 或改动维护标记/任务；旧 generation 不重绑。前 8 个长期坏候选可能阻挡后续候选，保守限制仍保留。证据 `localevents-r4-finalize/`、`r4-poll-p2/`。
+- R1 诊断：具体动作错误被 reporting 标记覆盖的问题定向 5 项通过；对账存储错误被吞成无活动记录的问题 RED 2 失败/2 通过、GREEN 4 通过，旧字节保留。证据 `localevents-p2/`、`r1-reconcile-p2/`。
+- MSI admission：新 CA 的定向准入及 helper 父子升级、原生回滚已有实验室证据，但普通新→新升级、agent 回滚和反向全程互斥仍未全部闭合；默认编译开关继续关闭。复审另指出目标产品原生回滚后已不存在时，agent 回滚准备仍要求其 LocalPackage 的问题。相关任务受到工具服务故障及安全审核拦截，未将未执行任务计为通过。
+- 最近现场：Win10 已恢复 SOS EXE0504，installation `743e15c593b9c60038f42e5e73f7faa2`，主服务/agent/应用 PID 为 5068/5084/3448；Win11 SOS MSI0502，installation `dcc73dd2fba22bf04c7df497053ae2df`，最近安全测试主服务/agent/应用 PID 为 5104/7028/3868。这些是回执时刻状态，下一次操作仍须重新核验。
+
+上述证据均位于 `C:\Users\Administrator\AppData\Local\Temp\opencode`。本检查点没有 commit/push；全仓严格检查、全失恢复、真实桌面/远控、完整断电矩阵及部署整链验收仍未完成。
+
 2026-10-11 已在两台客体实际执行独立身份探针，返回 `NT AUTHORITY\SYSTEM`、SID `S-1-5-18`。`RustDeskAgentLabDriver` 注册为 SYSTEM、Highest，未通过身份验证任务执行产品安装或故障注入。
 
 | 虚拟机 | 驱动就绪快照 | UUID |
@@ -317,3 +372,42 @@ bootstrap 联动回归面：`bootstrap_update.rs` 处理已存在固定恢复入
 - 本轮新增回归面：`helper_runtime.rs`修复终态接续回执保留；`operations_runtime.rs`/helper测试增加实包和失败断言；`guest-agent-bootstrap-recovery-test.ps1`仅为VM测试新增edition参数和实例事件完成确认；API仅扩展桌面确认测试。正式版本、发布链和bootstrap时限未改。SOS全新安装当前仅Win11通过，旧SOS跨build升级/回滚、Win10全新安装、EXE和真正断电接续仍未完成。
 - v196 Win10从 `CleanOS-LTSC2019-Offline` 干净断网快照运行同一v195全新SOS安装用例通过：安装0、双Auto/LocalSystem、默认恢复enabled、新身份、SOS清单/任务/批准摘要、应用ready和bootstrap退出0。前期处于锁屏/UAC未进入脚本的等待不计测试；实际SYSTEM测试从06:18:09Z到06:20:09Z。新installation_id为 `075c943c979685b89ff9f4515560cbda`。快照 `AgentSosFreshInstall-v196-20261012` 为 `a9b877e9-f942-402f-a413-ebbde0eb89be`，100%完成。两系统SOS全新安装现已通过，当前都处于干净SOS安装；旧SOS跨build升级/回滚、EXE及真正断电接续仍未完成。
 - v197两系统全新SOS安装收尾健康复核通过并删除 `RustDeskAgentLabSosClean-v195` 和自删除收尾任务：双Auto/Running、应用ready、恢复enabled、SOS版型和新installation身份稳定，恢复任务/agent/DLL/bootstrap摘要不变。Win11新installation_id `dcc73dd2fba22bf04c7df497053ae2df`；两台仍断网，registered=false符合测试环境。上述v195/v196快照保留安装成功现场，当前运行态已额外清理测试任务；原包名与安装源仍保留。
+
+## 并行实现与独立复审（阶段提交之后）
+
+客户端阶段基线提交 `6d5ecd3b1`，API 阶段基线 `02828b0`。后续用户要求全部适用验收完成再提交，并授权实现、VM 测试和只读审查 agent 分工；以下为尚未再次提交的工作，不能视为整体验收通过。
+
+- v198/v199 下载回退先红后绿；初始 Win11 因测试名单误限 Win10 的16项入口失败已保留，修正产物后两系统各16项通过，前后服务PID/身份/摘要不变。独立审查发现累计资源预算问题，v204增加每目标60秒共享网络截止、最多8镜像、累计正文2×size+1字节；两系统各22项通过。原单源路径保留，MSI主文件名、无覆盖发布及失败partial保留。该预算不含HTTP/TLS framing，不是可抢占磁盘操作的硬实时上限。
+- v200镜像实际MSI升级/回滚通过；v206在最终预算实现下重跑实际两场景：目标及回滚包primary均503、同域镜像提供约67MB，四次完整下载校验各6.35–7.32秒；实际升级和回滚、身份/bootstrap/ready、SQL一命令三事件seq3通过。Win10回滚健康快照 `a7ad8700-5f81-4343-a551-d248f0fcbb6c`。测试helper未执行新增rescue hook，不将它列为资产准备验收。
+- P09 v201真实poweroff后由测试专用开机桥接完成RolledBack终态收尾，原错误/回执不变、零backend调用；原fixture私钥未持久化导致P10 v202阻塞，未生成替代身份或改DB。新v203在claim前受保护持久原测试身份，真实断电后完成P09/P10和服务器已提交但ACK截断后的P11幂等补报：一命令三事件seq3，原secret已清理，旧阻塞现场不变。快照 `a5c75797-4da8-43c8-bb36-bca9758359af`。这是共用恢复路径的测试桥接，不是生产公钥CLI全链。
+- v207修复可信终态maintenance删除后task未删的收尾窗口：仅完整绑定Committed/RolledBack回执允许精确缺标记/缺任务，外来任务/标记、本地禁止、非终态仍拒绝。Win10 helper20、maintenance4项通过；v209真实P09b断电命中已删marker未删task，自动桥接零backend收尾且不重建marker，原身份幂等补报通过。快照 `79a19553-a594-4da0-a27a-d20c4c89cbb2`；生产CLI签名包入口仍未覆盖。
+- rescue v200–v205：真实ACL、注册MSI源、应用ready、完整客户端inventory与agent/bootstrap、DPAPI身份/配置准备先红后绿。独立审查纠正安全继承ACL及目录0x116误拒，受限Users令牌验证能创建子项但不能写/删原文件或重命名受保护子目录。v205真实成功MSI事务finalize并释放owner后，共用after_commit在固定 `rescue/current` 发布并重验；生产等价测试使用临时签名key，报告保持degraded/not_integrated。Win11来源事务 `C:\ProgramData\RustDesk\ManagementAgent\transactions\a9ec8247ec0f40dfbbafac02b6daf74f` 已成为MSI注册源，必须保留。
+- R3 v206–v209：Win11真实主EXE及整目录缺失时从签名包准备完整保底、固定服务启动ready，保底可第二次启动。自动SYSTEM测试进程验证180秒宽限、healthy零动作、用户stop和本地门禁。独立审查发现并修复管理通道被continue截断、旧bundle误判新版本、保底占用拒绝、启动/退避绕过、整目录NotFound误报及健康起点未落盘；各有效红测保留，最终跨轮持久化8项通过，R3整目录/二次启动E2E另1项通过。原文件和正常服务精确恢复，快照 `2247f7ae-6345-4769-b1d5-ab9d8ba37e34`。主EXE存在但损坏的判断仍保守交原R1，SCM常驻生产调度/R4尚未完成。
+- R4 v210真实断网能力红测：normal目录缺失、fallback ready，但旧prepare/InstallPlan/NativeInstaller不能表达原保底服务契约，报service installed contract mismatch；未开MSI、旧fallback/身份保留，随后正常路径恢复。该用例明确BLOCKED_EXPECTED_RED，不算PASS，健康快照 `aaa20295-8a5a-465e-a594-31a7c340573b`。下一切片采用独立本地修复计划/backend，不伪造normal备份或改远程契约。
+- bootstrap v210–v212仅1060创建固定agent服务，ACL/hash/身份/意图/localgates/互斥/预算先于副作用；策略6项、bootstrap11项加单独真实删除重建通过。首轮缺描述的窄通过不能算完整SCM通过，修后第二轮完整契约通过。v213非测试production代码Debug MSI fixture更新standard0502→0504，agent/bootstrap/DLL实际一致；disable-agent阻止自然周期重建，解除后尊重原预算等待1801.367秒，原PT5M任务自然创建启动，主程序PID不变。驱动事件筛选错误FAIL保留，独立完整事件核验通过；快照 `2258d0eb-9adb-46b7-be8e-991deba6d00f`。当前Win10 standard0504，MSI源 `C:\RustDeskAgentLab\agent-standard-v213.msi` 必须保留。
+- API并行批量切片限固定服务：最多100冻结目标、每批5并发及速率/失败门禁、幂等审计、桌面/390px。独立审查修复真实wire缺generation被拒、paused队列阻塞后续命令、busy时选择错批次三问题；HTTP34和浏览器5项、既有PHP76+30断言通过，独立只读重审通过。安装批量、容器、多worker/容量及真实客户端批量动作未验收，未提交。
+
+本阶段证据按各唯一前缀保留于宿主临时工具目录，失败记录不覆盖。测试签名bundle不得冒充正式公钥发布包；当前Win11固定bundle与fallback为实验室资产。所有原安装源、合法救援bundle、未完成事务和失败诊断均保留；不按普通临时目录清理。
+
+- R4 v211/v212：新增独立LocalRepairPlan/backend与固定transaction CLI，保底ready而normal明确Missing时本地samebuildMSI修复成功；验证失败实际回滚fallback。独立审查修复停服前activity拒绝误进入rollback、opt-in撤回未复查和过期resume绕门禁，3项有效红测后6项绿、真实成功243.31秒/回滚219.56秒通过。正式keyCLI、真实活动会话和R4断电接续仍待测。
+- 自动R4 v213/v215：主loop只sync_channel(1)投递，worker按安装身份/来源事务/批准引用/target/hash确定ID；原normal存在零安装。断网自动成功E2E一事务Committed（494.36秒），自动validation失败E2E一事务RolledBack（1527.23秒，fallbackready），其后至少5轮Existing同ID不重装。独立审查修复64历史目录时创建第65项却无法launch的边界，锁内63→64准入、64/65拒绝且保留旧数据，复审通过。Win11健康快照 `3adbd4af-b959-4b09-9209-fd018e398893`。
+- rescue readiness v216：只读低priority单worker24h复验，status仅小报告及bundle/批准manifest来源摘要，不扫描大包；过期、时钟回退、错签名、来源变化准确unknown/unavailable，保留最近成功证据，始终ready=false。2项红后3项绿，实际395084857字节/106条目完整验证；生产key拒测试bundle，测试key同函数degraded。未部署常驻新版做24h墙钟验收，复审通过。
+- EXE v215/v217：新增独立严格包提取与封存，真实外层packer、签名/hash、embedded inventory、路径/解压体积及ACL校验。独立review复现零长度RDPKG误当不存在，strict-only资源读取修复，Win10真实红1后集成9项与packer13项绿，复审通过。此处内层最小载荷不执行，不能算真实EXE安装。
+- EXE v218：新EXE prepare/文件backend/固定SCM适配器，原MSI路径不改；使用实际0504payload文件、独立helper和真实fixture服务。独立review修复prepare后journal合法更新导致拒绝反而旧快照回滚覆盖的问题，EXE专属execute先preflight；最终24项通过含实际SCM copylock回滚，非test编译通过。当前production backend/helper维护绑定未开放，尚未接windows旧--update路径，也没有旧EXE完整迁移验收。
+- standard0504 v214：部署后真实5场景通过，disable-agent/disable-recovery/maintenance下check-now拒绝；主服务在本地禁用或用户主动stop期间保持停止至少75秒，解除后原agent分别9.27/13.92秒自动恢复，agentPID212未变，完整配置bytes/ACL恢复，原bootstrap预算不清零。健康快照 `272be97e-3734-4f1f-b534-f9b9a1fdc1ed`。该Debug包runner资源仍0502而agent/bootstrap与运行Rust健康0504，不能声明所有文件资源同build。
+- EXE v220/v221：停服确认后捕获最新state/journal，绑定receipt及维护归属，补齐预检后到stop前的合法写入保留。最新真实EXE0504→0505和失败回滚均通过；现Win10从原MSI快照切到真实EXE基线，installation为 `34b70168634c1b4b0c78e720de729d70`，不能沿用旧MSI身份断言。旧MSI现场与源包保留于快照。
+- EXE v222独立审查修复三P1：逐服务记录新启动PID以覆盖第二服务启动失败；损坏新state按可信stopped-state和原身份/门禁允许恢复；终态cleanup缺marker/task可幂等且外来对象拒绝。3项有效红后完整37项登记通过（包含子入口，不作为独立业务数），真实最新EXE成功203.09秒、失败回滚233.28秒通过，复审通过。健康快照 `33c4e51a-d7c8-48df-84c5-8d8953148ee7`。
+- agentrestore发布前P2：复制/sync/hash后、rename前再次核真实SCM/PID/意图/本地门禁，预算只扣一次；红1过2失败后绿4项，bootstrap回归15项；非test构建通过。Win10 VirtualBox不稳定状态单独留证并从原磁盘重启恢复，PID变化不算产品测试，离线健康快照 `dab343ec-092f-4aac-8df5-f1d3886b77ad`。测试未进行实际0504缺失agent故障。
+- rotation v219/v220：修复完整发布后像在Config2普通变化时无法收尾，以及后续phase未核retired-rescue完整性两P2；额外拒绝published但staging仍在，拒MSI注册源位于待移动救援目录。有效红保留，11项绿另fixedaftercommit幂等读回1项通过；实际current/previous394文件、身份、源包不变，复审通过。此次未再安装或真实断电轮换。
+- integration-v222冻结安全整合回归实际140项业务测试139通过1失败，唯一注册MSI源测试硬编码旧lab路径；case122改为实际ProductCode查询登记源并严格basename/已知包SHA/size/签名和逐字节核验，单项42.76秒转绿，未重复其余139项；before/after各10检查和current/previous394文件保持。该记录不等于当前并行修改的全仓验收。
+- EXE v223：原非testCLI pending红测零副作用；移除runtime临时阻挡并提供固定受保护inbox的prepare CLI。冻结实验室映像仅替换测试公钥常量及版本元数据，仓库正式key不变、未加生产覆盖开关。实际原CLI prepare/launch/helper/selfcheck成功0504→0505，固定故障使新agent启动失败后回滚0504；两场各重复两次原helper resume，终态摘要和服务PID保持。当前Win10 EXE0504健康快照 `28992c10-56c1-4ef3-9fbd-de7138727905`。旧Windows --update桥接仍未接，不能据此宣布全部旧版在线迁移完成。
+- EXE v224–v227：旧参数调用新外包--update已接独立事务，精确签名catalog不符停服前拒。独立复审修复收据早于cleanup误installed、outer参数占用旧update-event可选command_id及旧agent status无界读取；后来补退出瞬间尾JSON遗漏的可控红绿。v226复审再修EXE更新后旧bootstrap摘要失效，成功与回滚均核验bootstrap CLI0、manifest/hash、原任务；native预算字段为null→null，已有budget字节保留由fixture证明。稳定两场实际外包成功/回滚通过，终态事件在helper退出和cleanup确认后才接收。v225旧失败/未捕获退出75仍保留，不能据后续通过覆盖。v227仅读取器定向10项登记通过（含2子入口），没有无故重复两场安装。
+- R0 v224/v225：固定受限pipe通过OS进程路径/PID/创建时间、nonce、build绑定后才发送，server在角色/本地意图/部署/活动/互斥门禁内只请求mediator重连。300秒连续same-owner观察、有界worker、固定ID探测、持久预算先写后发及ACK丢失冷却14项通过，独立审查通过。真实本地UDP mediator实验红测不restart无第二socket，绿测restart后两代RegisterPk、OK注册恢复，NOT_DEPLOYED拒第三次；该实验未部署完整installed worker/listener，不能算300秒真实常驻整链。
+- 用户要求提速后新增7个并行验收lane，Win11只补变化路径11项通过，按源码依赖绑定复用原140及R0 14项，165为有效证据集合而非同一次全量执行。覆盖率instrumentation实际22份profraw合并，安全切片exe_runtime行67.78%、bridge38.73%、update_args100%，exe_service未跑0%，未取得业务分支80%证明。
+- Flutter补证：历史172 runner通过缺完整源码hash，analyze实际有7warnings/240info且非fatal，不宣严格零问题。本轮Win11 SYSTEM按当前源码hash跑安装控件逻辑/widget两项，JSON精确名称各一次通过、13.34秒，无skip；预先因缺wrapper cache退出的零项setup失败保留。两项不代替完整安装页和桌面/远控E2E。
+- 静态lane冻结1233/1357文件按各收据分开绑定，生产agent/lib cargo check通过；全仓fmt114文件差异（含baseline与新增）、严格Clippy被hbb_common56个baseline lint阻断，仍不称通过。API独立只补2HTTP边界、PHP2/Python4语法与diff通过，历史HTTP34/E2E5/PHP76+30缺独立hash链不重复累计；容器环境不可用，未提交。
+- v228真实SOS EXE：RUSTDESK_SOS=1独立编译0504/0505完整payload，在干净Win10旧SOS EXE首装后，旧式--update参数跨build成功及StartService失败回滚均通过；bootstrap同步/原manifest回滚、helper退出cleanup后才接收终态事件，当前Win10 SOS EXE0504 installation `743e15c593b9c60038f42e5e73f7faa2`，健康快照 `ba6e0abe-b4c0-4c7d-a125-0e609f31ae43`。仍复用旧runner资源，未覆盖旧GUI下载/交互提权；不能把snapshot的版型与较早standard混用。
+- 本地事件v228纯文件模块22项真实RED→GREEN通过，稳定operation/eventID、ACK/CAS、终态预留容量与失败数据保全，尚未接实际自愈和签名上传；独立审查无新增finding但要求首次事件固定identity/generation、动作owner先持久记录、防重复动作及R4语义正确。256receipt容量无30天自动清理，不能宣完整长期outbox。
+- windows_installer_busy v229只读SCM分类：真实RED10失败/1通过，GREEN11通过，原生idleprobe单独1项通过；未接InstallGuard，不能宣普通MSI全局互斥。初始缺CRT零测试失败保留，使用静态CRT后完成实际RED。
+- 首次健康准备v220/v221：固定受保护release-cache/first-install.json+签名manifest+真实MSI注册源，schema2 installed_msi独立receipt，不伪Committed；自动worker测试95.37秒生成完整bundle，源/身份/hash/健康不变。缺批准元数据waiting_approval，正式key拒测试sidecar。独立审查发现已有不同fallback会被新current路由遮断、旧schema1-only测试消费者panic两缺口，正在修，不能关闭该切片。
+- 格式lane仅对10个授权新增模块格式化，按预像hash和skip_children保护其它模块；registration两个文件已合格式不改，rescue_status因并行漂移跳过。限定格式通过不等于全仓fmt通过，也未以抑制旧lint取得Clippy通过。

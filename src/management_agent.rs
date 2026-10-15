@@ -9,6 +9,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(all(test, windows))]
+#[path = "../tests/management_agent_local_events/r4_poll.rs"]
+mod r4_poll_tests;
+
 use hbb_common::base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
@@ -34,6 +38,15 @@ pub mod bootstrap;
 #[path = "management_agent/journal.rs"]
 mod journal;
 #[cfg(windows)]
+#[path = "management_agent/local_events.rs"]
+mod local_events;
+#[cfg(windows)]
+#[path = "management_agent/local_event_runtime.rs"]
+mod local_event_runtime;
+#[cfg(windows)]
+#[path = "management_agent/local_recovery_events.rs"]
+mod local_recovery_events;
+#[cfg(windows)]
 #[path = "management_agent/operations.rs"]
 mod operations;
 #[cfg(windows)]
@@ -51,6 +64,9 @@ mod health;
 #[cfg(windows)]
 #[path = "management_agent/health_windows.rs"]
 mod health_windows;
+#[cfg(windows)]
+#[path = "management_agent/registration_reconnect.rs"]
+mod registration_reconnect;
 #[cfg(windows)]
 #[path = "management_agent/handoff.rs"]
 mod handoff;
@@ -93,11 +109,63 @@ mod native_install;
 #[path = "management_agent/msi_metadata.rs"]
 mod msi_metadata;
 #[cfg(windows)]
+#[path = "management_agent/purge_policy.rs"]
+mod purge_policy;
+#[cfg(windows)]
+#[path = "management_agent/purge_discovery.rs"]
+mod purge_discovery;
+#[cfg(windows)]
+#[path = "management_agent/purge_approval.rs"]
+mod purge_approval;
+#[cfg(windows)]
+#[path = "management_agent/purge_preflight.rs"]
+mod purge_preflight;
+#[cfg(windows)]
+#[path = "management_agent/purge_marker.rs"]
+mod purge_marker;
+#[cfg(windows)]
+#[path = "management_agent/purge_service.rs"]
+mod purge_service;
+#[cfg(windows)]
+#[path = "management_agent/purge_execution.rs"]
+mod purge_execution;
+#[cfg(windows)]
+#[path = "management_agent/purge_handoff.rs"]
+mod purge_handoff;
+#[cfg(all(windows, not(test)))]
+#[path = "management_agent/purge_native.rs"]
+mod purge_native;
+
+#[cfg(all(windows, not(test)))]
+pub fn run_purge_helper(id: &str) -> Result<(), String> { purge_native::run_helper(id) }
+#[cfg(all(windows, not(test)))]
+pub fn inspect_purge_identity() -> Result<String, String> {
+    let approved = purge_discovery::approved_installed()?;
+    purge_discovery::verified_native(&approved).map(|probe| format!("{probe:?}"))
+}
+#[cfg(windows)]
 #[path = "management_agent/msi_assets.rs"]
 mod msi_assets;
 #[cfg(windows)]
 #[path = "management_agent/preparation.rs"]
 mod preparation;
+#[cfg(windows)]
+#[path = "management_agent/exe_assets.rs"]
+mod exe_assets;
+#[cfg(windows)]
+#[path = "management_agent/exe_preparation.rs"]
+mod exe_preparation;
+#[cfg(windows)]
+#[path = "management_agent/exe_install.rs"]
+mod exe_install;
+#[cfg(windows)]
+#[path = "management_agent/exe_service.rs"]
+mod exe_service;
+#[cfg(windows)]
+#[path = "management_agent/exe_runtime.rs"]
+mod exe_runtime;
+#[cfg(windows)]
+pub fn run_exe_transaction(arguments:&[std::ffi::OsString],mode:&str)->Result<(),String>{exe_runtime::dispatch(arguments,mode)}
 #[cfg(windows)]
 #[path = "management_agent/service_control.rs"]
 mod service_control;
@@ -125,6 +193,50 @@ mod bootstrap_update;
 #[cfg(windows)]
 #[path = "management_agent/package_download.rs"]
 mod package_download;
+#[cfg(windows)]
+#[path = "management_agent/rescue_assets.rs"]
+mod rescue_assets;
+#[cfg(windows)]
+#[path = "management_agent/agent_restore.rs"]
+mod agent_restore;
+#[cfg(windows)]
+#[path = "management_agent/rescue_status.rs"]
+mod rescue_status;
+#[cfg(windows)]
+#[path = "management_agent/rescue_recovery.rs"]
+mod rescue_recovery;
+#[cfg(windows)]
+#[path = "management_agent/local_repair_plan.rs"]
+mod local_repair_plan;
+#[cfg(windows)]
+#[path = "management_agent/local_repair.rs"]
+mod local_repair;
+#[cfg(windows)]
+#[path = "management_agent/local_repair_schedule.rs"]
+mod local_repair_schedule;
+
+#[cfg(windows)]
+pub fn run_local_repair(arguments: &[std::ffi::OsString], mode: &str) -> Result<(), String> {
+    if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
+        return Err("local repair requires administrator".into());
+    }
+    if arguments.len() != 2 || arguments[0] != "--transaction-id" {
+        return Err("local repair accepts only fixed transaction ID".into());
+    }
+    let id = arguments[1]
+        .to_str()
+        .ok_or("local repair ID encoding invalid")?;
+    match mode {
+        "local-repair-prepare" => {
+            let root = local_repair::prepare(id)?;
+            local_repair::launch(&root)?;
+            Ok(())
+        }
+        "local-repair-helper" => local_repair::run_helper(id, false),
+        "local-repair-resume" => local_repair::run_helper(id, true),
+        _ => Err("local repair command invalid".into()),
+    }
+}
 
 #[cfg(windows)]
 pub fn run_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(), String> {
@@ -159,7 +271,15 @@ pub fn run_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(), St
     let mut backend = native_install::NativeInstaller::open(&directory)?;
     let result = owner.execute(&mut backend)?;
     match result.phase {
-        transaction::Phase::Committed | transaction::Phase::RolledBack => owner.finalize(),
+        transaction::Phase::Committed => {
+            owner.finalize()?;
+            drop(owner);
+            if let Err(error) = rescue_assets::after_commit(&directory) {
+                hbb_common::log::warn!("rescue assets preparation incomplete: {error}");
+            }
+            Ok(())
+        }
+        transaction::Phase::RolledBack => owner.finalize(),
         _ => Err(format!("transaction requires reconciliation: {:?}", result.phase)),
     }
 }
@@ -181,7 +301,15 @@ pub fn resume_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(),
     let mut backend = native_install::NativeInstaller::open(&directory)?;
     let result = owner.resume(&mut backend)?;
     match result.phase {
-        transaction::Phase::Committed | transaction::Phase::RolledBack => owner.finalize(),
+        transaction::Phase::Committed => {
+            owner.finalize()?;
+            drop(owner);
+            if let Err(error) = rescue_assets::after_commit(&directory) {
+                hbb_common::log::warn!("rescue assets preparation incomplete: {error}");
+            }
+            Ok(())
+        }
+        transaction::Phase::RolledBack => owner.finalize(),
         _ => Err(format!("transaction requires reconciliation: {:?}", result.phase)),
     }
 }
@@ -1468,6 +1596,13 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     let mut status_sequence = 0u64;
     let mut session_generation = None;
     let mut bootstrap_initialized = false;
+    let local_repair_worker =
+        local_repair_schedule::start().map_err(windows_service::Error::Winapi)?;
+    let rescue_status_worker = rescue_status::start().map_err(windows_service::Error::Winapi)?;
+    let first_install_worker =
+        rescue_assets::first_install::start().map_err(windows_service::Error::Winapi)?;
+    let registration_worker =
+        registration_reconnect::start().map_err(windows_service::Error::Winapi)?;
     let (status_tx, status_rx) = mpsc::sync_channel::<(Option<serde_json::Value>, AgentState)>(1);
     let (policy_tx, policy_rx) = mpsc::sync_channel::<AgentState>(1);
     let (operations_tx, operations_rx) = mpsc::sync_channel::<AgentState>(1);
@@ -1596,19 +1731,85 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
             hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent policy save failed: {error}");
             continue;
         }
+        if let Err(error) = local_repair_worker.notify(local_repair_schedule::Tick {
+            elapsed: started.elapsed(),
+            enabled: state.management_agent_enabled && !state.disabled,
+            retry_at: state.service_recovery_next_at,
+        }) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(60),
+                warn,
+                "automatic local repair unavailable: {error}"
+            );
+        }
+        if let Some(result) = local_repair_worker.result() {
+            hbb_common::throttled_log!(
+                Duration::from_secs(60),
+                info,
+                "automatic local repair: {result}"
+            );
+        }
+        if let Err(error) = rescue_status_worker.notify(rescue_status::Tick {
+            installation: state.agent_installation_id.clone(),
+            target_key: state.target_key.clone(),
+        }) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(300),
+                warn,
+                "rescue readonly status unavailable: {error}"
+            );
+        }
+        if let Err(error) = first_install_worker.notify() {
+            hbb_common::throttled_log!(
+                Duration::from_secs(300),
+                warn,
+                "first installation rescue unavailable: {error}"
+            );
+        }
+        if let Err(error) = registration_worker.notify(&state.agent_installation_id) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(300),
+                warn,
+                "R0 worker unavailable: {error}"
+            );
+        }
         if !bootstrap_initialized {
             match bootstrap::initialize_if_allowed(&config, &paths, &state) {
                 Ok(initialized) => bootstrap_initialized = initialized,
                 Err(error) => hbb_common::throttled_log!(Duration::from_secs(300), warn, "agent bootstrap initialization failed: {error}"),
             }
         }
-        if let Err(error) = inspect_and_start_service(&mut state, &paths, started.elapsed()) {
+        let mut rescue_error = None;
+        let signed_rescue = match rescue_recovery::bundle_present() {
+            Ok(present) => present,
+            Err(error) => { rescue_error = Some(error); true }
+        };
+        let mut allow_legacy_service = !signed_rescue;
+        let mut allow_legacy_package = !signed_rescue;
+        if signed_rescue {
+            let mut budget = recovery::RetryBudget { failures:state.service_recovery_failures,next_at:state.service_recovery_next_at,healthy_since:state.service_healthy_since };
+            let result = rescue_recovery::budgeted(started.elapsed(), &mut budget, unix_timestamp(), |next| {
+                let mut persisted=state.clone();
+                persisted.service_recovery_failures=next.failures;persisted.service_recovery_next_at=next.next_at;persisted.service_healthy_since=next.healthy_since;
+                write_state(&state_path,&persisted).map_err(|error|error.to_string())
+            }, || match rescue_error {Some(error)=>Err(error),None=>rescue_recovery::periodic(started.elapsed())});
+            state.service_recovery_failures=budget.failures;state.service_recovery_next_at=budget.next_at;state.service_healthy_since=budget.healthy_since;
+            let route=rescue_recovery::routing(&result);
+            allow_legacy_service=route.legacy_service;allow_legacy_package=route.legacy_package;
+            match result {
+                Ok(rescue_recovery::Cycle::Recovered) => state.service_recovery_error = "R3 fallback running; degraded".into(),
+                Ok(_) => {},
+                Err(error) => state.service_recovery_error = error,
+            }
+            if let Err(error)=write_state(&state_path,&state) {hbb_common::throttled_log!(Duration::from_secs(60),warn,"R3 result persistence failed: {error}");}
+        }
+        if allow_legacy_service { if let Err(error) = inspect_and_start_service(&mut state, &paths, started.elapsed()) {
             hbb_common::throttled_log!(
                 Duration::from_secs(60),
                 warn,
                 "agent service observation failed: {error}"
             );
-        }
+        } }
         status_sequence = status_sequence.saturating_add(1);
         match operations_tx.try_send(state.clone()) {
             Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
@@ -1641,6 +1842,20 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                     warn,
                     "agent status worker unavailable"
                 );
+            }
+        }
+        match rescue_recovery::persist_before_package_skip(allow_legacy_package, || {
+            write_state(&state_path, &state)
+        }) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(60),
+                    warn,
+                    "agent observed state save failed: {error}"
+                );
+                continue;
             }
         }
         if recovery_client_present(&paths) {
@@ -1694,6 +1909,7 @@ fn inspect_and_start_service(
     paths: &AgentPaths,
     elapsed: Duration,
 ) -> Result<(), String> {
+    local_event_runtime::reconcile_running(state, paths);
     let observed = recovery_windows::inspect(state, paths)?;
     let intent = recovery_windows::read_intent()?;
     let mut budget = recovery::RetryBudget {
@@ -1748,7 +1964,8 @@ fn inspect_and_start_service(
     state.service_recovery_next_at = budget.next_at;
     state.service_healthy_since = budget.healthy_since;
     write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())?;
-    match recovery_windows::start_existing(state, paths) {
+    let local_event = local_event_runtime::start_existing(state, paths);
+    match local_event.action {
         Ok(true) => {
             state.last_service_recovery_at = Some(unix_timestamp().to_string());
             state.service_recovery_error.clear();
@@ -1758,6 +1975,10 @@ fn inspect_and_start_service(
             state.service_recovery_error = error;
         }
     }
+    state.service_recovery_error = local_event_runtime::format_recovery_error(
+        &state.service_recovery_error,
+        local_event.reporting,
+    );
     write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())
 }
 
@@ -1794,8 +2015,40 @@ fn persist_recovery_result(state: &mut AgentState, paths: &AgentPaths, result: R
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 pub fn purge(paths: &AgentPaths) -> Result<(), String> {
+    if paths.root != Path::new(r"C:\ProgramData\RustDesk")
+        || paths.state != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state") {
+        return Err("purge requires fixed installed state".into());
+    }
+    workspace::verify_restore_target(&paths.state.join("agent.json"), false)?;
+    if let Ok(bytes) = std::fs::read(paths.state.join("agent.json")) {
+        if let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            let edition = match state["edition"].as_str() {
+                Some("standard") => Edition::Standard,
+                Some("sos") => Edition::Sos,
+                _ => return Err("purge edition unknown; refusing cleanup".into()),
+            };
+            let kind = match state["package_kind"].as_str() {
+                Some("msi") => PackageKind::Msi,
+                Some("exe") => PackageKind::Exe,
+                _ => return Err("purge package kind unknown; refusing cleanup".into()),
+            };
+            if state["target_key"] != edition.target_key_for(kind) {
+                return Err("purge state target mismatch".into());
+            }
+            return match state["package_kind"].as_str() {
+                Some("msi") => purge_native::start(),
+                Some("exe") => legacy_purge(paths),
+                _ => Err("purge package kind unknown; refusing cleanup".into()),
+            };
+        }
+    }
+    Err("purge state unknown; refusing cleanup".into())
+}
+
+#[cfg(windows)]
+fn legacy_purge(paths: &AgentPaths) -> Result<(), String> {
     use std::process::Command;
     if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
         return Err("administrator privileges are required".to_owned());

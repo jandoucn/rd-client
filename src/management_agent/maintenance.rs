@@ -51,6 +51,45 @@ pub fn verify(
     plan_sha256: &str,
     nonce: &str,
 ) -> Result<(), String> {
+    verify_checked(
+        state,
+        intent,
+        installation,
+        transaction,
+        plan_sha256,
+        nonce,
+        false,
+    )
+}
+
+pub(super) fn verify_terminal_cleanup(
+    state: &Path,
+    intent: &Path,
+    installation: &str,
+    transaction: &str,
+    plan_sha256: &str,
+    nonce: &str,
+) -> Result<(), String> {
+    verify_checked(
+        state,
+        intent,
+        installation,
+        transaction,
+        plan_sha256,
+        nonce,
+        true,
+    )
+}
+
+fn verify_checked(
+    state: &Path,
+    intent: &Path,
+    installation: &str,
+    transaction: &str,
+    plan_sha256: &str,
+    nonce: &str,
+    allow_missing: bool,
+) -> Result<(), String> {
     for marker in ["disable-agent", "disable-recovery"] {
         match std::fs::symlink_metadata(state.join(marker)) {
             Ok(_) => return Err("installation locally blocked".into()),
@@ -70,6 +109,13 @@ pub fn verify(
         return Err("installation user stop intent".into());
     }
     let path = state.join("maintenance.json");
+    if allow_missing {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("maintenance observation failed: {error}")),
+            Ok(_) => {}
+        }
+    }
     super::workspace::verify_file(&path)?;
     let marker: Marker = serde_json::from_slice(&read(&path)?).map_err(|_| "maintenance record malformed")?;
     if marker.schema != 1 || marker.installation_id != installation || marker.transaction_id != transaction

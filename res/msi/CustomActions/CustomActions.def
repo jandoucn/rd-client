@@ -17,3 +17,4 @@ EXPORTS
     ConfigureDefender
     InspectBootstrapUpgrade
     StopMainForBootstrapRollback
+    CheckAgentInstallAdmission

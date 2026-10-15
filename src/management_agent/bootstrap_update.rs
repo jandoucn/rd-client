@@ -43,6 +43,26 @@ pub fn verify_prepared(root: &Path, plan: &InstallPlan, target: &Artifact) -> Re
     Ok(())
 }
 
+#[cfg(test)]
+pub fn prepare_fixture(
+    root: &Path,
+    directory: &Path,
+    plan: &InstallPlan,
+    target: &Artifact,
+) -> Result<(), String> {
+    prepare_bound(root, directory, &binding(plan, target)?)
+}
+#[cfg(test)]
+pub fn synchronize_fixture(
+    root: &Path,
+    directory: &Path,
+    plan: &InstallPlan,
+    target: &Artifact,
+    installing: bool,
+) -> Result<(), String> {
+    synchronize_bound(root, directory, &binding(plan, target)?, installing)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepared {

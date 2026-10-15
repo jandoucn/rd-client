@@ -104,6 +104,68 @@ fn helper_process_prepares_only_after_exact_assets_identity_and_parent_validatio
         if std::env::var("RUSTDESK_HELPER_RESUME").ok().as_deref() == Some("yes") {
             use hbb_common::base64::{engine::general_purpose::STANDARD, Engine as _};
             let public = STANDARD.decode(std::env::var("RUSTDESK_HELPER_FIXTURE_PUBLIC").unwrap()).unwrap();
+            if let Ok(case) = std::env::var("RUSTDESK_CLEANUP_CASE") {
+                let receipt = std::fs::read(root.join("execution-result.json")).ok();
+                let transaction = std::fs::read(root.join("transaction.json")).unwrap();
+                let identity = std::fs::read(root.join("state/agent.json")).unwrap();
+                let marker_before = std::fs::read(root.join("state/maintenance.json")).ok();
+                let refused = case.starts_with("refuse-");
+                let resumed =
+                    helper_runtime::resume_with_fixture_key(&root, "fixture-key", &public);
+                if refused {
+                    let error = resumed.err().expect("unsafe cleanup must be refused");
+                    let expected = match case.as_str() {
+                        "refuse-foreign-marker" => "maintenance binding mismatch",
+                        "refuse-malformed" => "installation terminal result malformed",
+                        "refuse-disabled" => "installation locally blocked",
+                        "refuse-foreign-task" => "resume task Command mismatch",
+                        _ => "maintenance",
+                    };
+                    assert!(
+                        error.contains(expected)
+                            || (expected == "maintenance"
+                                && error.contains("workspace path unavailable")),
+                        "{case}: {error}"
+                    );
+                    assert_eq!(
+                        std::fs::read(root.join("state/maintenance.json")).ok(),
+                        marker_before
+                    );
+                    if case == "refuse-disabled" {
+                        assert_eq!(
+                            std::fs::read(root.join("state/disable-agent")).unwrap(),
+                            b"keep disabled"
+                        );
+                    }
+                } else {
+                    let mut owned = resumed.unwrap();
+                    let mut backend = ExecutionFixture {
+                        calls: vec![],
+                        pending: false,
+                        fail_validation: false,
+                    };
+                    owned.resume(&mut backend).unwrap();
+                    assert!(backend.calls.is_empty());
+                    owned.finalize().unwrap();
+                    owned.finalize().unwrap();
+                    assert!(!root.join("state/maintenance.json").exists());
+                    assert!(resume_task::read_back(&owned.transaction().id).is_err());
+                }
+                assert_eq!(
+                    std::fs::read(root.join("execution-result.json")).ok(),
+                    receipt
+                );
+                assert_eq!(
+                    std::fs::read(root.join("transaction.json")).unwrap(),
+                    transaction
+                );
+                assert_eq!(
+                    std::fs::read(root.join("state/agent.json")).unwrap(),
+                    identity
+                );
+                std::fs::write(root.join("helper-resumed"), b"terminal result recovered").unwrap();
+                return;
+            }
             let mut owned = helper_runtime::resume_with_fixture_key(&root, "fixture-key", &public).unwrap();
             let before = std::fs::read(root.join("transaction.json")).unwrap();
             let mut backend = ExecutionFixture { calls: vec![], pending: false, fail_validation: false };
@@ -365,9 +427,47 @@ fn production_parent_handoff_checks_gate_before_releasing_lock_to_actual_child()
     run_helper_scenario(true, "parent-launch");
 }
 
+#[test]
+fn terminal_cleanup_missing_maintenance_reenters_in_real_child() {
+    run_helper_scenario(true, "cleanup-missing-marker");
+}
+#[test]
+fn terminal_cleanup_absent_task_reenters_in_real_child() {
+    run_helper_scenario(true, "cleanup-absent-task");
+}
+#[test]
+fn terminal_cleanup_both_absent_is_idempotent_in_real_child() {
+    run_helper_scenario(true, "cleanup-both-absent");
+}
+#[test]
+fn terminal_cleanup_rollback_missing_marker_keeps_error_in_real_child() {
+    run_helper_scenario(true, "cleanup-rollback-missing-marker");
+}
+#[test]
+fn terminal_cleanup_refuses_foreign_and_untrusted_state() {
+    for case in [
+        "refuse-foreign-marker",
+        "refuse-malformed",
+        "refuse-missing-receipt",
+        "refuse-nonterminal",
+        "refuse-disabled",
+        "refuse-foreign-task",
+    ] {
+        run_helper_scenario(true, &format!("cleanup-{case}"));
+    }
+}
+
 fn run_helper_scenario(valid_task: bool, local_block: &str) {
     use install_plan::{Artifact, InstallPlan, OriginalService, Trigger};
     use sha2::{Digest, Sha256};
+    let cleanup_case = local_block.strip_prefix("cleanup-");
+    let local_block = if cleanup_case == Some("rollback-missing-marker") {
+        "rollback"
+    } else if cleanup_case.is_some() {
+        "execute"
+    } else {
+        local_block
+    };
     let root = std::env::temp_dir().join(format!(
         "rustdesk-helper-runtime-{}-{}",
         std::process::id(),
@@ -622,7 +722,32 @@ fn run_helper_scenario(valid_task: bool, local_block: &str) {
     }
     let exit = child.wait().unwrap();
     if matches!(local_block, "execute" | "pending" | "rollback" | "remote-idle-check") && exit.success() {
-        let mut child = std::process::Command::new(&helper)
+        if let Some(case)=cleanup_case {
+            if matches!(case,"missing-marker"|"rollback-missing-marker"|"both-absent"|"refuse-malformed"|"refuse-missing-receipt"|"refuse-nonterminal") {
+                std::fs::remove_file(root.join("state/maintenance.json")).unwrap();
+            }
+            if matches!(case,"absent-task"|"both-absent") {resume_task::remove(&transaction_id).unwrap();}
+            if case=="refuse-foreign-marker" {
+                let path=root.join("state/maintenance.json");
+                let mut marker:serde_json::Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                marker["nonce"]="e".repeat(64).into();
+                std::fs::write(path,serde_json::to_vec(&marker).unwrap()).unwrap();
+            }
+            if case=="refuse-malformed" {std::fs::write(root.join("execution-result.json"),b"malformed receipt").unwrap();}
+            if case=="refuse-missing-receipt" {std::fs::remove_file(root.join("execution-result.json")).unwrap();}
+            if case=="refuse-nonterminal" {
+                let mut tx=transaction::Transaction::decode(&std::fs::read(root.join("transaction.json")).unwrap()).unwrap();
+                tx.phase=transaction::Phase::Applying;std::fs::write(root.join("transaction.json"),serde_json::to_vec(&tx).unwrap()).unwrap();
+            }
+            if case=="refuse-disabled" {std::fs::write(root.join("state/disable-agent"),b"keep disabled").unwrap();}
+            if case=="refuse-foreign-task" {
+                assert!(std::process::Command::new(r"C:\Windows\System32\schtasks.exe")
+                    .args(["/Change","/TN",&format!("RustDeskManagementAgentResume-{transaction_id}"),"/TR",r"C:\Windows\System32\cmd.exe /c exit 0"]).status().unwrap().success());
+            }
+        }
+        let mut command = std::process::Command::new(&helper);
+        if let Some(case)=cleanup_case {command.env("RUSTDESK_CLEANUP_CASE",case);}
+        let mut child = command
             .args(["--exact", "helper_process_prepares_only_after_exact_assets_identity_and_parent_validation", "--nocapture"])
             .env("RUSTDESK_HELPER_RUNTIME_FIXTURE", &root)
             .env("RUSTDESK_HELPER_FIXTURE_PUBLIC", STANDARD.encode(public))
@@ -643,6 +768,15 @@ fn run_helper_scenario(valid_task: bool, local_block: &str) {
         }
         let expected: &[u8] = if local_block == "remote-idle-check" { b"activity refusal preserved" } else { b"terminal result recovered" };
         assert_eq!(std::fs::read(root.join("helper-resumed")).unwrap(), expected);
+        if let Some(case)=cleanup_case {
+            if case.starts_with("refuse-") {
+                let task = resume_task::read_back(&transaction_id).unwrap();
+                if case == "refuse-foreign-task" {
+                    assert!(task.contains("cmd.exe"));
+                }
+                resume_task::remove(&transaction_id).unwrap();
+            }
+        }
     }
     if valid_task && !matches!(local_block, "execute" | "pending" | "rollback") {
         resume_task::remove(&transaction_id).unwrap();
@@ -675,7 +809,7 @@ fn run_helper_scenario(valid_task: bool, local_block: &str) {
         transaction::Transaction::decode(&std::fs::read(root.join("transaction.json")).unwrap())
             .unwrap()
             .phase,
-        if matches!(local_block, "execute" | "pending") { transaction::Phase::Committed } else if local_block == "rollback" { transaction::Phase::RolledBack } else { transaction::Phase::StoppingServices },
+        if cleanup_case==Some("refuse-nonterminal") { transaction::Phase::Applying } else if matches!(local_block, "execute" | "pending") { transaction::Phase::Committed } else if local_block == "rollback" { transaction::Phase::RolledBack } else { transaction::Phase::StoppingServices },
         "takeover validation must not execute install or stop services"
     );
     std::fs::remove_dir_all(root).unwrap();

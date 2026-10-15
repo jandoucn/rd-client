@@ -425,6 +425,286 @@ fn agent_command_matches(observed: &str, expected: &str) -> bool {
         && observed.eq_ignore_ascii_case(&format!("{path}{arguments}"))
 }
 
+fn missing_service(error: &windows_service::Error) -> bool {
+    matches!(error, windows_service::Error::Winapi(error) if error.raw_os_error() == Some(1060))
+}
+
+fn recreate_missing_agent(
+    config: &ServiceConfig,
+    paths: &AgentPaths,
+    manifest: &BootstrapManifest,
+    budget: &mut BootstrapBudget,
+    budget_path: &Path,
+) -> Result<(), String> {
+    use std::ffi::OsString;
+    use windows_service::service::{ServiceErrorControl, ServiceInfo};
+    let fixed = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+    if paths.agent != fixed.agent
+        || paths.state != fixed.state
+        || paths.root != fixed.root
+        || (!manifest.normal_install_path.is_empty()
+            && !super::approved_normal_install_path(Path::new(&manifest.normal_install_path)))
+    {
+        return Err("bootstrap repair outside fixed layout".into());
+    }
+    super::workspace::verify(&root(paths))?;
+    super::workspace::verify_file(&root(paths).join("bootstrap.json"))?;
+    super::workspace::verify_file(&root(paths).join("rustdesk-recovery-bootstrap.exe"))?;
+    super::workspace::verify_restore_target(&agent_path(paths), false)?;
+    super::workspace::verify_restore_target(&paths.state.join("agent.json"), false)?;
+    let bytes = std::fs::read(paths.state.join("agent.json")).map_err(|e| e.to_string())?;
+    if bytes.len() > 65536 {
+        return Err("bootstrap repair state too large".into());
+    }
+    let state: super::AgentState =
+        serde_json::from_slice(&bytes).map_err(|_| "bootstrap repair state malformed")?;
+    let mut blocked = state.disabled
+        || !state.management_agent_enabled
+        || state.agent_installation_id.len() != 32
+        || !state
+            .agent_installation_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || state.edition != config.edition
+        || state.package_kind != config.package_kind
+        || state.normal_install_path != manifest.normal_install_path;
+    for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
+        match std::fs::symlink_metadata(paths.state.join(name)) {
+            Ok(_) => blocked = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("bootstrap repair gate unreadable: {e}")),
+        }
+    }
+    let action = bootstrap_policy::decide_missing(
+        &BootstrapObservation {
+            agent: recovery::ServiceState::Absent,
+            trusted_agent: true,
+            disabled_start: false,
+            agent_locally_disabled: blocked,
+            maintenance: false,
+            retry_due: super::unix_timestamp() >= budget.next_at,
+        },
+        recovery_windows::read_intent()? == recovery::Intent::Enabled,
+    );
+    if action != BootstrapAction::RecreateAgent {
+        return Ok(());
+    }
+    super::workspace::verify_restore_target(&paths.state.join("service-recovery-enabled"), false)?;
+    let target = hbb_common::UpdateTarget {
+        size: std::fs::metadata(agent_path(paths))
+            .map_err(|e| e.to_string())?
+            .len(),
+        sha256: manifest.agent_sha256.clone(),
+        ..Default::default()
+    };
+    let _agent_lock = super::package_gate::lock_verified_file(&agent_path(paths), &target)?;
+    let _bootstrap_lock = super::package_gate::lock_verified_file(
+        &root(paths).join("rustdesk-recovery-bootstrap.exe"),
+        &target,
+    )?;
+    verify_registered_task(&root(paths).join("rustdesk-recovery-bootstrap.exe"), config)?;
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .map_err(|e| e.to_string())?;
+    match manager.open_service("RustDeskManagementAgent", ServiceAccess::QUERY_STATUS) {
+        Ok(_) => return Err("bootstrap repair service appeared; no overwrite".into()),
+        Err(e) if missing_service(&e) => {}
+        Err(e) => return Err(format!("bootstrap repair absence unconfirmed: {e}")),
+    }
+    for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
+        match std::fs::symlink_metadata(paths.state.join(name)) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("bootstrap repair gate unreadable: {e}")),
+        }
+    }
+    if std::fs::read(paths.state.join("agent.json")).map_err(|e| e.to_string())? != bytes
+        || recovery_windows::read_intent()? != recovery::Intent::Enabled
+    {
+        return Err("bootstrap repair authorization changed".into());
+    }
+    super::workspace::verify_restore_target(&paths.state.join("service-recovery-enabled"), false)?;
+    budget.failures = budget.failures.saturating_add(1);
+    budget.next_at =
+        super::unix_timestamp().saturating_add(if budget.failures <= 3 { 300 } else { 3600 });
+    save_budget(budget_path, budget)?;
+    let mut args: Vec<OsString> = vec![
+        "--service".into(),
+        "--edition".into(),
+        config.edition.name().into(),
+        "--package-kind".into(),
+        config.package_kind.extension().into(),
+    ];
+    if !manifest.normal_install_path.is_empty() {
+        args.extend([
+            "--normal-install-path".into(),
+            manifest.normal_install_path.clone().into(),
+        ]);
+    }
+    let info = ServiceInfo {
+        name: "RustDeskManagementAgent".into(),
+        display_name: "RustDesk Management Agent".into(),
+        service_type: ServiceType::OWN_PROCESS,
+        start_type: ServiceStartType::AutoStart,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: agent_path(paths),
+        launch_arguments: args,
+        dependencies: vec![],
+        account_name: None,
+        account_password: None,
+    };
+    let service = manager
+        .create_service(
+            &info,
+            ServiceAccess::QUERY_CONFIG
+                | ServiceAccess::QUERY_STATUS
+                | ServiceAccess::START
+                | ServiceAccess::CHANGE_CONFIG,
+        )
+        .map_err(|e| format!("bootstrap fixed agent creation failed: {e}"))?;
+    service
+        .set_description("Maintains the RustDesk service installation.")
+        .map_err(|e| format!("bootstrap fixed agent description failed: {e}"))?;
+    let registered = service.query_config().map_err(|e| e.to_string())?;
+    let mut expected = format!(
+        "\"{}\" --service --edition {} --package-kind {}",
+        agent_path(paths).display(),
+        config.edition.name(),
+        config.package_kind.extension()
+    );
+    if !manifest.normal_install_path.is_empty() {
+        expected.push_str(&format!(
+            " --normal-install-path \"{}\"",
+            manifest.normal_install_path
+        ));
+    }
+    if !agent_command_matches(&registered.executable_path.to_string_lossy(), &expected)
+        || registered.service_type != ServiceType::OWN_PROCESS
+        || registered.start_type != ServiceStartType::AutoStart
+        || !registered
+            .account_name
+            .as_ref()
+            .is_some_and(|v| v.to_string_lossy().eq_ignore_ascii_case("LocalSystem"))
+    {
+        return Err("bootstrap created agent contract mismatch".into());
+    }
+    service
+        .start::<&str>(&[])
+        .map_err(|e| format!("bootstrap recreated agent start failed: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let status = service.query_status().map_err(|e| e.to_string())?;
+        if status.current_state == ServiceState::Running {
+            return Ok(());
+        }
+        if status.current_state != ServiceState::StartPending
+            || std::time::Instant::now() >= deadline
+        {
+            return Err(format!(
+                "bootstrap recreated agent not running: {:?}",
+                status.current_state
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+std::thread_local! { static INSTALLED_RUNTIME_FIXTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+std::thread_local! { static RESTORE_KEY_FIXTURE: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) }; }
+
+fn restore_missing_agent(
+    config: &ServiceConfig,
+    paths: &AgentPaths,
+    manifest: &BootstrapManifest,
+) -> Result<(), String> {
+    let fixed = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+    if paths != &fixed
+        || config.normal_install_path.as_deref() != Some(Path::new(r"C:\Program Files\RustDesk"))
+    {
+        return Err("agent restore outside fixed layout".into());
+    }
+    let Some(_guard) =
+        recovery_windows::install_guard::InstallGuard::try_acquire().map_err(|e| e.to_string())?
+    else {
+        return Err("agent restore installation busy".into());
+    };
+    if !super::rescue_assets::r3_cycle_allowed()? {
+        return Err("agent restore locally blocked".into());
+    }
+    super::workspace::verify(&root(paths))?;
+    super::workspace::verify_file(&root(paths).join("bootstrap.json"))?;
+    verify_registered_task(&root(paths).join("rustdesk-recovery-bootstrap.exe"), config)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| e.to_string())?;
+    let service = manager
+        .open_service(
+            "RustDeskManagementAgent",
+            ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::START,
+        )
+        .map_err(|e| format!("agent restore service unavailable: {e}"))?;
+    let check = || -> Result<(), String> {
+        let status = service.query_status().map_err(|e| e.to_string())?;
+        let registered = service.query_config().map_err(|e| e.to_string())?;
+        super::agent_restore::gate(
+            if status.current_state == ServiceState::Stopped {
+                "stopped"
+            } else {
+                "unknown"
+            },
+            registered.start_type == ServiceStartType::Disabled,
+            status.process_id.is_some() || super::agent_restore::process_present()?,
+        )?;
+        let command = format!(
+            "\"{}\" --service --edition {} --package-kind {} --normal-install-path \"{}\"",
+            agent_path(paths).display(),
+            config.edition.name(),
+            config.package_kind.extension(),
+            manifest.normal_install_path
+        );
+        if !agent_command_matches(&registered.executable_path.to_string_lossy(), &command)
+            || registered.service_type != ServiceType::OWN_PROCESS
+            || !registered
+                .account_name
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("LocalSystem"))
+        {
+            return Err("agent restore fixed service mismatch".into());
+        }
+        if !super::rescue_assets::r3_cycle_allowed()? {
+            return Err("agent restore locally blocked".into());
+        }
+        Ok(())
+    };
+    check()?;
+    let budget_path = root(paths).join("budget.json");
+    let mut budget = match std::fs::read(&budget_path) {
+        Ok(bytes) => serde_json::from_slice::<BootstrapBudget>(&bytes)
+            .map_err(|_| "agent restore budget malformed")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BootstrapBudget::default(),
+        Err(_) => return Err("agent restore budget unreadable".into()),
+    };
+    if super::unix_timestamp() < budget.next_at {
+        return Err("agent restore budget deferred".into());
+    }
+    let build: serde_json::Value = serde_json::from_str(include_str!("../../version.json"))
+        .map_err(|_| "agent restore build unavailable")?;
+    let build = build["build_seq"]
+        .as_u64()
+        .ok_or("agent restore build absent")?;
+    #[cfg(not(test))]
+    let key:Option<Vec<u8>>=None;
+    #[cfg(test)]let key=RESTORE_KEY_FIXTURE.with(|value|value.borrow().clone());
+    super::agent_restore::restore(&manifest.agent_sha256,config.edition.name(),config.package_kind.extension(),build,key.as_deref(),||{
+        check()?;budget.failures=budget.failures.saturating_add(1);budget.next_at=super::unix_timestamp().saturating_add(if budget.failures<=3{300}else{3600});save_budget(&budget_path,&budget)
+    },&check)?;
+    check()?;service.start::<&str>(&[]).map_err(|e|format!("agent restore start failed: {e}"))?;
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(30);
+    loop{let status=service.query_status().map_err(|e|e.to_string())?;if status.current_state==ServiceState::Running&&status.process_id.is_some(){return Ok(());}if status.current_state!=ServiceState::StartPending||std::time::Instant::now()>=deadline{return Err("restored agent did not reach Running".into());}std::thread::sleep(std::time::Duration::from_millis(250));}
+}
+
 pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String> {
     require_admin()?;
     if super::purge_marker_path(paths).exists()
@@ -435,6 +715,12 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
     }
     let directory = root(paths);
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    let current = if INSTALLED_RUNTIME_FIXTURE.with(|v| v.get()) {
+        directory.join("rustdesk-recovery-bootstrap.exe")
+    } else {
+        current
+    };
     if current != directory.join("rustdesk-recovery-bootstrap.exe") {
         return Err("bootstrap runtime path mismatch".into());
     }
@@ -454,6 +740,15 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
                 .unwrap_or_default()
     {
         return Err("bootstrap configuration mismatch".into());
+    }
+    if file_hash(&current)? == manifest.agent_sha256 {
+        match std::fs::symlink_metadata(agent_path(paths)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return restore_missing_agent(config, paths, &manifest)
+            }
+            Err(error) => return Err(format!("agent file observation unavailable: {error}")),
+            Ok(_) => {}
+        }
     }
     if file_hash(&current)? != manifest.agent_sha256
         || file_hash(&agent_path(paths))? != manifest.agent_sha256
@@ -480,12 +775,15 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
     };
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| error.to_string())?;
-    let service = manager
+    let service = match manager
         .open_service(
             "RustDeskManagementAgent",
             ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS | ServiceAccess::START,
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            Ok(service) => service,
+            Err(error) if missing_service(&error) => return recreate_missing_agent(config, paths, &manifest, &mut budget, &budget_path),
+            Err(error) => return Err(error.to_string()),
+        };
     let observed = service.query_status().map_err(|error| error.to_string())?;
     let registered = service.query_config().map_err(|error| error.to_string())?;
     let mut expected = format!(
@@ -566,6 +864,578 @@ pub fn remove_task() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_restore_review_revocation_after_copy_preserves_missing_and_partial() {
+        use super::super::{agent_restore, workspace};
+        use std::cell::Cell;
+        assert!(matches!(
+            std::env::var("COMPUTERNAME").unwrap().as_str(),
+            "RDLAB-WIN10" | "RDLAB-WIN11"
+        ));
+        for reason in [
+            "disable-agent",
+            "disable-recovery",
+            "maintenance.json",
+            "stop-service",
+            "unknown-intent",
+            "running",
+            "pid",
+            "disabled",
+        ] {
+            let root = Path::new(r"C:\RustDeskAgentLab")
+                .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
+            workspace::create(&root).unwrap();
+            let source = root.join("approved.exe");
+            let destination = root.join("agent.exe");
+            let marker = root.join(reason);
+            let budget_path = root.join("budget.json");
+            let original = b"approved fixture bytes";
+            std::fs::write(&source, original).unwrap();
+            std::fs::write(root.join("original-data"), b"keep").unwrap();
+            save_budget(
+                &budget_path,
+                &BootstrapBudget {
+                    failures: 0,
+                    next_at: 0,
+                },
+            )
+            .unwrap();
+            let calls = Cell::new(0);
+            let marker_copy = marker.clone();
+            let temp = root.join("agent-restore-staging/agent.exe");
+            let temp_copy = temp.clone();
+            let result = agent_restore::publication_fixture(
+                &source,
+                &destination,
+                original.len() as u64,
+                &hex::encode(Sha256::digest(original)),
+                || {
+                    calls.set(calls.get() + 1);
+                    assert!(!temp.parent().unwrap().exists());
+                    save_budget(
+                        &budget_path,
+                        &BootstrapBudget {
+                            failures: 1,
+                            next_at: 300,
+                        },
+                    )
+                },
+                || {
+                    match reason {
+                        "running" | "pid" | "disabled" => {
+                            if marker.exists() {
+                                agent_restore::gate(
+                                    if reason == "running" {
+                                        "running"
+                                    } else {
+                                        "stopped"
+                                    },
+                                    reason == "disabled",
+                                    reason == "pid",
+                                )?;
+                            }
+                        }
+                        "stop-service" | "unknown-intent" => {
+                            if marker.exists()
+                                && recovery_windows::read_intent_from(&marker)
+                                    != Ok(recovery::Intent::Enabled)
+                            {
+                                return Err(format!("revoked: {reason}"));
+                            }
+                        }
+                        _ => {
+                            if marker.exists() {
+                                return Err(format!("revoked: {reason}"));
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                move || {
+                    assert_eq!(std::fs::read(temp_copy).unwrap(), original);
+                    std::fs::write(
+                        marker_copy,
+                        if reason == "stop-service" {
+                            "[options]\nstop-service='Y'"
+                        } else {
+                            reason
+                        },
+                    )
+                    .unwrap();
+                },
+            );
+            assert!(
+                result.is_err(),
+                "copy-time {reason} revocation still published final EXE"
+            );
+            let expected = if matches!(reason, "running" | "pid" | "disabled") {
+                String::from("agent restore requires stopped non-disabled service without live PID")
+            } else {
+                format!("revoked: {reason}")
+            };
+            assert_eq!(result.unwrap_err(), expected);
+            assert!(!destination.exists());
+            assert_eq!(std::fs::read(&temp).unwrap(), original);
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+            assert_eq!(std::fs::read(root.join("original-data")).unwrap(), b"keep");
+            assert_eq!(
+                std::fs::read_to_string(marker).unwrap(),
+                if reason == "stop-service" {
+                    "[options]\nstop-service='Y'"
+                } else {
+                    reason
+                }
+            );
+            let budget: BootstrapBudget =
+                serde_json::from_slice(&std::fs::read(budget_path).unwrap()).unwrap();
+            assert_eq!(budget.failures, 1);
+            assert_eq!(budget.next_at, 300);
+            assert_eq!(calls.get(), 1);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn agent_restore_review_budget_write_failure_precedes_creation() {
+        use super::super::{agent_restore, workspace};
+        use std::os::windows::fs::OpenOptionsExt;
+        assert!(matches!(
+            std::env::var("COMPUTERNAME").unwrap().as_str(),
+            "RDLAB-WIN10" | "RDLAB-WIN11"
+        ));
+        let root = Path::new(r"C:\RustDeskAgentLab")
+            .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
+        workspace::create(&root).unwrap();
+        let source = root.join("approved.exe");
+        let destination = root.join("agent.exe");
+        let budget_path = root.join("budget.json");
+        std::fs::write(&source, b"approved").unwrap();
+        save_budget(
+            &budget_path,
+            &BootstrapBudget {
+                failures: 2,
+                next_at: 17,
+            },
+        )
+        .unwrap();
+        let before = std::fs::read(&budget_path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&budget_path)
+            .unwrap();
+        let result = agent_restore::publication_fixture(
+            &source,
+            &destination,
+            8,
+            &hex::encode(Sha256::digest(b"approved")),
+            || {
+                save_budget(
+                    &budget_path,
+                    &BootstrapBudget {
+                        failures: 3,
+                        next_at: 300,
+                    },
+                )
+            },
+            || panic!("gate after failed budget"),
+            || panic!("copy after failed budget"),
+        );
+        assert!(result.unwrap_err().contains("budget publish failed"));
+        assert!(!destination.exists());
+        assert!(!root.join("agent-restore-staging").exists());
+        assert_eq!(std::fs::read(&budget_path).unwrap(), before);
+        assert_eq!(std::fs::read(source).unwrap(), b"approved");
+        drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_restore_review_success_debits_once_and_rechecks_copied_file() {
+        use super::super::{agent_restore, workspace};
+        use std::cell::Cell;
+        assert!(matches!(
+            std::env::var("COMPUTERNAME").unwrap().as_str(),
+            "RDLAB-WIN10" | "RDLAB-WIN11"
+        ));
+        let root = Path::new(r"C:\RustDeskAgentLab")
+            .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
+        workspace::create(&root).unwrap();
+        let source = root.join("approved.exe");
+        let destination = root.join("agent.exe");
+        let budget_path = root.join("budget.json");
+        let temp = root.join("agent-restore-staging/agent.exe");
+        std::fs::write(&source, b"approved").unwrap();
+        let debit = Cell::new(0);
+        let checks = Cell::new(0);
+        agent_restore::publication_fixture(
+            &source,
+            &destination,
+            8,
+            &hex::encode(Sha256::digest(b"approved")),
+            || {
+                debit.set(debit.get() + 1);
+                assert!(!temp.exists());
+                save_budget(
+                    &budget_path,
+                    &BootstrapBudget {
+                        failures: 1,
+                        next_at: 300,
+                    },
+                )
+            },
+            || {
+                checks.set(checks.get() + 1);
+                assert!(temp.is_file(), "final gate must follow real copy");
+                assert!(!destination.exists());
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(debit.get(), 1);
+        assert_eq!(checks.get(), 1);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved");
+        assert!(!temp.parent().unwrap().exists());
+        assert!(agent_restore::publish_fixture(
+            &source,
+            &destination,
+            8,
+            &hex::encode(Sha256::digest(b"approved"))
+        )
+        .unwrap_err()
+        .contains("occupied"));
+        assert_eq!(std::fs::read(destination).unwrap(), b"approved");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_restore_review_occupied_partial_and_bad_source_preserve_evidence() {
+        use super::super::{agent_restore, workspace};
+        assert!(matches!(
+            std::env::var("COMPUTERNAME").unwrap().as_str(),
+            "RDLAB-WIN10" | "RDLAB-WIN11"
+        ));
+        for scenario in ["partial", "bad-source", "appeared"] {
+            let root = Path::new(r"C:\RustDeskAgentLab")
+                .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
+            workspace::create(&root).unwrap();
+            let source = root.join("approved.exe");
+            let destination = root.join("agent.exe");
+            let temp = root.join("agent-restore-staging/agent.exe");
+            std::fs::write(
+                &source,
+                if scenario == "bad-source" {
+                    b"tampered"
+                } else {
+                    b"approved"
+                },
+            )
+            .unwrap();
+            if scenario == "partial" {
+                workspace::create(temp.parent().unwrap()).unwrap();
+                std::fs::write(&temp, b"partial evidence").unwrap();
+            }
+            let appeared = destination.clone();
+            let result = agent_restore::publication_fixture(
+                &source,
+                &destination,
+                8,
+                &hex::encode(Sha256::digest(b"approved")),
+                || Ok(()),
+                || Ok(()),
+                move || {
+                    if scenario == "appeared" {
+                        std::fs::write(appeared, b"existing bad exe").unwrap();
+                    }
+                },
+            );
+            let error = result.unwrap_err();
+            match scenario {
+                "partial" => {
+                    assert!(error.contains("already exists"));
+                    assert_eq!(std::fs::read(temp).unwrap(), b"partial evidence");
+                    assert!(!destination.exists());
+                }
+                "bad-source" => {
+                    assert!(error.contains("integrity"));
+                    assert!(!destination.exists());
+                    assert!(!temp.parent().unwrap().exists());
+                    assert_eq!(std::fs::read(&source).unwrap(), b"tampered");
+                }
+                _ => {
+                    assert!(error.contains("no-overwrite publication failed"));
+                    assert_eq!(std::fs::read(destination).unwrap(), b"existing bad exe");
+                    assert_eq!(std::fs::read(temp).unwrap(), b"approved");
+                }
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "Win11 SYSTEM same-build missing fixed agent restore; v218 runner"]
+    fn agentrestore_fixed_missing_exe_restores_samebuild_and_preserves_main() {
+        use super::super::{
+            service_control::{self, Contract},
+            Edition, PackageKind,
+        };
+        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        assert_eq!(std::env::var("RUSTDESK_AGENT_RESTORE_LAB").unwrap(), "v218");
+        let config = ServiceConfig {
+            edition: Edition::Sos,
+            package_kind: PackageKind::Msi,
+            normal_install_path: Some(PathBuf::from(r"C:\Program Files\RustDesk")),
+        };
+        let paths = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+        let agent = agent_path(&paths);
+        let backup = agent.with_extension("exe.v218-owned-backup");
+        assert!(!backup.exists());
+        let bytes = std::fs::read(&agent).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "d46fcbc3d4554fea8d8bdfa0166cd69c0597f09484210572d6e50280e543f423"
+        );
+        let identity = hbb_common::config::Config::file();
+        let original_identity = std::fs::read(&identity).unwrap();
+        let budget_path = root(&paths).join("budget.json");
+        let old_budget = match std::fs::read(&budget_path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("{e}"),
+        };
+        let main = Contract {
+            name: "RustDesk".into(),
+            executable: r"C:\Program Files\RustDesk\RustDesk.exe".into(),
+            arguments: vec!["--service".into()],
+            start_type: ServiceStartType::AutoStart,
+        };
+        let main_before = service_control::inspect(&main).unwrap();
+        let agent_contract = Contract {
+            name: "RustDeskManagementAgent".into(),
+            executable: agent.clone(),
+            arguments: vec![
+                "--service".into(),
+                "--edition".into(),
+                "sos".into(),
+                "--package-kind".into(),
+                "msi".into(),
+                "--normal-install-path".into(),
+                r"C:\Program Files\RustDesk".into(),
+            ],
+            start_type: ServiceStartType::AutoStart,
+        };
+        let bundle: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(paths.agent.join("rescue/current/bundle.json")).unwrap(),
+        )
+        .unwrap();
+        let public = super::super::rescue_assets::fixed_source_public_fixture(&bundle).unwrap();
+        // The installed old bootstrap must not race the explicit missing-file fixture.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateMutexW(
+                a: *const std::ffi::c_void,
+                o: i32,
+                n: *const u16,
+            ) -> *mut std::ffi::c_void;
+            fn WaitForSingleObject(h: *mut std::ffi::c_void, t: u32) -> u32;
+            fn ReleaseMutex(h: *mut std::ffi::c_void) -> i32;
+            fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+        }
+        struct Guard(*mut std::ffi::c_void);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe {
+                    ReleaseMutex(self.0);
+                    CloseHandle(self.0);
+                }
+            }
+        }
+        let mutex = "Global\\RustDeskManagementAgentInstall"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex.as_ptr()) };
+        assert!(!handle.is_null());
+        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, 0);
+        let _guard = Guard(handle);
+        INSTALLED_RUNTIME_FIXTURE.with(|v| v.set(true));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), String> {
+                run_once(&config, &paths)?;
+                assert_eq!(service_control::inspect(&main)?.pid, main_before.pid);
+                service_control::stop(&agent_contract, std::time::Duration::from_secs(60))?;
+                std::fs::rename(&agent, &backup).map_err(|e| e.to_string())?;
+                let state_before = std::fs::read(paths.state.join("agent.json")).unwrap();
+                let error = run_once(&config, &paths).unwrap_err();
+                assert!(
+                    error.contains("signature") || error.contains("signing key"),
+                    "{error}"
+                );
+                assert!(!agent.exists());
+                assert_eq!(
+                    std::fs::read(paths.state.join("agent.json")).unwrap(),
+                    state_before
+                );
+                for marker in ["disable-agent", "disable-recovery", "maintenance.json"] {
+                    let path = paths.state.join(marker);
+                    assert!(!path.exists());
+                    std::fs::write(&path, b"v218-owned").unwrap();
+                    let blocked = run_once(&config, &paths);
+                    assert_eq!(std::fs::read(&path).unwrap(), b"v218-owned");
+                    std::fs::remove_file(&path).unwrap();
+                    blocked?;
+                    assert!(!agent.exists());
+                }
+                RESTORE_KEY_FIXTURE.with(|v| *v.borrow_mut() = Some(public.clone()));
+                run_once(&config, &paths)?;
+                assert_eq!(std::fs::read(&agent).unwrap(), bytes);
+                assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+                assert_eq!(
+                    service_control::inspect(&agent_contract)?.state,
+                    ServiceState::Running
+                );
+                assert_eq!(service_control::inspect(&main)?.pid, main_before.pid);
+                assert_eq!(std::fs::read(&identity).unwrap(), original_identity);
+                let output = Command::new(&agent)
+                    .args([
+                        "status",
+                        "--json",
+                        "--edition",
+                        "sos",
+                        "--package-kind",
+                        "msi",
+                    ])
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                assert!(output.status.success());
+                let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(status["agent"]["build_seq"], 2026100502);
+                assert_eq!(
+                    status["agent_installation_id"],
+                    "dcc73dd2fba22bf04c7df497053ae2df"
+                );
+                assert_eq!(status["application"]["state"], "ready");
+                println!("AGENT_RESTORED_FROM_APPROVED_BUNDLE=true;same_build=2026100502;main_pid_unchanged=true;identity_unchanged=true;actual_agent_status_verified=true");
+                Ok(())
+            },
+        ));
+        RESTORE_KEY_FIXTURE.with(|v| *v.borrow_mut() = None);
+        INSTALLED_RUNTIME_FIXTURE.with(|v| v.set(false));
+        if backup.exists() {
+            if agent.exists() {
+                service_control::stop(&agent_contract, std::time::Duration::from_secs(60)).unwrap();
+                let evidence = agent.with_extension(format!(
+                    "exe.v218-restored-evidence-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                assert!(!evidence.exists());
+                std::fs::rename(&agent, evidence).unwrap();
+            }
+            std::fs::rename(&backup, &agent).unwrap();
+            service_control::start(&agent_contract, std::time::Duration::from_secs(60)).unwrap();
+        }
+        match old_budget {
+            Some(value) => {
+                std::fs::write(&budget_path, value).unwrap();
+            }
+            None => {
+                if budget_path.exists() {
+                    std::fs::remove_file(&budget_path).unwrap();
+                }
+            }
+        }
+        assert_eq!(std::fs::read(&agent).unwrap(), bytes);
+        assert_eq!(std::fs::read(&identity).unwrap(), original_identity);
+        assert_eq!(
+            service_control::inspect(&main).unwrap().pid,
+            main_before.pid
+        );
+        assert_eq!(
+            service_control::inspect(&agent_contract).unwrap().state,
+            ServiceState::Running
+        );
+        println!("ORIGINAL_AGENT_BACKUP_RESTORED=true;main_client_never_stopped=true");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("restore failed after original recovery: {error}"),
+            Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+
+    #[test]
+    fn only_scm_1060_is_absence() {
+        for code in [5, 6, 1058, 1060, 1072, 1722] {
+            assert_eq!(
+                missing_service(&windows_service::Error::Winapi(
+                    std::io::Error::from_raw_os_error(code)
+                )),
+                code == 1060
+            );
+        }
+    }
+
+    #[test]
+    fn missing_agent_repair_requires_explicit_readable_user_intent() {
+        let path = std::env::temp_dir().join(format!(
+            "bootstrap-repair-intent-{}.toml",
+            std::process::id()
+        ));
+        let observation = BootstrapObservation {
+            agent: recovery::ServiceState::Absent,
+            trusted_agent: true,
+            disabled_start: false,
+            agent_locally_disabled: false,
+            maintenance: false,
+            retry_due: true,
+        };
+        for (text, expected) in [
+            ("[options]\nstop-service='N'", true),
+            ("[options]\nstop-service='Y'", false),
+            ("[options]\nstop-service='unknown'", false),
+            ("not valid toml", false),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let intent = recovery_windows::read_intent_from(&path);
+            assert_eq!(
+                bootstrap_policy::decide_missing(
+                    &observation,
+                    intent == Ok(recovery::Intent::Enabled)
+                ) == BootstrapAction::RecreateAgent,
+                expected
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            bootstrap_policy::decide_missing(
+                &observation,
+                recovery_windows::read_intent_from(&path) == Ok(recovery::Intent::Enabled)
+            ),
+            BootstrapAction::Observe
+        );
+    }
+
+    #[test]
+    #[ignore = "Win10 SYSTEM fixed installed bootstrap fixture, current-exe identity only substituted"]
+    fn fixed_installed_bootstrap_repair_entry() {
+        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        assert_eq!(
+            std::env::var("RUSTDESK_BOOTSTRAP_REPAIR_LAB").unwrap(),
+            "v210"
+        );
+        let config = ServiceConfig {
+            edition: super::super::Edition::Standard,
+            package_kind: super::super::PackageKind::Msi,
+            normal_install_path: Some(PathBuf::from(r"C:\Program Files\RustDesk")),
+        };
+        let paths = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+        INSTALLED_RUNTIME_FIXTURE.with(|v| v.set(true));
+        let result = run_once(&config, &paths);
+        INSTALLED_RUNTIME_FIXTURE.with(|v| v.set(false));
+        result.unwrap();
+    }
 
     #[test]
     fn initialization_defers_while_another_installation_owns_the_machine_lock() {

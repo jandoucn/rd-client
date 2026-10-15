@@ -16,6 +16,43 @@ fn observation() -> bootstrap::BootstrapObservation {
 }
 
 #[test]
+fn missing_agent_requires_explicit_absence_and_every_local_gate() {
+    let mut cases = 0;
+    for state in [
+        recovery::ServiceState::Absent,
+        recovery::ServiceState::Unknown,
+        recovery::ServiceState::Stopped,
+        recovery::ServiceState::Running,
+    ] {
+        for mask in 0u8..64 {
+            let bit = |n: u32| mask & (1u8 << n) != 0;
+            let o = bootstrap::BootstrapObservation {
+                agent: state,
+                trusted_agent: bit(0),
+                disabled_start: bit(1),
+                agent_locally_disabled: bit(2),
+                maintenance: bit(3),
+                retry_due: bit(4),
+            };
+            let expected = state == recovery::ServiceState::Absent
+                && o.trusted_agent
+                && !o.disabled_start
+                && !o.agent_locally_disabled
+                && !o.maintenance
+                && o.retry_due
+                && bit(5);
+            assert_eq!(
+                bootstrap::decide_missing(&o, bit(5)) == bootstrap::BootstrapAction::RecreateAgent,
+                expected,
+                "state={state:?} mask={mask}"
+            );
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 256);
+}
+
+#[test]
 fn dtf_both_services_stopped_requires_agent_start_then_main_recovery() {
     let o = observation();
     assert_eq!(

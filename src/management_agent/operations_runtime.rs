@@ -107,7 +107,13 @@ fn resolve_approved_package(
 fn download_approved(directory: &std::path::Path, target: &hbb_common::UpdateTarget) -> Result<(std::path::PathBuf, package_gate::LockedPackage), PollError> {
     #[cfg(test)]
     if let Some((_, address)) = LOCAL_PACKAGE_FIXTURE.with(|value| value.borrow().clone()) {
-        return super::package_download::download_fixture(directory, target, address).map_err(Into::into);
+        let started = std::time::Instant::now();
+        let result = super::package_download::download_fixture(directory, target, address);
+        let elapsed_ms = started.elapsed().as_millis();
+        let evidence = serde_json::json!({"elapsed_ms":elapsed_ms,"size":target.size,"sha256":target.sha256,
+            "primary":target.primary,"mirrors":target.mirrors,"success":result.is_ok(),"error":result.as_ref().err()});
+        std::fs::write(directory.with_extension("download-timing.json"),serde_json::to_vec_pretty(&evidence).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        return result.map_err(Into::into);
     }
     super::package_download::download(directory, target).map_err(Into::into)
 }
@@ -430,6 +436,15 @@ fn poll_with_identity(
         return Err("agent enrollment identity mismatch".into());
     }
     binding["enrollment_generation"] = generation.into();
+    let directory = paths.state.join("local-events");
+    if directory.exists() { workspace::verify(&directory)?; } else { workspace::create(&directory)?; }
+    let mut credentials = super::local_events::LocalEvents::open(&directory.join("events.json"))
+        .map_err(|_| "agent enrollment binding unavailable")?;
+    credentials.remember_binding(super::local_events::Binding {
+        client_id: identity.id.clone(), client_uuid: identity.uuid.clone(),
+        agent_installation_id: state.agent_installation_id.clone(), enrollment_generation: generation,
+    }).map_err(|_| "agent enrollment binding persistence failed")?;
+    super::local_event_runtime::poll(identity, base, &binding, paths);
     let mut log = CommandJournal::open(&paths.state.join(format!("commands-{generation}.json")))?;
     log.prune_confirmed(unix_timestamp())?;
     upload_events(identity, base, &binding, &mut log)?;
@@ -515,7 +530,7 @@ fn poll_with_identity(
             let root = paths.agent.join("transactions").join(&command.id);
             match super::command_transaction::read_terminal(&root, wire) {
                 Ok(Some(status)) => {
-                    log.finish(&command.id, status, serde_json::json!({"transaction_id":command.id}), unix_timestamp())?;
+                    log.finish(&command.id, status, terminal_event_result(&command.id, status), unix_timestamp())?;
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -609,8 +624,23 @@ fn poll_with_identity(
     upload_events(identity, base, &binding, &mut log)
 }
 
+#[cfg(test)]
+pub(super) fn delivery_contract_poll(base: &str, state: &AgentState, paths: &AgentPaths) -> Result<(), PollError> {
+    poll_with_identity(&identity::load_existing()?, base, state, paths)
+}
+
 fn command_type(wire: &serde_json::Value) -> Result<&str, PollError> {
     wire["type"].as_str().ok_or_else(|| PollError::from("command type missing"))
+}
+
+fn terminal_event_result(id: &str, status: &str) -> serde_json::Value {
+    let mut result = serde_json::json!({"transaction_id":id});
+    match status {
+        "rolled_back" => result["error_code"] = "installation_failed_rolled_back".into(),
+        "rollback_failed" => result["error_code"] = "installation_rollback_failed".into(),
+        _ => {}
+    }
+    result
 }
 
 fn upload_events(
@@ -657,6 +687,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delivery_rollback_events_have_fixed_codes_and_keep_local_error() {
+        let directory=std::env::temp_dir().join(format!("agent-rollback-contract-{}",std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let error=b"private-key=secret-token; C:\\private\\user; installation validation failed";
+        let receipt=directory.join("execution-result.json");
+        std::fs::write(&receipt,error).unwrap();
+        for (status,code) in [("rolled_back","installation_failed_rolled_back"),("rollback_failed","installation_rollback_failed")] {
+            let payload=terminal_event_result(&"a".repeat(32),status);
+            assert_eq!(payload["error_code"],code);
+            assert_eq!(payload.as_object().unwrap().len(),2);
+            assert!(!payload.to_string().contains("secret"));
+            assert_eq!(std::fs::read(&receipt).unwrap(),error);
+        }
+        assert_eq!(terminal_event_result(&"a".repeat(32),"succeeded"),serde_json::json!({"transaction_id":"a".repeat(32)}));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn local_command_native_child() {
         let Some(root) = std::env::var_os("RUSTDESK_HELPER_RUNTIME_FIXTURE") else { return; };
         assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
@@ -699,6 +747,67 @@ mod tests {
         assert_eq!(result.phase, expected, "{:?}", result.error);
         if rollback { assert!(result.error.as_deref().unwrap().contains("validation failed")); }
         let receipt = std::fs::read(root.join("execution-result.json")).unwrap();
+        if matches!(
+            std::env::var("RUSTDESK_P09_RUN").ok().as_deref(),
+            Some("p09-v201" | "p09-v203" | "p09-v209")
+        ) {
+            use sha2::{Digest, Sha256};
+            let plan = super::super::install_plan::InstallPlan::decode(
+                &std::fs::read(root.join("prepared.json")).unwrap(),
+            )
+            .unwrap();
+            let task = super::super::resume_task::read_back(&plan.transaction_id).unwrap();
+            super::super::resume_task::verify(
+                &task,
+                &root.join(&plan.helper.relative_path),
+                &plan.transaction_id,
+            )
+            .unwrap();
+            let marker =
+                std::fs::read(r"C:\ProgramData\RustDesk\ManagementAgent\state\maintenance.json")
+                    .unwrap();
+            let marker_released = std::env::var("RUSTDESK_P09_RUN").unwrap() == "p09-v209";
+            if marker_released {
+                let binding = super::super::handoff::Handoff::decode(
+                    &std::fs::read(root.join("handoff.json")).unwrap(),
+                )
+                .unwrap();
+                super::super::maintenance::release_owned(
+                    std::path::Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state"),
+                    &plan.installation_id,
+                    &plan.transaction_id,
+                    &binding.plan_sha256,
+                    &binding.nonce,
+                )
+                .unwrap();
+                assert!(!std::path::Path::new(
+                    r"C:\ProgramData\RustDesk\ManagementAgent\state\maintenance.json"
+                )
+                .exists());
+                assert_eq!(
+                    super::super::resume_task::read_back(&plan.transaction_id).unwrap(),
+                    task
+                );
+            }
+            let digest = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+            let barrier = serde_json::json!({"schema":1,"run_id":std::env::var("RUSTDESK_P09_RUN").unwrap(),"root":root,"transaction_id":plan.transaction_id,
+                "phase":result.phase,"error":result.error,"public":STANDARD.encode(&public),
+                "helper_sha256":digest(&std::fs::read(root.join(&plan.helper.relative_path)).unwrap()),
+                "receipt_sha256":digest(&receipt),"transaction_sha256":digest(&std::fs::read(root.join("transaction.json")).unwrap()),
+                "maintenance_sha256":digest(&marker),"marker_released":marker_released,"task_sha256":digest(task.as_bytes()),
+                "helper_owner":super::super::handoff::ObservedProcess::open(std::process::id()).unwrap().owner(),
+                "barrier_utc":unix_timestamp()});
+            super::super::state_store::publish(
+                &root.join("p09-barrier.json"),
+                &serde_json::to_vec_pretty(&barrier).unwrap(),
+            )
+            .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(900);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            panic!("P09 poweroff did not arrive; preserve terminal scene");
+        }
         struct NoTerminalMutation;
         impl super::super::install_execution::Backend for NoTerminalMutation {
             fn stop_services(&mut self) -> Result<(), String> { panic!("terminal resume stopped services") }
@@ -745,6 +854,204 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires SYSTEM lab VM with v139 baseline and real cross-build MSI mirror sources"]
+    fn local_api_mirrors_upgrade_real_msi_and_report_once() {
+        local_api_command_scenario_with_mirrors(false, true, true, true);
+    }
+
+    #[test]
+    #[ignore = "Requires SYSTEM lab VM with v139 baseline and real cross-build MSI mirror sources"]
+    fn local_api_mirrors_validation_failure_restores_real_msi_and_reports_once() {
+        local_api_command_scenario_with_mirrors(true, false, true, true);
+    }
+
+    #[test]
+    #[ignore = "Win10 SYSTEM P09 automatic boot bridge only; never a production CLI test"]
+    fn p09_boot_bridge_resumes_terminal_without_backend() {
+        use sha2::{Digest, Sha256};
+        use std::path::{Path, PathBuf};
+        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        let root = PathBuf::from(std::env::var_os("RUSTDESK_P09_ROOT").unwrap());
+        let lab = root.ancestors().nth(4).unwrap();
+        assert_eq!(lab.parent(), Some(Path::new(r"C:\RustDeskAgentLab")));
+        assert!(lab
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("local-command-"));
+        workspace::verify(&root).unwrap();
+        workspace::verify_file(&root.join("p09-barrier.json")).unwrap();
+        let barrier: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("p09-barrier.json")).unwrap()).unwrap();
+        assert!(matches!(
+            barrier["run_id"].as_str(),
+            Some("p09-v201" | "p09-v203" | "p09-v209")
+        ));
+        assert_eq!(barrier["root"], root.to_str().unwrap());
+        let hash = |path: &Path| hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
+        let plan = super::super::install_plan::InstallPlan::decode(
+            &std::fs::read(root.join("prepared.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(barrier["transaction_id"], plan.transaction_id);
+        assert_eq!(
+            std::env::current_exe().unwrap(),
+            root.join(&plan.helper.relative_path)
+        );
+        assert_eq!(
+            hash(&std::env::current_exe().unwrap()),
+            barrier["helper_sha256"]
+        );
+        for (file, field) in [
+            ("execution-result.json", "receipt_sha256"),
+            ("transaction.json", "transaction_sha256"),
+        ] {
+            assert_eq!(hash(&root.join(file)), barrier[field]);
+        }
+        let task = super::super::resume_task::read_back(&plan.transaction_id).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(task.as_bytes())),
+            barrier["task_sha256"]
+        );
+        let live = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
+        let intent = hbb_common::config::Config2::file();
+        let handoff = super::super::handoff::Handoff::decode(
+            &std::fs::read(root.join("handoff.json")).unwrap(),
+        )
+        .unwrap();
+        let missing_marker = barrier["run_id"] == "p09-v209";
+        if missing_marker {
+            assert_eq!(barrier["marker_released"], true);
+            assert!(!live.join("maintenance.json").exists());
+            super::super::maintenance::verify_terminal_cleanup(
+                live,
+                &intent,
+                &plan.installation_id,
+                &plan.transaction_id,
+                &handoff.plan_sha256,
+                &handoff.nonce,
+            )
+            .unwrap();
+        } else {
+            super::super::maintenance::verify(
+                live,
+                &intent,
+                &plan.installation_id,
+                &plan.transaction_id,
+                &handoff.plan_sha256,
+                &handoff.nonce,
+            )
+            .unwrap();
+            assert_eq!(
+                hash(&live.join("maintenance.json")),
+                barrier["maintenance_sha256"]
+            );
+        }
+        // The existing fixture resume API uses local state paths. Copy only after verifying the live gates.
+        workspace::create(&root.join("state")).unwrap();
+        std::fs::copy(live.join("agent.json"), root.join("state/agent.json")).unwrap();
+        if !missing_marker {
+            std::fs::copy(
+                live.join("maintenance.json"),
+                root.join("state/maintenance.json"),
+            )
+            .unwrap();
+        }
+        std::fs::copy(&intent, root.join("intent.toml")).unwrap();
+        let public = STANDARD
+            .decode(barrier["public"].as_str().unwrap())
+            .unwrap();
+        let mut owner =
+            super::super::helper_runtime::resume_with_fixture_key(&root, "fixture-key", &public)
+                .unwrap();
+        struct NoBackend(u32);
+        impl super::super::install_execution::Backend for NoBackend {
+            fn stop_services(&mut self) -> Result<(), String> {
+                self.0 += 1;
+                Err("P09 unexpected stop".into())
+            }
+            fn apply_package(
+                &mut self,
+            ) -> Result<super::super::install_execution::InstallOutcome, String> {
+                self.0 += 1;
+                Err("P09 unexpected install".into())
+            }
+            fn validate_target(
+                &mut self,
+            ) -> Result<super::super::install_execution::Validation, String> {
+                self.0 += 1;
+                Err("P09 unexpected validation".into())
+            }
+            fn rollback_original(
+                &mut self,
+            ) -> Result<super::super::install_execution::Validation, String> {
+                self.0 += 1;
+                Err("P09 unexpected rollback".into())
+            }
+        }
+        let mut backend = NoBackend(0);
+        let result = owner.resume(&mut backend).unwrap();
+        assert_eq!(backend.0, 0);
+        assert_eq!(
+            serde_json::to_value(result.phase).unwrap(),
+            barrier["phase"]
+        );
+        assert_eq!(
+            serde_json::to_value(&result.error).unwrap(),
+            barrier["error"]
+        );
+        assert_eq!(
+            hash(&root.join("execution-result.json")),
+            barrier["receipt_sha256"]
+        );
+        assert_eq!(
+            hash(&root.join("transaction.json")),
+            barrier["transaction_sha256"]
+        );
+        if missing_marker {
+            assert!(!live.join("maintenance.json").exists());
+            assert!(!root.join("state/maintenance.json").exists());
+            super::super::maintenance::verify_terminal_cleanup(
+                live,
+                &intent,
+                &plan.installation_id,
+                &plan.transaction_id,
+                &handoff.plan_sha256,
+                &handoff.nonce,
+            )
+            .unwrap();
+        } else {
+            super::super::maintenance::verify(
+                live,
+                &intent,
+                &plan.installation_id,
+                &plan.transaction_id,
+                &handoff.plan_sha256,
+                &handoff.nonce,
+            )
+            .unwrap();
+            super::super::maintenance::release_owned(
+                live,
+                &plan.installation_id,
+                &plan.transaction_id,
+                &handoff.plan_sha256,
+                &handoff.nonce,
+            )
+            .unwrap();
+        }
+        owner.finalize().unwrap();
+        assert!(!live.join("maintenance.json").exists());
+        assert!(!root.join("state/maintenance.json").exists());
+        assert!(super::super::resume_task::read_back(&plan.transaction_id).is_err());
+        super::super::state_store::publish(&root.join("p09-resumed.json"),&serde_json::to_vec_pretty(&serde_json::json!({
+            "scope":"test-only automatic boot bridge; production CLI unverified","backend_calls":backend.0,"missing_marker_not_recreated":missing_marker,
+            "phase":result.phase,"error":result.error,"receipt_sha256":hash(&root.join("execution-result.json")),
+            "transaction_sha256":hash(&root.join("transaction.json")),"marker_removed":true,"original_task_removed":true,
+            "resume_owner":super::super::handoff::ObservedProcess::open(std::process::id()).unwrap().owner()
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
     fn local_command_poll_child() {
         let Some(root) = std::env::var_os("RUSTDESK_LOCAL_POLL_FIXTURE") else { return; };
         assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
@@ -785,7 +1092,122 @@ mod tests {
         std::fs::write(root.join(format!("poll-{phase}-owner.json")), serde_json::to_vec(process.owner()).unwrap()).unwrap();
     }
 
+    #[test]
+    #[ignore = "Win10 SYSTEM protected original device identity, report-only post-powercut fixture"]
+    fn powercut_original_identity_report_child() {
+        use sha2::{Digest, Sha256};
+        use std::path::{Path, PathBuf};
+        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        let root = PathBuf::from(std::env::var_os("RUSTDESK_REPORT_ROOT").unwrap());
+        assert_eq!(root.parent(), Some(Path::new(r"C:\RustDeskAgentLab")));
+        assert!(root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("local-command-"));
+        workspace::verify(&root).unwrap();
+        let secret_path = root.join("report-identity.json");
+        workspace::verify_file(&secret_path).unwrap();
+        let input: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&secret_path).unwrap()).unwrap();
+        assert!(matches!(
+            input["run_id"].as_str(),
+            Some("p09-v203" | "p09-v209")
+        ));
+        assert_eq!(input["root"], root.to_str().unwrap());
+        assert_eq!(
+            input["db"],
+            root.join("agent-status-test.db").to_str().unwrap()
+        );
+        let public = sign::PublicKey::from_slice(
+            &STANDARD.decode(input["public"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let secret = sign::SecretKey::from_slice(
+            &STANDARD.decode(input["secret"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let proof = sign::sign_detached(
+            input["command_digest"].as_str().unwrap().as_bytes(),
+            &secret,
+        );
+        assert!(sign::verify_detached(
+            &proof,
+            input["command_digest"].as_str().unwrap().as_bytes(),
+            &public
+        ));
+        let identity = identity::DeviceIdentity {
+            id: input["client_id"].as_str().unwrap().into(),
+            uuid: input["client_uuid"].as_str().unwrap().into(),
+            public,
+            secret,
+        };
+        let state: AgentState = serde_json::from_value(input["state"].clone()).unwrap();
+        assert_eq!(input["installation_id"], state.agent_installation_id);
+        assert_eq!(input["generation"], 1);
+        let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
+        let command = input["command"].as_str().unwrap();
+        let tx = paths.agent.join("transactions").join(command);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tx.join("command-binding.json")).unwrap())
+                .unwrap();
+        assert_eq!(binding["command_digest"], input["command_digest"]);
+        let receipt = std::fs::read(tx.join("execution-result.json")).unwrap();
+        let transaction = std::fs::read(tx.join("transaction.json")).unwrap();
+        let terminal: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+        assert_eq!(terminal["phase"], "rolled_back");
+        let journal = CommandJournal::open(&paths.state.join("commands-1.json")).unwrap();
+        assert!(matches!(
+            journal.state(command),
+            Some(ExecutionState::Running | ExecutionState::RolledBack)
+        ));
+        let address: std::net::SocketAddr = std::env::var("RUSTDESK_REPORT_API")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(address.ip().is_loopback() && address.port() > 0);
+        let phase = std::env::var("RUSTDESK_REPORT_PHASE").unwrap();
+        assert!(matches!(phase.as_str(), "lost-ack" | "retry" | "duplicate"));
+        let result = poll_with_identity(&identity, &format!("http://{address}"), &state, &paths);
+        let journal = CommandJournal::open(&paths.state.join("commands-1.json")).unwrap();
+        assert_eq!(journal.state(command), Some(ExecutionState::RolledBack));
+        if phase == "lost-ack" {
+            assert!(
+                result.is_err(),
+                "transport fixture must actually lose the accepted response"
+            );
+            assert_eq!(journal.pending_events().len(), 1);
+        } else {
+            result.unwrap();
+            assert!(journal.pending_events().is_empty());
+        }
+        assert_eq!(
+            std::fs::read(tx.join("execution-result.json")).unwrap(),
+            receipt
+        );
+        assert_eq!(
+            std::fs::read(tx.join("transaction.json")).unwrap(),
+            transaction
+        );
+        let events = journal
+            .pending_events()
+            .iter()
+            .map(|e| serde_json::json!({"event_id":e.event_id,"digest":e.digest}))
+            .collect::<Vec<_>>();
+        let evidence = serde_json::json!({"phase":phase,"owner":super::super::handoff::ObservedProcess::open(std::process::id()).unwrap().owner(),
+            "pending_events":events,"receipt_sha256":hex::encode(Sha256::digest(&receipt)),"transaction_sha256":hex::encode(Sha256::digest(&transaction))});
+        super::super::state_store::publish(
+            &root.join(format!("report-{phase}.json")),
+            &serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn local_api_command_scenario(rollback: bool, restart: bool, cross_build: bool) {
+        local_api_command_scenario_with_mirrors(rollback, restart, cross_build, false);
+    }
+
+    fn local_api_command_scenario_with_mirrors(rollback: bool, restart: bool, cross_build: bool, mirrors: bool) {
         use std::{io::{Read, Write}, net::TcpListener, path::{Path, PathBuf}, process::{Command, Stdio},
             sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Instant};
         use sha2::{Digest, Sha256};
@@ -842,6 +1264,12 @@ mod tests {
         let mut target = hbb_common::UpdateTarget {version:"1.5.3".into(),build_seq:target_build,source_commit:"fixture".into(),
             primary:format!("https://download.yan.life/rustdesk/stable/1.5.3/{target_name}"),
             size:package_bytes.len() as u64,sha256:package_hash,signature_key_id:"fixture-key".into(),..Default::default()};
+        if mirrors {
+            assert!(cross_build);
+            assert!(target.size > 60 * 1024 * 1024);
+            target.mirrors =
+                vec!["https://download.yan.life/rustdesk/stable/mirror/target-mirror.msi".into()];
+        }
         target.signature = STANDARD.encode(sign::sign_detached(&base::update::update_signature_payload(&manifest,key,&target).unwrap(), &release_secret));
         manifest.targets.insert(key.into(),target);
         let mut rollback_manifest = manifest.clone();
@@ -851,8 +1279,25 @@ mod tests {
         original.primary = format!("https://download.yan.life/rustdesk/stable/1.5.3/{rollback_name}");
         original.size = rollback_bytes.len() as u64;
         original.sha256 = hex::encode(Sha256::digest(&rollback_bytes));
+        if mirrors {
+            assert!(original.size > 60 * 1024 * 1024);
+            original.mirrors =
+                vec!["https://download.yan.life/rustdesk/stable/mirror/rollback-mirror.msi".into()];
+        }
         original.signature = STANDARD.encode(sign::sign_detached(&base::update::update_signature_payload(&rollback_manifest,key,&original).unwrap(),&release_secret));
         rollback_manifest.targets.insert(key.into(),original);
+        if mirrors {
+            std::fs::write(
+                root.join("mirror-target-manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("mirror-rollback-manifest.json"),
+                serde_json::to_vec_pretty(&rollback_manifest).unwrap(),
+            )
+            .unwrap();
+        }
         assert!(package_gate::verify(&manifest,key,2026100502).is_err());
         let db = root.join("agent-status-test.db");
         let php = std::env::var("AGENT_TEST_PHP").unwrap();
@@ -875,19 +1320,80 @@ mod tests {
         assert!(seeded.status.success(),"{}",String::from_utf8_lossy(&seeded.stderr));
         let wire:serde_json::Value=serde_json::from_slice(&seeded.stdout).unwrap();
         let command=wire["id"].as_str().unwrap().to_owned();
+        if matches!(std::env::var("RUSTDESK_P09_RUN").ok().as_deref(),Some("p09-v203"|"p09-v209")) {
+            use std::io::Write;
+            let saved = serde_json::json!({"schema":1,"run_id":std::env::var("RUSTDESK_P09_RUN").unwrap(),"root":root,"db":db,
+                "client_id":identity.id,"client_uuid":identity.uuid,"installation_id":actual.agent_installation_id,
+                "generation":1,"command":command,"command_digest":wire["digest"],"wire":wire,"state":actual,
+                "public":STANDARD.encode(identity.public.as_ref()),"secret":STANDARD.encode(identity.secret.as_ref())});
+            let path = root.join("report-identity.json");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&serde_json::to_vec(&saved).unwrap())
+                .unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            workspace::verify_file(&path).unwrap();
+            let readback: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let restored = sign::SecretKey::from_slice(
+                &STANDARD
+                    .decode(readback["secret"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            let challenge = wire["digest"].as_str().unwrap().as_bytes();
+            let signature = sign::sign_detached(challenge, &restored);
+            assert!(sign::verify_detached(
+                &signature,
+                challenge,
+                &identity.public
+            ));
+            let proof=php_command().args(["-r",r#"$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));$db->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);$key=$db->query('SELECT public_key FROM device_update_keys')->fetchColumn();$wire=json_decode($db->query('SELECT envelope FROM device_agent_commands')->fetchColumn(),true);if(!sodium_crypto_sign_verify_detached(base64_decode(getenv('PROOF')),getenv('DIGEST'),base64_decode($key)))exit(7);echo json_encode(['verified'=>true,'command'=>$wire['id']]);"#])
+                .env("AGENT_HTTP_FIXTURE_DB",&db).env("PROOF",STANDARD.encode(signature)).env("DIGEST",wire["digest"].as_str().unwrap()).output().unwrap();
+            assert!(
+                proof.status.success(),
+                "persisted identity did not verify against registered DB key"
+            );
+            super::super::state_store::publish(
+                &root.join("identity-persistence-proof.json"),
+                &proof.stdout,
+            )
+            .unwrap();
+        }
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();
         let download_address=listener.local_addr().unwrap();listener.set_nonblocking(true).unwrap();
         let stop=Arc::new(AtomicBool::new(false));let stop_server=Arc::clone(&stop);
+        let request_log = root.join("mirror-http-requests.json");
+        let server_target_name = target_name.clone();
         let downloader=std::thread::spawn(move || {
             let mut requests=0;
-            while !stop_server.load(Ordering::SeqCst) && requests<2 {
+            let mut evidence=Vec::new();
+            while !stop_server.load(Ordering::SeqCst) && requests < if mirrors { 4 } else { 2 } {
                 let mut stream=match listener.accept(){Ok((stream,_))=>stream,Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{std::thread::sleep(Duration::from_millis(20));continue},Err(error)=>panic!("download accept: {error}")};
                 stream.set_nonblocking(false).unwrap();stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();stream.set_write_timeout(Some(Duration::from_secs(60))).unwrap();
                 let mut bytes=Vec::new();while !bytes.ends_with(b"\r\n\r\n"){let mut byte=[0];stream.read_exact(&mut byte).unwrap();bytes.push(byte[0]);assert!(bytes.len()<8192);}
-                let name = if requests == 0 { target_name.as_str() } else { rollback_name };
+                let name = if mirrors {
+                    match requests { 0 => server_target_name.as_str(), 1 => "target-mirror.msi", 2 => rollback_name, _ => "rollback-mirror.msi" }
+                } else if requests == 0 { server_target_name.as_str() } else { rollback_name };
                 assert!(String::from_utf8_lossy(&bytes).starts_with(&format!("GET /{name} HTTP/1.1\r\n")));
-                let body = if requests == 0 { &package_bytes } else { &rollback_bytes };
+                if mirrors && requests % 2 == 0 {
+                    evidence.push(serde_json::json!({"path":format!("/{name}"),"status":503,"bytes":0}));
+                    std::fs::write(&request_log,serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+                    write!(stream,"HTTP/1.1 503 Fixture primary unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    requests+=1;
+                    continue;
+                }
+                let body = if requests == 0 || (mirrors && requests == 1) { &package_bytes } else { &rollback_bytes };
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+                if mirrors {
+                    evidence.push(serde_json::json!({"path":format!("/{name}"),"status":200,"bytes":body.len(),"sha256":hex::encode(Sha256::digest(body))}));
+                    std::fs::write(&request_log, serde_json::to_vec_pretty(&evidence).unwrap())
+                        .unwrap();
+                }
                 stream.write_all(body).unwrap();requests+=1;
             }
             requests
@@ -942,6 +1448,55 @@ mod tests {
             let journal_path=paths.state.join("commands-1.json");
             assert_eq!(CommandJournal::open(&journal_path).unwrap().state(&command),Some(ExecutionState::Running),
                 "launch must not report success or bypass preparation failure");
+            if mirrors {
+                let mut cache_evidence = Vec::new();
+                for (directory, expected_name, approved) in [
+                    (
+                        paths.agent.join(format!("approved-{command}")),
+                        target_name.as_str(),
+                        &manifest.targets[key],
+                    ),
+                    (
+                        paths.agent.join(format!("rollback-{command}")),
+                        rollback_name,
+                        &rollback_manifest.targets[key],
+                    ),
+                ] {
+                    let path = directory.join(expected_name);
+                    let timing: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(directory.with_extension("download-timing.json")).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(timing["success"], true);
+                    assert!(
+                        timing["elapsed_ms"].as_u64().unwrap() < 60000,
+                        "real package including verification must meet unchanged budget: {timing}"
+                    );
+                    let locked = package_gate::lock_verified_file(&path, approved).unwrap();
+                    assert!(
+                        std::fs::write(&path, b"must not replace a locked approved package")
+                            .is_err()
+                    );
+                    assert!(!directory.join("target-mirror.msi").exists());
+                    assert!(!directory.join("rollback-mirror.msi").exists());
+                    cache_evidence.push(serde_json::json!({"path":path,"basename":expected_name,"size":approved.size,"sha256":approved.sha256,"download_elapsed_ms":timing["elapsed_ms"]}));
+                    drop(locked);
+                }
+                std::fs::write(
+                    root.join("mirror-cache-verified.json"),
+                    serde_json::to_vec_pretty(&cache_evidence).unwrap(),
+                )
+                .unwrap();
+                let handoff = super::super::handoff::Handoff::decode(
+                    &std::fs::read(transaction_root.join("handoff.json")).unwrap(),
+                )
+                .unwrap();
+                std::fs::write(
+                    root.join("mirror-handoff-verified.json"),
+                    serde_json::to_vec_pretty(&handoff).unwrap(),
+                )
+                .unwrap();
+            }
             if restart {
                 assert!(!transaction_root.join("fixture-helper-finished").exists(), "launch process must exit before helper finalization");
                 let binding=super::super::handoff::Handoff::decode(&std::fs::read(transaction_root.join("handoff.json")).unwrap()).unwrap();
@@ -995,6 +1550,14 @@ mod tests {
                 assert_eq!(status["agent"]["build_seq"],expected_build);
                 assert_eq!(status["application"]["build_seq"],expected_build);
                 assert_eq!(status["application"]["state"],"ready");
+                if mirrors && !rollback {
+                    assert_eq!(
+                        hex::encode(Sha256::digest(
+                            std::fs::read(r"C:\Program Files\RustDesk\librustdesk.dll").unwrap()
+                        )),
+                        "8c523baf9937057c6d6260b0698963c544685c40d3bf6de485acad924143a9ef"
+                    );
+                }
                 std::fs::write(root.join("upgraded-status.json"),serde_json::to_vec_pretty(&status).unwrap()).unwrap();
             }
             if rollback {
@@ -1014,7 +1577,15 @@ mod tests {
         server.kill().unwrap();server.wait().unwrap();
         if restart { std::fs::remove_file(root.join("poll-fixture.json")).unwrap(); }
         if let Err(error)=outcome{std::panic::resume_unwind(error);}
-        assert_eq!(requests,2);
+        assert_eq!(requests,if mirrors {4} else {2});
+        if mirrors {
+            let requests:serde_json::Value=serde_json::from_slice(&std::fs::read(root.join("mirror-http-requests.json")).unwrap()).unwrap();
+            assert_eq!(requests.as_array().unwrap().iter().map(|v|v["path"].as_str().unwrap()).collect::<Vec<_>>(),
+                vec![format!("/{target_name}"),"/target-mirror.msi".into(),format!("/{rollback_name}"),"/rollback-mirror.msi".into()]);
+            assert_eq!(requests[0]["status"],503);assert_eq!(requests[2]["status"],503);
+            assert_eq!(requests[1]["bytes"],manifest.targets[key].size);
+            assert_eq!(requests[3]["bytes"],rollback_manifest.targets[key].size);
+        }
         println!("Local signed API/SQLite -> two HTTP downloads -> native helper -> one {} event: PASS", if rollback { "rolled_back" } else { "succeeded" });
         println!("Retained registered MSI transaction source: {}",transaction_root.display());
     }

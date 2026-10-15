@@ -5,6 +5,8 @@ mod handoff;
 mod health;
 #[path = "../management_agent/health_windows.rs"]
 mod health_windows;
+#[path = "windows_agent_registration.rs"]
+mod registration;
 
 pub fn start() {
     let metadata: serde_json::Value = match serde_json::from_str(include_str!("../../version.json"))
@@ -17,6 +19,7 @@ pub fn start() {
     };
     let version = metadata["version"].as_str().unwrap_or("").to_owned();
     let build = metadata["build_seq"].as_u64().unwrap_or(0);
+    registration::start(build);
     match health_windows::bind(r"\\.\pipe\RustDesk\management-health-v2") {
         Ok(listener) => {
             let activity_version = version.clone();

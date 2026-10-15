@@ -1,4 +1,5 @@
 import base64
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -121,6 +122,7 @@ if($result.Items.Count -gt 7){throw 'scope broadened'}
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(("PASS " + case).encode(), result.stdout)
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell mock harness requires Windows")
     def test_consent_and_defender_failures(self):
         for case in ["selected", "declined", "fresh-silent", "upgrade-yes", "upgrade-no", "already",
                      "unavailable", "read-failed", "denied", "partial", "ignored", "consent-read-failed",
@@ -205,6 +207,7 @@ if($result.Items.Count -gt 7){throw 'scope broadened'}
         self.assertIn('Value="0[INSTALLFOLDER_INNER]$(var.Product).exe|[ManagementAgent.Folder]rustdesk-management-agent.exe"',wxs)
         self.assertIn('AddFirewallRule(exeFile[0] == L\'1\', agentRuleName, extra)',cpp)
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell mock harness requires Windows")
     def test_invalid_scope_does_not_call_defender(self):
         source=SCRIPT.read_text(encoding='utf-8')
         fixture=r'''

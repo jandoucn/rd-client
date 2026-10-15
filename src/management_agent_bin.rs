@@ -18,6 +18,30 @@ fn windows_main() {
         .first()
         .map(|argument| argument.to_string_lossy().into_owned())
         .unwrap_or_else(|| "--service".to_owned());
+    if matches!(
+        command.as_str(),
+        "local-repair-prepare" | "local-repair-helper" | "local-repair-resume"
+    ) {
+        if let Err(error) = management_agent::run_local_repair(&arguments[1..], &command) {
+            eprintln!("local repair failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if matches!(
+        command.as_str(),
+        "exe-transaction-prepare"
+            | "exe-transaction-launch"
+            | "exe-transaction-helper"
+            | "exe-transaction-resume"
+            | "exe-selfcheck"
+    ) {
+        if let Err(error) = management_agent::run_exe_transaction(&arguments[1..], &command) {
+            eprintln!("EXE transaction failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if command == "transaction-helper" {
         if let Err(error) = management_agent::run_transaction_helper(&arguments[1..]) {
             eprintln!("management agent transaction helper failed: {error}");
@@ -35,6 +59,19 @@ fn windows_main() {
     if command == "--management-agent-recovery-helper" {
         if let Err(error) = management_agent::run_recovery_helper(&arguments) {
             eprintln!("management agent recovery helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(not(test))]
+    if command == "--purge-helper" {
+        if arguments.len() != 3 || arguments[1] != "--transaction-id" {
+            eprintln!("purge helper accepts only --transaction-id <32hex>");
+            std::process::exit(2);
+        }
+        let id = arguments.get(2).and_then(|value| value.to_str()).unwrap_or("");
+        if let Err(error) = management_agent::run_purge_helper(id) {
+            eprintln!("purge helper failed: {error}");
             std::process::exit(1);
         }
         return;
@@ -87,8 +124,13 @@ fn windows_main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(not(test))]
         "uninstall" if std::env::args().any(|arg| arg == "--purge") => {
             if let Err(error) = management_agent::purge(&paths) {
+                if error.starts_with("purge pending; helper transaction ") {
+                    println!("{error}");
+                    std::process::exit(10);
+                }
                 eprintln!("management agent purge failed: {error}");
                 std::process::exit(1);
             }

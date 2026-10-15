@@ -262,12 +262,25 @@ pub fn core_main() -> Option<Vec<String>> {
                 return None;
             } else if args[0] == "--update" {
                 if config::is_disable_installation() {
+                    #[path = "platform/windows_update_gate.rs"]
+                    mod update_gate;
+                    if let Some(code) = update_gate::disabled_exit_code(&args) {
+                        std::process::exit(code);
+                    }
                     return None;
                 }
 
+                if args.iter().any(|arg| arg.starts_with("--management-agent-outer-package"))
+                    && args.iter().any(|arg| arg == "--update-event" || arg.starts_with("--update-event="))
+                {
+                    log::error!("EXE update-event consumer unavailable; transaction not started");
+                    std::process::exit(1);
+                }
                 let pending_event = base::update::PendingUpdateEvent::from_cli_args(&args);
                 let mut failure_status = "failed";
-                let update_result = match crate::platform::prepare_custom_client_update() {
+                let update_result = if args.iter().any(|arg|arg.starts_with("--management-agent-outer-package")) {
+                    platform::migrate_exe_update(&args).map_err(|err|{let message=err.to_string();failure_status=if message.contains("[update-pending]"){"pending"}else if message.contains("[update-rolled-back]"){"rolled_back"}else if message.contains("[update-rollback-failed]"){"rollback_failed"}else{"failed"};err})
+                } else {match crate::platform::prepare_custom_client_update() {
                     Err(e) => {
                         log::error!("Error preparing custom client update: {}", e);
                         Err(e)
@@ -286,14 +299,29 @@ pub fn core_main() -> Option<Vec<String>> {
                         };
                         err
                     }),
-                };
+                }};
                 if let Some(event) = pending_event {
                     let status = if update_result.is_ok() {
                         "installed"
                     } else {
                         failure_status
                     };
-                    crate::updater::report_pending_update_terminal(status, &event);
+                    if status != "pending" {
+                        crate::updater::report_pending_update_terminal(status, &event);
+                    }
+                }
+                if args
+                    .iter()
+                    .any(|arg| arg.starts_with("--management-agent-outer-package"))
+                {
+                    match update_result {
+                        Ok(()) => std::process::exit(0),
+                        Err(err) => {
+                            log::error!("EXE transaction update failed: {err}");
+                            eprintln!("EXE transaction update failed: {err}");
+                            std::process::exit(if failure_status == "pending" { 75 } else { 1 })
+                        }
+                    }
                 }
                 let text = match update_result {
                     Ok(_) => "Updated successfully!".to_string(),

@@ -10,6 +10,7 @@ SCRIPT = REPO_ROOT / "macos-screen-permission.sh"
 
 
 class MacosScreenPermissionTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix" and Path("/bin/sh").is_file(), "POSIX shell fixture requires /bin/sh and POSIX paths")
     def test_startup_fix_clears_quarantine_and_does_not_touch_privacy_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -66,6 +67,7 @@ class MacosScreenPermissionTest(unittest.TestCase):
             self.assertNotIn("System Settings", commands)
             self.assertNotIn("--check-macos-permissions", commands)
 
+    @unittest.skipUnless(os.name == "posix" and Path("/bin/sh").is_file(), "POSIX shell fixture requires /bin/sh and POSIX paths")
     def test_invalid_signature_repairs_service_before_app_without_resetting_tcc(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

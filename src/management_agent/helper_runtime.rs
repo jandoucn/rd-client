@@ -110,6 +110,78 @@ pub struct OwnedInstallation {
     evidence: super::transaction::Evidence,
 }
 
+fn cleanup_receipt(
+    root: &Path,
+    plan: &InstallPlan,
+    transaction: &Transaction,
+) -> Result<bool, String> {
+    if !matches!(transaction.phase, Phase::Committed | Phase::RolledBack) {
+        return Ok(false);
+    }
+    let path = root.join("execution-result.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("terminal cleanup receipt unavailable: {error}")),
+        Ok(_) => {}
+    }
+    let result: serde_json::Value = serde_json::from_slice(&bounded_read(&path, 65536)?)
+        .map_err(|_| "installation terminal result malformed")?;
+    if result.get("schema") != Some(&serde_json::json!(1))
+        || result.get("transaction_id").and_then(|v| v.as_str())
+            != Some(plan.transaction_id.as_str())
+        || result.get("command_id")
+            != Some(&serde_json::to_value(&plan.command_id).map_err(|e| e.to_string())?)
+        || result.get("phase")
+            != Some(&serde_json::to_value(transaction.phase).map_err(|e| e.to_string())?)
+        || result.get("reboot_required").and_then(|v| v.as_bool()) != Some(false)
+    {
+        return Err("terminal cleanup receipt binding mismatch".into());
+    }
+    let error = result
+        .get("error")
+        .ok_or("terminal cleanup receipt incomplete")?;
+    if !(error.is_null() || error.is_string())
+        || (transaction.phase == Phase::Committed && !error.is_null())
+    {
+        return Err("terminal cleanup receipt inconsistent".into());
+    }
+    Ok(true)
+}
+
+fn cleanup_task_present(id: &str, helper: &Path) -> Result<bool, String> {
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("terminal cleanup task ID invalid".into());
+    }
+    // schtasks does not distinguish absent tasks from access failures. COM's exact
+    // FILE_NOT_FOUND result is the only absence accepted by terminal cleanup.
+    let script = format!(
+        r#"$ErrorActionPreference='Stop';try {{$s=New-Object -ComObject Schedule.Service;$s.Connect();$f=$s.GetFolder('\');try {{$t=$f.GetTask('RustDeskManagementAgentResume-{id}');[Console]::Out.Write('PRESENT')}}catch {{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};if($e.HResult -eq -2147024894){{[Console]::Out.Write('ABSENT')}}else{{throw}}}}}}catch{{[Console]::Error.Write('Task query failed');exit 1}}"#
+    );
+    let tool = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .ok_or("SystemRoot unavailable")?
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let output = std::process::Command::new(tool)
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| format!("terminal cleanup task query: {e}"))?;
+    if !output.status.success() {
+        return Err("terminal cleanup task query failed".into());
+    }
+    match output.stdout.as_slice() {
+        b"ABSENT" => Ok(false),
+        b"PRESENT" => {
+            resume_task::verify(&resume_task::read_back(id)?, helper, id)?;
+            Ok(true)
+        }
+        _ => Err("terminal cleanup task query ambiguous".into()),
+    }
+}
+
 impl OwnedInstallation {
     pub fn finalize(&self) -> Result<(), String> {
         if !matches!(self.transaction.phase, Phase::Committed | Phase::RolledBack) {
@@ -125,6 +197,9 @@ impl OwnedInstallation {
         }
         let plan = InstallPlan::decode(&bytes)?;
         plan.bind_transaction(&transaction)?;
+        if !cleanup_receipt(&self.root, &plan, &transaction)? {
+            return Err("installation finalization receipt missing".into());
+        }
         let result: serde_json::Value = serde_json::from_slice(&bounded_read(&self.root.join("execution-result.json"), 65536)?)
             .map_err(|_| "installation execution result malformed")?;
         if result["schema"] != 1 || result["transaction_id"] != plan.transaction_id
@@ -139,10 +214,21 @@ impl OwnedInstallation {
             return Err("installation finalization result inconsistent".into());
         }
         let helper = self.root.join(&plan.helper.relative_path);
-        resume_task::verify(&resume_task::read_back(&plan.transaction_id)?, &helper, &plan.transaction_id)?;
-        maintenance::release_owned(&self.state_directory, &plan.installation_id,
+        maintenance::verify_terminal_cleanup(&self.state_directory, &self.intent_path, &plan.installation_id,
             &plan.transaction_id, &self.plan_sha256, &self.nonce)?;
-        resume_task::remove(&plan.transaction_id)
+        cleanup_task_present(&plan.transaction_id, &helper)?;
+        match std::fs::symlink_metadata(self.state_directory.join("maintenance.json")) {
+            Ok(_) => maintenance::release_owned(&self.state_directory, &plan.installation_id,
+                &plan.transaction_id, &self.plan_sha256, &self.nonce)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("terminal cleanup maintenance unavailable: {error}")),
+        }
+        if cleanup_task_present(&plan.transaction_id, &helper)? {
+            maintenance::verify_terminal_cleanup(&self.state_directory, &self.intent_path, &plan.installation_id,
+                &plan.transaction_id, &self.plan_sha256, &self.nonce)?;
+            resume_task::remove(&plan.transaction_id)?;
+        }
+        Ok(())
     }
 
     pub fn transaction(&self) -> &Transaction {
@@ -178,8 +264,13 @@ impl OwnedInstallation {
             return Err("owned installation plan changed".into());
         }
         let plan = InstallPlan::decode(&bytes)?;
-        maintenance::verify(&self.state_directory, &self.intent_path, &plan.installation_id,
-            &plan.transaction_id, &self.plan_sha256, &self.nonce)?;
+        if cleanup_receipt(&self.root, &plan, &self.transaction)? {
+            maintenance::verify_terminal_cleanup(&self.state_directory, &self.intent_path, &plan.installation_id,
+                &plan.transaction_id, &self.plan_sha256, &self.nonce)?;
+        } else {
+            maintenance::verify(&self.state_directory, &self.intent_path, &plan.installation_id,
+                &plan.transaction_id, &self.plan_sha256, &self.nonce)?;
+        }
         if matches!(self.transaction.phase, Phase::Committed | Phase::RolledBack | Phase::RollbackFailed) {
             let transaction = Transaction::decode(&bounded_read(&self.root.join("transaction.json"), 65536)?)?;
             if transaction != self.transaction {
@@ -295,7 +386,9 @@ fn resume_checked(root: &Path, fixture_key: Option<(&str, &[u8])>) -> Result<Own
     let definition = String::from_utf8(bounded_read(&root.join("resume-definition.xml"), 16384)?)
         .map_err(|_| "resume task definition encoding invalid")?;
     resume_task::verify(&definition, &helper, &plan.transaction_id)?;
-    resume_task::verify(&resume_task::read_back(&plan.transaction_id)?, &helper, &plan.transaction_id)?;
+    let terminal_cleanup = cleanup_receipt(root, &plan, &transaction)?;
+    if terminal_cleanup { cleanup_task_present(&plan.transaction_id, &helper)?; }
+    else { resume_task::verify(&resume_task::read_back(&plan.transaction_id)?, &helper, &plan.transaction_id)?; }
     let state_directory = std::env::var_os("ProgramData").map(std::path::PathBuf::from)
         .unwrap_or_else(|| r"C:\ProgramData".into()).join("RustDesk/ManagementAgent/state");
     let intent_path = hbb_common::config::Config2::file();
@@ -303,8 +396,13 @@ fn resume_checked(root: &Path, fixture_key: Option<(&str, &[u8])>) -> Result<Own
     let (state_directory, intent_path) = if fixture_key.is_some() {
         (root.join("state"), root.join("intent.toml"))
     } else { (state_directory, intent_path) };
-    maintenance::verify(&state_directory, &intent_path, &plan.installation_id,
-        &plan.transaction_id, &binding.plan_sha256, &binding.nonce)?;
+    if terminal_cleanup {
+        maintenance::verify_terminal_cleanup(&state_directory, &intent_path, &plan.installation_id,
+            &plan.transaction_id, &binding.plan_sha256, &binding.nonce)?;
+    } else {
+        maintenance::verify(&state_directory, &intent_path, &plan.installation_id,
+            &plan.transaction_id, &binding.plan_sha256, &binding.nonce)?;
+    }
     let evidence = super::transaction::Evidence {
         package_verified:true,backups_verified:true,helper_verified:true,resume_task_verified:true,
         handoff_verified:true,maintenance_owned:true,services_stopped:false,target_verified:false,

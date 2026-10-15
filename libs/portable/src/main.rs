@@ -8,6 +8,7 @@ use std::{
 use bin_reader::{normalize_path, BinaryReader};
 
 pub mod bin_reader;
+mod update_args;
 #[cfg(windows)]
 mod ui;
 
@@ -187,7 +188,9 @@ fn setup(
     }
     write_meta(&dir, ts, &metadata_paths);
     #[cfg(windows)]
-    win::copy_runtime_broker(&dir);
+    if !update_args::is_transaction(_args) {
+        win::copy_runtime_broker(&dir);
+    }
     #[cfg(linux)]
     reader.configure_permission(&dir);
     Some(dir.join(&reader.exe))
@@ -234,7 +237,8 @@ fn execute(path: PathBuf, args: Vec<String>, _ui: bool) {
     let exe_name = exe.file_name().unwrap_or_default();
     // run executable
     let mut cmd = Command::new(path);
-    cmd.args(args);
+    let updating = update_args::is_transaction(&args);
+    cmd.args(update_args::forwarded(&args, &exe));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -255,6 +259,15 @@ fn execute(path: PathBuf, args: Vec<String>, _ui: bool) {
             .stderr(Stdio::inherit());
     }
     let _child = cmd.spawn();
+    if updating {
+        match _child {
+            Ok(mut child) => match child.wait() {
+                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                Err(_) => std::process::exit(1),
+            },
+            Err(_) => std::process::exit(1),
+        }
+    }
 
     #[cfg(windows)]
     if _ui {
@@ -301,6 +314,25 @@ fn main() -> Result<(), String> {
     let quick_support = false;
 
     let mut ui = false;
+    #[cfg(windows)]
+    if args
+        .iter()
+        .any(|arg| arg == "--management-agent-strict-assets")
+    {
+        let destination = management_agent_extract_path(&args);
+        let valid =
+            args == [
+                "--management-agent-strict-assets",
+                "--management-agent-inventory",
+            ] || (args.len() == 3
+                && args[0] == "--management-agent-strict-assets"
+                && args[1] == "--management-agent-extract-path"
+                && destination.is_some());
+        if !valid {
+            return Err("strict:arguments".into());
+        }
+        return bin_reader::strict_assets(destination.as_deref());
+    }
     let reader = BinaryReader::new()?;
     if let Some(extract_dir) = management_agent_extract_path(&args) {
         setup(reader, Some(extract_dir), true, &args, &mut ui)
@@ -309,7 +341,20 @@ fn main() -> Result<(), String> {
     }
     if let Some(exe) = setup(
         reader,
-        None,
+        if update_args::is_transaction(&args) {
+            Some(
+                std::env::temp_dir().join(format!(
+                    "rustdesk-update-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|e| e.to_string())?
+                        .as_nanos()
+                )),
+            )
+        } else {
+            None
+        },
         click_setup || args.contains(&"--silent-install".to_owned()),
         &args,
         &mut ui,

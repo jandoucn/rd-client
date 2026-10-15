@@ -1,0 +1,17 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- Acceptance-only. New-to-new RemoveExistingProducts delegation and legacy
+       caller migration must be verified before enabling deployable packages. -->
+  <?ifdef RustDeskMsiAdmission?>
+  <Fragment>
+    <Property Id="RUSTDESK_MSI_ADMISSION_SCHEMA" Value="1" />
+    <Property Id="RUSTDESK_ADMISSION_TX" Secure="yes" />
+    <Property Id="RUSTDESK_ADMISSION_STEP" Secure="yes" />
+    <Property Id="RUSTDESK_ADMISSION_NONCE" Secure="yes" Hidden="yes" />
+    <CustomAction Id="CheckAgentInstallAdmission" DllEntry="CheckAgentInstallAdmission"
+                  BinaryRef="Custom_Actions_Dll" Execute="immediate" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="CheckAgentInstallAdmission" Before="InstallInitialize" />
+    </InstallExecuteSequence>
+  </Fragment>
+  <?endif?>
+</Wix>
