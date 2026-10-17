@@ -618,6 +618,7 @@ class _RawTouchGestureDetectorRegionState
       // mobile
       ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
       _scale = d.scale;
+      if (isAndroid && !widget.isCamera && !ffiModel.touchMode) return;
       ffi.canvasModel.panX(d.focalPointDelta.dx);
       ffi.canvasModel.panY(d.focalPointDelta.dy);
     }

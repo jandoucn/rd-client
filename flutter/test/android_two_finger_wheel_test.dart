@@ -5,6 +5,24 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final touch in [false, true]) {
+    for (final direction in [-1.0, 1.0]) {
+      test('eight pixel accumulation touch=$touch direction=$direction', () {
+        var integral = 0.0;
+        var ticks = 0;
+        for (var step = 1; step <= 18; step++) {
+          final result = androidTwoFingerWheel(
+              integral: integral, delta: Offset(0, direction),
+              pointerCount: 2, androidController: true, touchMode: touch);
+          expect(result.wheel, step % 9 == 0 ? direction.toInt() : 0);
+          expect(result.integral, direction * (step % 9) / 8);
+          integral = result.integral;
+          ticks += result.wheel.abs();
+        }
+        expect(ticks, 2);
+      });
+    }
+  }
   testWidgets('arena rejection clears two finger remainder', (tester) async {
     final recognizer = CustomTouchGestureRecognizer();
     var cancelled = 0;
@@ -38,7 +56,7 @@ void main() {
       () {
     var result = androidTwoFingerWheel(
         integral: 0,
-        delta: const Offset(0, 4),
+        delta: const Offset(0, 8),
         pointerCount: 2,
         androidController: true,
         touchMode: false);
@@ -52,7 +70,7 @@ void main() {
     expect(result, (integral: 0.0, wheel: 1));
   });
   test('negative and large movements emit one wheel step and reset', () {
-    for (final dy in [-5.0, -100.0, 5.0, 100.0]) {
+    for (final dy in [-9.0, -100.0, 9.0, 100.0]) {
       expect(
           androidTwoFingerWheel(
               integral: 0,
@@ -67,7 +85,7 @@ void main() {
     expect(
         androidTwoFingerWheel(
             integral: 0.75,
-            delta: const Offset(0, -3),
+            delta: const Offset(0, -6),
             pointerCount: 2,
             androidController: true,
             touchMode: false),
@@ -76,7 +94,7 @@ void main() {
   test('negative exact threshold waits for additional movement', () {
     final result = androidTwoFingerWheel(
       integral: 0,
-      delta: const Offset(0, -4),
+      delta: const Offset(0, -8),
       pointerCount: 2,
       androidController: true,
       touchMode: false,
@@ -101,7 +119,7 @@ void main() {
         touchMode: false,
       );
       expect(reset, (integral: 0.0, wheel: 0));
-      expect(next, (integral: 0.5, wheel: 0));
+      expect(next, (integral: 0.25, wheel: 0));
     }
   });
   test('horizontal movement is ignored and diagonal uses vertical only', () {
@@ -117,7 +135,7 @@ void main() {
     expect(
         androidTwoFingerWheel(
                 integral: 0,
-                delta: const Offset(100, 5),
+                delta: const Offset(100, 9),
                 pointerCount: 2,
                 androidController: true,
                 touchMode: false)
@@ -129,7 +147,7 @@ void main() {
     expect(
       androidTwoFingerWheel(
         integral: 0,
-        delta: const Offset(0, 8),
+        delta: const Offset(0, 9),
         pointerCount: 2,
         androidController: true,
         touchMode: true,

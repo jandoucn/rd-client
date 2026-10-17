@@ -28,7 +28,7 @@ enum GestureState {
       (touchMode && delta.dy.abs() <= delta.dx.abs())) {
     return (integral: 0, wheel: 0);
   }
-  final next = integral + delta.dy / 4;
+  final next = integral + delta.dy / 8;
   if (next > 1) return (integral: 0, wheel: 1);
   if (next < -1) return (integral: 0, wheel: -1);
   return (integral: next, wheel: 0);

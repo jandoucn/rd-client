@@ -125,6 +125,20 @@ Future<void> finish(WidgetTester tester, List<TestPointer> pointers,
 
 void main() {
   tearDown(() => isSpecialHoldDragActive = false);
+  for (final spacing in [const Offset(0, 100), const Offset(100, 0), const Offset(20, 100)]) {
+    for (final delta in [const Offset(30, 0), const Offset(30, 20)]) {
+      testWidgets('Android mouse parallel cannot pan spacing=$spacing delta=$delta', (tester) async {
+        final ffi = FakeController(false);
+        final pointers = await startTouches(tester, ffi, spacing: spacing);
+        await move(tester, pointers, delta);
+        await move(tester, pointers, delta);
+        expect(ffi.canvasModel.scales, isNotEmpty);
+        expect(ffi.canvasModel.pans, isEmpty);
+        expect(ffi.inputModel.wheels, isEmpty);
+        await finish(tester, pointers);
+      });
+    }
+  }
   for (final touch in [false, true]) {
     for (final spacing in [const Offset(0, 100), const Offset(100, 0), const Offset(20, 100)]) {
       testWidgets('batched parallel pointers touch=$touch spacing=$spacing', (tester) async {
@@ -161,6 +175,7 @@ void main() {
         await tester.pump();
         expect(ffi.inputModel.wheels, isEmpty);
         expect(ffi.canvasModel.scales.any((value) => value > 1.05), isTrue);
+        if (!touch) expect(ffi.canvasModel.pans, isEmpty);
         await finish(tester, pointers);
       });
     }
@@ -191,7 +206,11 @@ void main() {
       await move(tester, pointers, const Offset(0, 30));
       await move(tester, pointers, const Offset(0, 20));
       expect(ffi.inputModel.wheels, isEmpty);
-      expect(ffi.canvasModel.pans.where((v) => v != 0), isNotEmpty);
+      if (touch) {
+        expect(ffi.canvasModel.pans.where((v) => v != 0), isNotEmpty);
+      } else {
+        expect(ffi.canvasModel.pans, isEmpty);
+      }
       await finish(tester, pointers);
     });
     testWidgets('camera vertical remains canvas touch=$touch', (tester) async {

@@ -276,10 +276,40 @@ class _GestureHelpState extends State<GestureHelp> {
                   ),
                 ),
                 Container(
-                    child: Wrap(
+                    child: GestureHelpCards(
+                  width: width,
+                  space: space,
+                  touchMode: _touchMode,
+                )),
+              ],
+            )));
+  }
+}
+
+class GestureHelpCards extends StatelessWidget {
+  const GestureHelpCards({
+    Key? key,
+    required this.width,
+    required this.touchMode,
+    this.space = 12.0,
+    this.android,
+    this.translator = translate,
+  }) : super(key: key);
+
+  final double width;
+  final double space;
+  final bool touchMode;
+  final bool? android;
+  final String Function(String) translator;
+
+  @override
+  Widget build(BuildContext context) {
+    final translate = translator;
+    final androidHelp = android ?? isAndroid;
+    return Wrap(
                   spacing: space,
                   runSpacing: 2 * space,
-                  children: _touchMode
+                  children: touchMode
                       ? [
                           GestureInfo(
                               width,
@@ -298,8 +328,12 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Mouse Drag")),
                           GestureInfo(
                               width,
-                              GestureIcons.iconGestureFThreeFingers,
-                              translate("Three-Finger vertically"),
+                              androidHelp
+                                  ? GestureIcons.iconGestureFDragUpDown_
+                                  : GestureIcons.iconGestureFThreeFingers,
+                              translate(androidHelp
+                                  ? "Two-finger vertical swipe"
+                                  : "Three-Finger vertically"),
                               translate("Mouse Wheel")),
                           GestureInfo(
                               width,
@@ -330,11 +364,16 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Mouse Drag")),
                           GestureInfo(
                               width,
-                              GestureIcons.iconGestureFThreeFingers,
-                              translate("Three-Finger vertically"),
+                              androidHelp
+                                  ? GestureIcons.iconGestureFDragUpDown_
+                                  : GestureIcons.iconGestureFThreeFingers,
+                              translate(androidHelp
+                                  ? "Two-finger vertical swipe"
+                                  : "Three-Finger vertically"),
                               translate("Mouse Wheel")),
-                          GestureInfo(
-                              width,
+                          if (!androidHelp)
+                            GestureInfo(
+                               width,
                               GestureIcons.iconGestureFDrag,
                               translate("Two-Finger Move"),
                               translate("Canvas Move")),
@@ -344,9 +383,7 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Pinch to Zoom"),
                               translate("Canvas Zoom")),
                         ],
-                )),
-              ],
-            )));
+                );
   }
 }
 
