@@ -39,6 +39,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:vector_math/vector_math.dart' show Vector2;
 
 import '../common.dart';
+import '../mobile/android_connection_resume.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
@@ -114,12 +115,75 @@ class FfiModel with ChangeNotifier {
 
   var _inputBlocked = false;
   final _permissions = <String, bool>{};
+  @visibleForTesting
+  bool? androidConnectionResumePlatformForTest;
   bool? _secure;
   bool? _direct;
   bool _touchMode = false;
   late VirtualMouseMode virtualMouseMode;
   Timer? _timer;
   Timer? _restartReconnectDelayTimer;
+  final _androidConnectionResumes = <SessionID, AndroidConnectionResume>{};
+
+  AndroidConnectionResume createAndroidConnectionResume(String peerId) {
+    final recoverySession = sessionId;
+    _androidConnectionResumes.remove(sessionId)?.close();
+    late final AndroidConnectionResume controller;
+    controller = AndroidConnectionResume(onRetry: () {
+      final owner = parent.target;
+      if (owner == null ||
+          owner.closed ||
+          owner.sessionId != recoverySession ||
+          owner.id != peerId ||
+          !identical(_androidConnectionResumes[recoverySession], controller)) {
+        return false;
+      }
+      _timer?.cancel();
+      _timer = null;
+      resetRestartReconnectState();
+      reconnect(owner.dialogManager, recoverySession, false);
+      return true;
+    });
+    _androidConnectionResumes[sessionId] = controller;
+    return controller;
+  }
+
+  void closeAndroidConnectionResume({AndroidConnectionResume? expected}) {
+    if (!_usesAndroidConnectionResume) return;
+    final controller = _androidConnectionResumes[sessionId];
+    if (controller == null ||
+        (expected != null && !identical(controller, expected))) return;
+    controller.close();
+    _timer?.cancel();
+    _timer = null;
+    resetRestartReconnectState();
+  }
+
+  bool _deferAndroidConnectionFailure(
+      Map<String, dynamic> evt, SessionID eventSession, String peerId) {
+    final controller = _androidConnectionResumes[eventSession];
+    final owner = parent.target;
+    if (!_usesAndroidConnectionResume ||
+        controller == null ||
+        owner == null ||
+        owner.closed ||
+        owner.sessionId != eventSession ||
+        owner.id != peerId) return false;
+    final type = evt['type'];
+    final title = evt['title'];
+    final text = evt['text'];
+    if (type is! String || title is! String || text is! String) return false;
+    final failure =
+        classifyAndroidConnectionFailure(type: type, title: title, text: text);
+    if (failure == null) return false;
+    final deferred = controller.deferFailure(failure);
+    if (!deferred) return false;
+    _timer?.cancel();
+    _timer = null;
+    resetRestartReconnectState();
+    return true;
+  }
+
   var _reconnects = 1;
   DateTime? _offlineReconnectStartTime;
   bool _androidDocumentPickerActive = false;
@@ -162,6 +226,8 @@ class FfiModel with ChangeNotifier {
 
   bool get isPeerAndroid => _pi.platform == kPeerPlatformAndroid;
   bool get isPeerMobile => isPeerAndroid;
+  bool get _usesAndroidConnectionResume =>
+      androidConnectionResumePlatformForTest ?? isAndroid;
 
   bool get isPeerLinux => _pi.platform == kPeerPlatformLinux;
   bool get isPeerWindows => _pi.platform == kPeerPlatformWindows;
@@ -248,6 +314,10 @@ class FfiModel with ChangeNotifier {
   bool get keyboard => _permissions['keyboard'] != false;
 
   clear() {
+    for (final controller in _androidConnectionResumes.values) {
+      controller.close();
+    }
+    // Mobile reuses the session ID; keep close intent until mobileReset.
     _pi = PeerInfo();
     lastUserDisplay = null;
     _cancelPendingMonitorRestore();
@@ -329,8 +399,23 @@ class FfiModel with ChangeNotifier {
 
   // todo: why called by two position
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
+    final recovery = _androidConnectionResumes[sessionId];
     return (evt) async {
       var name = evt['name'];
+      if (_usesAndroidConnectionResume &&
+          (name == 'connection_ready' ||
+              (name == 'msgbox' &&
+                  classifyAndroidConnectionFailure(
+                        type: evt['type'] is String ? evt['type'] : '',
+                        title: evt['title'] is String ? evt['title'] : '',
+                        text: evt['text'] is String ? evt['text'] : '',
+                      ) !=
+                      null)) &&
+          (parent.target?.sessionId != sessionId ||
+              parent.target?.id != peerId ||
+              !identical(_androidConnectionResumes[sessionId], recovery))) {
+        return;
+      }
       if (name == 'msgbox') {
         handleMsgBox(evt, sessionId, peerId);
       } else if (name == 'toast') {
@@ -344,6 +429,14 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'sync_platform_additions') {
         handlePlatformAdditions(evt, sessionId, peerId);
       } else if (name == 'connection_ready') {
+        if (_usesAndroidConnectionResume &&
+            parent.target?.id == peerId &&
+            parent.target?.closed == false) {
+          final controller = _androidConnectionResumes[sessionId];
+          if (controller != null) {
+            controller.connected();
+          }
+        }
         setConnectionType(peerId, evt['secure'] == 'true',
             evt['direct'] == 'true', evt['stream_type'] ?? '');
         resetRestartReconnectState();
@@ -882,6 +975,14 @@ class FfiModel with ChangeNotifier {
   /// Handle the message box event based on [evt] and [id].
   handleMsgBox(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
     if (parent.target == null) return;
+    if (_usesAndroidConnectionResume &&
+        shouldIgnoreClosedAndroidRecoveryEvent(
+          controllerClosed: _androidConnectionResumes[sessionId]?.closed == true,
+          type: evt['type'] is String ? evt['type'] as String : '',
+          title: evt['title'] is String ? evt['title'] as String : '',
+          text: evt['text'] is String ? evt['text'] as String : '',
+        )) return;
+    if (_deferAndroidConnectionFailure(evt, sessionId, peerId)) return;
     final dialogManager = parent.target!.dialogManager;
     final type = evt['type'];
     final title = evt['title'];
@@ -922,6 +1023,9 @@ class FfiModel with ChangeNotifier {
       enterUserLoginAndPasswordDialog(
           sessionId, dialogManager, 'terminal-admin-login-tip');
     } else if (type == 'restarting') {
+      if (_usesAndroidConnectionResume) {
+        _androidConnectionResumes[sessionId]?.retryStarted();
+      }
       // Treat restart messages as reconnect control events. Rust still sends
       // title/text for legacy UI and translation reuse; Flutter keeps the last
       // frame briefly, then shows the Connecting overlay.
@@ -1110,6 +1214,16 @@ class FfiModel with ChangeNotifier {
 
   void reconnect(OverlayDialogManager dialogManager, SessionID sessionId,
       bool forceRelay) {
+    if (_usesAndroidConnectionResume) {
+      final controller = _androidConnectionResumes[sessionId];
+      if (controller?.closed == true) return;
+      if (controller != null) {
+        controller.retryStarted();
+        _timer?.cancel();
+        _timer = null;
+        resetRestartReconnectState();
+      }
+    }
     // Disable relative mouse mode before reconnecting to ensure cursor is released.
     parent.target?.inputModel.setRelativeMouseMode(false);
     _cancelPendingMonitorRestore();
@@ -4108,6 +4222,9 @@ class FFI {
 
   /// Mobile reuse FFI
   void mobileReset() {
+    if (ffiModel._androidConnectionResumes[sessionId]?.closed == true) {
+      ffiModel._androidConnectionResumes.remove(sessionId);
+    }
     ffiModel.resetRestartReconnectState();
     ffiModel.waitForFirstImage.value = true;
     ffiModel.isRefreshing = false;
@@ -4383,6 +4500,7 @@ class FFI {
   /// Close the remote session.
   Future<void> close({bool closeSession = true}) async {
     closed = true;
+    if (isAndroid) ffiModel.closeAndroidConnectionResume();
     if (isWeb) {
       platformFFI.clearVideoFrameCallback();
     }

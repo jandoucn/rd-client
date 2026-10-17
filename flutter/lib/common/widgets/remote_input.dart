@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common.dart' as native;
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
@@ -58,10 +59,22 @@ bool isSpecialHoldDragActive = false;
 // Cache the last focal point to calculate deltas in special hold-drag mode.
 Offset _lastSpecialHoldDragFocalPoint = Offset.zero;
 
+class TouchInputPlatform {
+  const TouchInputPlatform();
+
+  bool get isAndroid => native.isAndroid;
+  bool get isDesktop => native.isDesktop;
+  bool get isWebDesktop => native.isWebDesktop;
+  bool get isMobile => native.isMobile;
+}
+
 class RawTouchGestureDetectorRegion extends StatefulWidget {
   final Widget child;
   final FFI ffi;
   final bool isCamera;
+  final TouchInputPlatform platform;
+  @visibleForTesting
+  final ValueChanged<Map<String, Object?>>? debugScaleTrace;
   late final InputModel inputModel = ffi.inputModel;
   late final FfiModel ffiModel = ffi.ffiModel;
 
@@ -69,6 +82,8 @@ class RawTouchGestureDetectorRegion extends StatefulWidget {
     required this.child,
     required this.ffi,
     this.isCamera = false,
+    this.platform = const TouchInputPlatform(),
+    this.debugScaleTrace,
   });
 
   @override
@@ -92,6 +107,35 @@ class _RawTouchGestureDetectorRegionState
   int _cacheLongPressPositionTs = 0;
   double _mouseScrollIntegral = 0; // mouse scroll speed controller
   double _scale = 1;
+  double _twoFingerScrollIntegral = 0;
+  bool _twoFingerScrollBoundary = true;
+  ScaleUpdateDetails? _pendingTwoFingerUpdate;
+
+  void _traceTwoFinger(String stage, [ScaleUpdateDetails? details]) {
+    assert(() {
+      widget.debugScaleTrace?.call({
+        'stage': stage,
+        'pointerCount': details?.pointerCount,
+        'scale': details?.scale,
+        'dx': details?.focalPointDelta.dx,
+        'dy': details?.focalPointDelta.dy,
+        'boundary': _twoFingerScrollBoundary,
+        'pending': _pendingTwoFingerUpdate != null,
+        'integral': _twoFingerScrollIntegral,
+        'device': lastDeviceKind?.name,
+        'phase': WidgetsBinding.instance.schedulerPhase.name,
+        'scheduled': WidgetsBinding.instance.hasScheduledFrame,
+      });
+      return true;
+    }());
+  }
+
+  void _resetTwoFingerScroll() {
+    _traceTwoFinger('reset-before');
+    _pendingTwoFingerUpdate = null;
+    _twoFingerScrollIntegral = 0;
+    _twoFingerScrollBoundary = true;
+  }
 
   // Workaround tap down event when two fingers are used to scale(mobile)
   TapDownDetails? _lastTapDownDetails;
@@ -111,6 +155,10 @@ class _RawTouchGestureDetectorRegionState
   Offset? _lastTapDownGlobalPosition;
 
   FFI get ffi => widget.ffi;
+  bool get isAndroid => widget.platform.isAndroid;
+  bool get isDesktop => widget.platform.isDesktop;
+  bool get isWebDesktop => widget.platform.isWebDesktop;
+  bool get isMobile => widget.platform.isMobile;
   FfiModel get ffiModel => widget.ffiModel;
   InputModel get inputModel => widget.inputModel;
   bool get handleTouch => (isDesktop || isWebDesktop) || ffiModel.touchMode;
@@ -119,6 +167,17 @@ class _RawTouchGestureDetectorRegionState
 
   @override
   Widget build(BuildContext context) {
+    if (isAndroid) {
+      return Listener(
+        onPointerDown: (_) => _resetTwoFingerScroll(),
+        onPointerUp: (_) => _resetTwoFingerScroll(),
+        onPointerCancel: (_) => _resetTwoFingerScroll(),
+        child: RawGestureDetector(
+          child: widget.child,
+          gestures: makeGestures(context),
+        ),
+      );
+    }
     return RawGestureDetector(
       child: widget.child,
       gestures: makeGestures(context),
@@ -448,6 +507,9 @@ class _RawTouchGestureDetectorRegionState
 
   // scale + pan event
   onTwoFingerScaleStart(ScaleStartDetails d) {
+    _traceTwoFinger('start');
+    _resetTwoFingerScroll();
+    _scale = 1;
     _lastTapDownDetails = null;
     if (isNotTouchBasedDevice()) {
       return;
@@ -458,7 +520,39 @@ class _RawTouchGestureDetectorRegionState
     }
   }
 
-  onTwoFingerScaleUpdate(ScaleUpdateDetails d) async {
+  onTwoFingerScaleUpdate(ScaleUpdateDetails d) {
+    _traceTwoFinger('receive', d);
+    if (!isAndroid || widget.isCamera || isSpecialHoldDragActive) {
+      return _applyTwoFingerScaleUpdate(d);
+    }
+    if (d.pointerCount != 2) {
+      _resetTwoFingerScroll();
+      return;
+    }
+    // Compare the final geometry of this frame, not each pointer's intermediate move.
+    final pending = _pendingTwoFingerUpdate;
+    _pendingTwoFingerUpdate = ScaleUpdateDetails(
+      focalPoint: d.focalPoint,
+      localFocalPoint: d.localFocalPoint,
+      focalPointDelta: (pending?.focalPointDelta ?? Offset.zero) + d.focalPointDelta,
+      scale: d.scale,
+      horizontalScale: d.horizontalScale,
+      verticalScale: d.verticalScale,
+      rotation: d.rotation,
+      pointerCount: d.pointerCount,
+    );
+    if (pending != null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final update = _pendingTwoFingerUpdate;
+      _traceTwoFinger('flush', update);
+      _pendingTwoFingerUpdate = null;
+      if (mounted && update != null) _applyTwoFingerScaleUpdate(update);
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  _applyTwoFingerScaleUpdate(ScaleUpdateDetails d) async {
+    _traceTwoFinger('apply', d);
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -466,11 +560,45 @@ class _RawTouchGestureDetectorRegionState
     // If in special drag mode, perform a pan instead of a scale.
     if (isSpecialHoldDragActive) {
       // Calculate delta manually to avoid the jumpy behavior.
+      _resetTwoFingerScroll();
       final delta = d.focalPoint - _lastSpecialHoldDragFocalPoint;
       _lastSpecialHoldDragFocalPoint = d.focalPoint;
       await ffi.cursorModel.updatePan(delta * 2.0, d.focalPoint, handleTouch);
       return;
     }
+
+    final pointerDelta = d.focalPointDelta;
+    // Pointer moves arrive separately, so a parallel swipe has small scale jitter.
+    // Compare to the gesture origin: a held pinch must remain a canvas gesture.
+    final scaleChanged = (d.scale - 1).abs() > 0.05;
+    if (isAndroid &&
+        d.pointerCount == 2 &&
+        !widget.isCamera &&
+        !scaleChanged &&
+        pointerDelta.dy.abs() > pointerDelta.dx.abs()) {
+      final result = androidTwoFingerWheel(
+        integral: _twoFingerScrollIntegral,
+        delta: pointerDelta,
+        pointerCount: d.pointerCount,
+        androidController: true,
+        touchMode: ffiModel.touchMode,
+        // A two-pointer update is already a complete topology. The Listener
+        // resets this flag for pointer-down bookkeeping; it must not discard
+        // the first complete delta of the gesture.
+        boundary: false,
+        specialHoldDrag: isSpecialHoldDragActive,
+        camera: widget.isCamera,
+      );
+      _twoFingerScrollIntegral = result.integral;
+      _twoFingerScrollBoundary = d.pointerCount != 2;
+      _traceTwoFinger('wheel-result-${result.wheel}', d);
+      if (result.wheel != 0) await inputModel.scroll(result.wheel);
+      return;
+    }
+
+    _resetTwoFingerScroll();
+
+    if (isAndroid && d.pointerCount != 2) return;
 
     if (canvasLocked) return;
 
@@ -496,6 +624,7 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onTwoFingerScaleEnd(ScaleEndDetails d) async {
+    _resetTwoFingerScroll();
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -517,18 +646,19 @@ class _RawTouchGestureDetectorRegionState
   }
 
   get onHoldDragCancel => null;
-  get onThreeFingerVerticalDragUpdate => ffi.ffiModel.isPeerAndroid
-      ? null
-      : (d) {
-          _mouseScrollIntegral += d.delta.dy / 4;
-          if (_mouseScrollIntegral > 1) {
-            inputModel.scroll(1);
-            _mouseScrollIntegral = 0;
-          } else if (_mouseScrollIntegral < -1) {
-            inputModel.scroll(-1);
-            _mouseScrollIntegral = 0;
-          }
-        };
+  get onThreeFingerVerticalDragUpdate =>
+      isAndroid || ffi.ffiModel.isPeerAndroid
+          ? null
+          : (d) {
+              _mouseScrollIntegral += d.delta.dy / 4;
+              if (_mouseScrollIntegral > 1) {
+                inputModel.scroll(1);
+                _mouseScrollIntegral = 0;
+              } else if (_mouseScrollIntegral < -1) {
+                inputModel.scroll(-1);
+                _mouseScrollIntegral = 0;
+              }
+            };
 
   makeGestures(BuildContext context) {
     return <Type, GestureRecognizerFactory>{
@@ -579,12 +709,17 @@ class _RawTouchGestureDetectorRegionState
         instance.onOneFingerPanStart =
             (DragStartDetails d) => onOneFingerPanStart(context, d);
         instance
+          // Keep the two-pointer down geometry when the arena accepts mid-move.
+          ..dragStartBehavior = isAndroid && !widget.isCamera
+              ? DragStartBehavior.down
+              : DragStartBehavior.start
           ..onOneFingerPanUpdate = onOneFingerPanUpdate
           ..onOneFingerPanEnd = onOneFingerPanEnd
           ..onOneFingerPanCancel = onOneFingerPanCancel
           ..onTwoFingerScaleStart = onTwoFingerScaleStart
           ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
           ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
+          ..onTwoFingerScaleCancel = _resetTwoFingerScroll
           ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate;
       }),
     };

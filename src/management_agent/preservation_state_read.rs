@@ -1,4 +1,4 @@
-use super::super::super::workspace;
+use super::workspace;
 use std::{
     fs::File,
     os::windows::{
@@ -125,6 +125,29 @@ fn directory_acl(path: &Path, state: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! { static DELIVERY_SCOPE: std::cell::RefCell<Option<(std::path::PathBuf, std::path::PathBuf)>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+std::thread_local! { static ROOT_SCOPE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
+pub(super) fn with_delivery_fixture<T>(root: &Path, intent: &Path, run: impl FnOnce() -> T) -> T {
+    assert!(root.parent() == Some(Path::new(r"C:\RustDeskAgentLab")));
+    assert!(root
+        .file_name()
+        .and_then(|v| v.to_str())
+        .is_some_and(|v| v.starts_with("t01-producer-red-") || v.starts_with("t01-worker-real-")));
+    struct Reset(Option<(std::path::PathBuf, std::path::PathBuf)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DELIVERY_SCOPE.with(|v| *v.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset =
+        Reset(DELIVERY_SCOPE.with(|v| v.replace(Some((root.to_path_buf(), intent.to_path_buf())))));
+    run()
+}
+
 pub(super) fn verify(state: &Path, intent: &Path) -> Result<Vec<File>, String> {
     let fixed = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
     #[cfg(not(test))]
@@ -132,7 +155,15 @@ pub(super) fn verify(state: &Path, intent: &Path) -> Result<Vec<File>, String> {
         return Err("preservation fixed state path mismatch".into());
     }
     #[cfg(test)]
+    let delivery_root = DELIVERY_SCOPE.with(|v| {
+        v.borrow()
+            .as_ref()
+            .filter(|(root, config)| state == root.join("state") && intent == config)
+            .map(|(root, _)| root.clone())
+    });
+    #[cfg(test)]
     if state != fixed
+        && delivery_root.is_none()
         && state
             != Path::new(
                 r"C:\ProgramData\RustDesk\ManagementAgent\preservation-state-read-fixture\state",
@@ -164,6 +195,10 @@ pub(super) fn verify(state: &Path, intent: &Path) -> Result<Vec<File>, String> {
                 .map_err(|e| e.to_string())?,
         );
         directory_acl(path, path == state)?;
+        #[cfg(test)]
+        if delivery_root.as_deref() == Some(path) {
+            break;
+        }
     }
     for path in [
         state.join("agent.json"),
@@ -195,6 +230,52 @@ pub(super) fn verify(state: &Path, intent: &Path) -> Result<Vec<File>, String> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.to_string()),
+    }
+    Ok(locks)
+}
+
+#[cfg(test)]
+pub(super) fn with_root_fixture<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<std::path::PathBuf>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ROOT_SCOPE.with(|v| *v.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset = Reset(ROOT_SCOPE.with(|v| v.replace(Some(root.to_path_buf()))));
+    run()
+}
+
+pub(super) fn hold_installed_root(root: &Path) -> Result<Vec<File>, String> {
+    let fixed = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
+    #[cfg(not(test))]
+    if root != fixed {
+        return Err("preservation fixed root path mismatch".into());
+    }
+    #[cfg(test)]
+    if root != fixed && !ROOT_SCOPE.with(|v| v.borrow().as_deref() == Some(root)) {
+        return Err("preservation fixture root path mismatch".into());
+    }
+    let mut locks = Vec::new();
+    for path in root.ancestors() {
+        let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+            return Err("preservation root ancestor reparse/non-directory".into());
+        }
+        locks.push(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .custom_flags(0x02000000 | 0x00200000)
+                .open(path)
+                .map_err(|e| e.to_string())?,
+        );
+        directory_acl(path, false)?;
+        #[cfg(test)]
+        #[cfg(test)]
+        if ROOT_SCOPE.with(|v| v.borrow().as_deref() == Some(path)) {
+            break;
+        }
     }
     Ok(locks)
 }

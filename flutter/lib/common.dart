@@ -701,6 +701,7 @@ String formatDurationToTime(Duration duration) {
 
 closeConnection({String? id}) {
   if (isAndroid || isIOS) {
+    if (isAndroid) gFFI.ffiModel.closeAndroidConnectionResume();
     () async {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
           overlays: SystemUiOverlay.values);
@@ -2711,6 +2712,9 @@ connect(BuildContext context, String id,
           ),
         );
       } else {
+        final connectionResume = isAndroid
+            ? gFFI.ffiModel.createAndroidConnectionResume(id)
+            : null;
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -2719,7 +2723,8 @@ connect(BuildContext context, String id,
                 password: password,
                 isSharedPassword: isSharedPassword,
                 forceRelay: forceRelay,
-                isViewOnly: isViewOnly),
+                isViewOnly: isViewOnly,
+                connectionResume: connectionResume),
           ),
         );
       }

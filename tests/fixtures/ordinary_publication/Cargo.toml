@@ -1,0 +1,24 @@
+[package]
+name = "ordinary-publication-fixture"
+version = "0.0.0"
+edition = "2021"
+autotests = false
+
+[workspace]
+
+[[test]]
+name = "ordinary_receipt_publication_barrier"
+path = "cases.rs"
+
+[[test]]
+name = "ordinary_update_terminal_contract"
+path = "../../ordinary_update_terminal_contract.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.1", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

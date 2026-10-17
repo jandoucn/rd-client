@@ -74,6 +74,9 @@ mod handoff;
 #[path = "management_agent/package_gate.rs"]
 mod package_gate;
 #[cfg(windows)]
+#[path = "management_agent/first_install_approval_delivery.rs"]
+mod first_install_approval_delivery;
+#[cfg(windows)]
 #[path = "management_agent/workspace.rs"]
 mod workspace;
 #[cfg(windows)]
@@ -465,6 +468,9 @@ pub struct AgentState {
     pub agent_installation_id: String,
     #[serde(default)]
     pub status_session_generation: u64,
+    // Opaque forward-compatible state only; never consulted for authorization.
+    #[serde(flatten)]
+    extra_fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 const fn default_agent_schema_version() -> u32 {
@@ -501,6 +507,7 @@ impl AgentState {
             service_recovery_error: String::new(),
             agent_installation_id: String::new(),
             status_session_generation: 0,
+            extra_fields: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2141,6 +2148,10 @@ pub fn cleanup(root: &Path, normal_install_path: Option<&Path>) -> Result<(), St
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+#[path = "../tests/management_agent_status_contract/legacy_unknown_fields.rs"]
+mod legacy_unknown_fields_tests;
 
 #[cfg(test)]
 mod tests {

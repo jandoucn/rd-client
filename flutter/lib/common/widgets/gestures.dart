@@ -10,6 +10,30 @@ enum GestureState {
   threeFingerVerticalDrag
 }
 
+({double integral, int wheel}) androidTwoFingerWheel({
+  required double integral,
+  required Offset delta,
+  required int pointerCount,
+  required bool androidController,
+  required bool touchMode,
+  bool boundary = false,
+  bool specialHoldDrag = false,
+  bool camera = false,
+}) {
+  if (!androidController ||
+      pointerCount != 2 ||
+      boundary ||
+      specialHoldDrag ||
+      camera ||
+      (touchMode && delta.dy.abs() <= delta.dx.abs())) {
+    return (integral: 0, wheel: 0);
+  }
+  final next = integral + delta.dy / 4;
+  if (next > 1) return (integral: 0, wheel: 1);
+  if (next < -1) return (integral: 0, wheel: -1);
+  return (integral: next, wheel: 0);
+}
+
 class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   CustomTouchGestureRecognizer({
     Object? debugOwner,
@@ -31,6 +55,7 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   GestureScaleStartCallback? onTwoFingerScaleStart;
   GestureScaleUpdateCallback? onTwoFingerScaleUpdate;
   GestureScaleEndCallback? onTwoFingerScaleEnd;
+  GestureDragCancelCallback? onTwoFingerScaleCancel;
 
   // threeFingerVerticalDrag
   GestureDragStartCallback? onThreeFingerVerticalDragStart;
@@ -181,7 +206,7 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
         }
         break;
       case GestureState.twoFingerScale:
-        // Reset scale state if needed, currently self-contained
+        onTwoFingerScaleCancel?.call();
         break;
       case GestureState.threeFingerVerticalDrag:
         // Reset drag state if needed, currently self-contained

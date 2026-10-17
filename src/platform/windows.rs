@@ -5,6 +5,8 @@ pub(crate) mod agent_health;
 mod windows_defender;
 #[path = "windows_exe_migration.rs"]
 mod windows_exe_migration;
+#[path = "windows_exe_agent_update.rs"]
+mod windows_exe_agent_update;
 pub fn migrate_exe_update(args:&[String])->ResultType<()>{windows_exe_migration::run(args).map_err(|e|anyhow!(e))}
 pub(crate) use windows_defender::defender_install_option;
 use crate::{
@@ -107,6 +109,7 @@ use winreg::{enums::*, RegKey};
 mod acl;
 mod installer_handoff;
 mod installer_shell;
+mod exe_desktop_shortcut;
 mod msi_registry;
 pub(crate) use acl::current_process_user_sid_string;
 pub use acl::{
@@ -1697,6 +1700,7 @@ if exist "{source}" (
 }
 
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {
+    let installed_desktop_target = exe_desktop_shortcut::installed_target().map_err(|e| anyhow!(e))?;
     // MSI and EXE installations use different registry layouts, so MSI-to-EXE upgrades are not supported.
     let (installed_subkey, _, _, _) = get_install_info();
     if get_windows_installer_state(&installed_subkey)? == Some(true) {
@@ -1747,6 +1751,12 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
     // The elevated runner expands this to `%~f0.dir`, beside its protected copy.
     // Do not stage privileged shortcut artifacts in the user-writable `%TEMP%`.
     let tmp_path = "%RUSTDESK_OUTPUT_DIR%".to_owned();
+    let desktop_plan = exe_desktop_shortcut::prepare(
+        installed_desktop_target.as_deref(),
+        options.contains("desktopicon"),
+        shortcut_bytes(&exe, None, shortcut_icon_location.as_deref())?,
+    ).map_err(|e| anyhow!(e))?;
+    let uninstall_str = desktop_plan.guard_uninstall(&uninstall_str).map_err(|e| anyhow!(e))?;
     let mk_shortcut_commands = embedded_shortcut_commands(
         shortcut_bytes(&exe, None, shortcut_icon_location.as_deref())?,
         &format!("{app_name}.lnk"),
@@ -1759,18 +1769,10 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
     );
     let tray_shortcut_commands =
         embedded_tray_shortcut_commands(&app_name, &exe, shortcut_icon_location.as_deref())?;
-    let mut reg_value_desktop_shortcuts = "0".to_owned();
+    let reg_value_desktop_shortcuts = if desktop_plan.creates_shortcut() { "1" } else { "0" }.to_owned();
     let mut reg_value_start_menu_shortcuts = "0".to_owned();
     let mut reg_value_printer = "0".to_owned();
-    let mut shortcuts = Default::default();
-    if options.contains("desktopicon") {
-        shortcuts = format!(
-            "copy /Y \"{}\\{}.lnk\" \"%PUBLIC%\\Desktop\\\"",
-            tmp_path,
-            crate::get_app_name()
-        );
-        reg_value_desktop_shortcuts = "1".to_owned();
-    }
+    let mut shortcuts = desktop_plan.commands().map_err(|e| anyhow!(e))?;
     if options.contains("startmenu") {
         shortcuts = format!(
             "{shortcuts}
@@ -3699,7 +3701,12 @@ taskkill /F /IM {app_name}.exe{filter}
         sleep = if debug { "timeout 300" } else { "" },
     );
 
-    let _restore_session_guard = crate::common::SimpleCallOnReturn {
+    let cmds = if is_msi != Some(true) {
+        windows_exe_agent_update::commands(&cmds, &src_exe, &exe, &backup_path)?
+    } else {
+        cmds
+    };
+    let mut _restore_session_guard = crate::common::SimpleCallOnReturn {
         b: true,
         f: Box::new(move || {
             let is_root = is_root();
@@ -3756,7 +3763,19 @@ taskkill /F /IM {app_name}.exe{filter}
         }),
     };
 
-    run_cmds(cmds, debug, "update").map_err(annotate_update_install_error)?;
+    run_cmds(cmds, debug, "update").map_err(|error| {
+        let message = error.to_string();
+        if message.contains("elevated exit code 75:") {
+            _restore_session_guard.b = false;
+            anyhow!("[update-pending] {message}")
+        } else if message.contains("elevated exit code 76:") {
+            anyhow!("[update-rollback-failed] {message}")
+        } else if message.contains("elevated exit code 78:") {
+            anyhow!("[update-rolled-back] {message}")
+        } else {
+            annotate_update_install_error(error)
+        }
+    })?;
 
     std::thread::sleep(std::time::Duration::from_millis(2000));
     log::info!("Update completed.");
@@ -4044,9 +4063,15 @@ pub fn update_to(file: &str) -> ResultType<()> {
 pub fn update_me_msi(msi: &str, quiet: bool) -> ResultType<()> {
     let quiet_args = if quiet { " /qn LAUNCH_TRAY_APP=N" } else { "" };
     let cmds =
-        format!("chcp 65001 && msiexec /i \"{msi}\"{quiet_args} REBOOT=ReallySuppress /norestart");
+        format!("chcp 65001 && msiexec /i \"{msi}\"{quiet_args} REBOOT=ReallySuppress /norestart\r\nset \"RD_MSI_EXIT=%errorlevel%\"\r\nif \"%RD_MSI_EXIT%\"==\"3010\" exit /b 0\r\nexit /b %RD_MSI_EXIT%");
     run_cmds(cmds, false, "update-msi")?;
     Ok(())
+}
+
+pub(crate) fn update_me_msi_receipt(transaction_id: &str, intent_sha256: &str) -> ResultType<()> {
+    let commands = crate::updater::ordinary_update_receipts::runtime::runner_commands(transaction_id, intent_sha256)
+        .map_err(|error| anyhow!(error))?;
+    run_cmds(commands, false, "ordinary-update-msi")
 }
 
 fn get_import_config(exe: &str) -> String {

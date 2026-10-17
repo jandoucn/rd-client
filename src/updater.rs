@@ -1,3 +1,8 @@
+#[cfg(target_os = "windows")]
+#[path = "updater/ordinary_update_receipts.rs"]
+#[allow(dead_code)]
+pub(crate) mod ordinary_update_receipts;
+
 use crate::{
     common::{
         do_check_software_update, do_check_software_update_with_context,
@@ -129,6 +134,8 @@ pub fn update_controlling_session_count(count: usize) {
 
 #[allow(dead_code)]
 pub fn start_auto_update() {
+    #[cfg(target_os = "windows")]
+    ordinary_update_receipts::runtime::start();
     start_update_policy_stream();
     let _sender = TX_MSG.lock().unwrap();
 }
@@ -990,6 +997,8 @@ fn start_auto_update_check() -> Sender<UpdateMsg> {
     let startup_tx = tx.clone();
     std::thread::spawn(move || start_auto_update_check_(rx));
     for state in pending {
+        #[cfg(target_os = "windows")]
+        if ordinary_update_receipts::runtime::owns_command(&state.command.command_id) { continue; }
         if state.terminal.is_some() {
             retry_update_command_terminal(&state.command.command_id);
         } else {
@@ -1334,6 +1343,16 @@ fn check_update_request(
         log::debug!("New version available: {}", version);
         // Recheck because a session can start while the verified asset is downloading.
         if should_install && has_no_active_conns() {
+            #[cfg(target_os = "windows")]
+            if update_msi && ordinary_update_receipts::runtime::use_receipt_path()
+                .map_err(|error| hbb_common::anyhow::anyhow!(error))? {
+                let approved_name = ordinary_update_receipts::package_contract::primary_package_name(&target.primary, "msi")
+                    .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
+                ordinary_update_receipts::runtime::install(&file_path, &approved_name, &target.sha256, &target_key,
+                    version, target_build_seq, source, command.map(|value| value.command_id.clone()))
+                    .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
+                return Ok(UpdateCommandRunOutcome::AwaitingInstallResult);
+            }
             report_update_event("installing", version, target_build_seq, source);
             report_command_update_event(command, "installing", "");
             #[cfg(target_os = "windows")]
@@ -2003,7 +2022,21 @@ fn report_update_event_with_origin_and_error(
         .body(body)
         .send()
     {
-        Ok(response) if response.status().is_success() => true,
+        Ok(response) if response.status().is_success() => {
+            use std::io::Read;
+            let mut body = Vec::new();
+            if response.take(4097).read_to_end(&mut body).is_err() || body.len() > 4096 {
+                log::warn!("Update event acknowledgement unreadable or too large");
+                return false;
+            }
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(ack) if ack.get("ok").and_then(|value| value.as_bool()) == Some(true) => true,
+                _ => {
+                    log::warn!("Update event acknowledgement rejected");
+                    false
+                }
+            }
+        }
         Ok(response) => {
             log::warn!("Update event rejected with HTTP {}", response.status());
             false

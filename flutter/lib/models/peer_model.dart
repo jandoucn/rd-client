@@ -248,6 +248,7 @@ class Peers extends ChangeNotifier {
 
   void _updatePeers(Map<String, dynamic> evt) {
     final onlineStates = _getOnlineStates();
+    final previousPeers = peers;
     if (getInitPeers != null) {
       peers = getInitPeers?.call() ?? [];
     } else {
@@ -260,6 +261,7 @@ class Peers extends ChangeNotifier {
     }
 
     for (var peer in peers) {
+      if (getInitPeers != null && !identical(previousPeers, peers)) continue;
       final state = onlineStates[peer.id];
       peer.online = state != null && state != false;
     }

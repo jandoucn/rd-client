@@ -1,0 +1,10 @@
+[package]
+name = "exe-desktop-adapter-fixture"
+version = "0.0.0"
+edition = "2021"
+[workspace]
+[lib]
+path = "../../src/platform/windows/exe_desktop_shortcut.rs"
+[dependencies]
+winreg = "0.11"
+windows = { version = "=0.61.1", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }

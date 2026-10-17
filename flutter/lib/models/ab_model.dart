@@ -1360,9 +1360,19 @@ class LegacyAb extends BaseAb {
 class Ab extends BaseAb {
   AbProfile profile;
   late final bool personal;
+  final Future<String> Function()? _apiServer;
+  final Map<String, String> Function()? _headers;
+  final Future<http.Response> Function(Uri, Map<String, String>)? _post;
   bool get emtpy => peers.isEmpty && tags.isEmpty;
 
-  Ab(this.profile, this.personal);
+  Ab(this.profile, this.personal,
+      {@visibleForTesting Future<String> Function()? apiServer,
+      @visibleForTesting Map<String, String> Function()? headers,
+      @visibleForTesting
+      Future<http.Response> Function(Uri, Map<String, String>)? post})
+      : _apiServer = apiServer,
+        _headers = headers,
+        _post = post;
 
   @override
   String name() {
@@ -1380,6 +1390,12 @@ class Ab extends BaseAb {
 
   @override
   void setSharedProfile(AbProfile profile) {
+    if (this.profile.guid != profile.guid) {
+      for (final peer in peers) {
+        peer.online = false;
+      }
+      peers.refresh();
+    }
     this.profile = profile;
   }
 
@@ -1411,15 +1427,24 @@ class Ab extends BaseAb {
   @override
   Future<bool> pullAbImpl({quiet = false}) async {
     bool ret = true;
+    final profileGuid = profile.guid;
     List<Peer> tmpPeers = [];
-    if (!await _fetchPeers(tmpPeers, quiet: quiet)) {
+    final peersFetched = await _fetchPeers(tmpPeers, quiet: quiet);
+    if (profile.guid != profileGuid) return false;
+    if (!peersFetched) {
       ret = false;
     }
-    peers.value = tmpPeers;
     List<AbTag> tmpTags = [];
     if (!await _fetchTags(tmpTags, quiet: quiet)) {
       ret = false;
     }
+    if (!ret || profile.guid != profileGuid) return false;
+    // Capture after both requests so online callbacks during either request win.
+    final onlineStates = {for (final peer in peers) peer.id: peer.online};
+    for (final peer in tmpPeers) {
+      peer.online = onlineStates[peer.id] ?? false;
+    }
+    peers.value = tmpPeers;
     tags.value = tmpTags.map((e) => e.name).toList();
     Map<String, int> tmpTagColors = {};
     for (var t in tmpTags) {
@@ -1430,7 +1455,7 @@ class Ab extends BaseAb {
   }
 
   Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {
-    final api = "${await bind.mainGetApiServer()}/api/ab/peers";
+    final api = "${await (_apiServer?.call() ?? bind.mainGetApiServer())}/api/ab/peers";
     int? statusCode;
     try {
       var uri0 = Uri.parse(api);
@@ -1449,10 +1474,10 @@ class Ab extends BaseAb {
               'pageSize': pageSize.toString(),
               'ab': profile.guid,
             });
-        var headers = getHttpHeaders();
+        var headers = _headers?.call() ?? getHttpHeaders();
         headers['Content-Type'] = "application/json";
         _setEmptyBody(headers);
-        final resp = await http.post(uri, headers: headers);
+        final resp = await (_post?.call(uri, headers) ?? http.post(uri, headers: headers));
         statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
@@ -1461,6 +1486,11 @@ class Ab extends BaseAb {
         }
         if (resp.statusCode != 200) {
           throw 'HTTP ${resp.statusCode}';
+        }
+        if (json['total'] is! int ||
+            (json['total'] as int) < 0 ||
+            json['data'] is! List) {
+          throw const FormatException('Invalid address book peers response');
         }
         if (json.containsKey('total')) {
           if (total == 0) total = json['total'];
@@ -1497,7 +1527,7 @@ class Ab extends BaseAb {
   }
 
   Future<bool> _fetchTags(List<AbTag> tmpTags, {quiet = false}) async {
-    final api = "${await bind.mainGetApiServer()}/api/ab/tags/${profile.guid}";
+    final api = "${await (_apiServer?.call() ?? bind.mainGetApiServer())}/api/ab/tags/${profile.guid}";
     int? statusCode;
     try {
       var uri0 = Uri.parse(api);
@@ -1507,10 +1537,10 @@ class Ab extends BaseAb {
         path: uri0.path,
         port: uri0.port,
       );
-      var headers = getHttpHeaders();
+      var headers = _headers?.call() ?? getHttpHeaders();
       headers['Content-Type'] = "application/json";
       _setEmptyBody(headers);
-      final resp = await http.post(uri, headers: headers);
+      final resp = await (_post?.call(uri, headers) ?? http.post(uri, headers: headers));
       statusCode = resp.statusCode;
       List<dynamic> json =
           _jsonDecodeRespList(decode_http_response(resp), resp.statusCode);

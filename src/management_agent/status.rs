@@ -44,7 +44,15 @@ fn recovery_enabled(state: &AgentState, paths: &AgentPaths, intent: recovery::In
 }
 
 fn application_snapshot(pipe: &str, executable: &std::path::Path, build: u64) -> serde_json::Value {
-    match super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3)) {
+    #[cfg(test)]
+    let result = TEST_HEALTH_OBSERVATION
+        .with(|input| {
+            input.borrow().as_ref().map(|input| (input.probe)(executable, build))
+        })
+        .unwrap_or_else(|| super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3)));
+    #[cfg(not(test))]
+    let result = super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3));
+    match result {
         Ok(response) => serde_json::json!({
             "state":"ready", "probe_supported":true, "registered":response.registered,
             "pid":response.pid, "process_created_at":response.process_created_at,
@@ -101,7 +109,17 @@ pub fn snapshot(
     boot: &str,
     sequence: u64,
 ) -> Result<serde_json::Value, String> {
+    #[cfg(test)]
+    let identity = TEST_HEALTH_OBSERVATION
+        .with(|input| input.borrow().as_ref().map(|input| (input.identity)()))
+        .unwrap_or_else(identity::load_existing)?;
+    #[cfg(not(test))]
     let identity = identity::load_existing()?;
+    #[cfg(test)]
+    let observed = TEST_HEALTH_OBSERVATION.with(|input| {
+        input.borrow().as_ref().map(|input| (input.observe)())
+    }).unwrap_or_else(|| recovery_windows::inspect(state, paths))?;
+    #[cfg(not(test))]
     let observed = recovery_windows::inspect(state, paths)?;
     #[cfg(test)]
     let observed = {
@@ -263,11 +281,22 @@ fn send_with_identity(
 #[cfg(test)]
 std::thread_local! {
     static TEST_START_TYPE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static TEST_HEALTH_OBSERVATION: std::cell::RefCell<Option<TestHealthObservation>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct TestHealthObservation {
+    identity: fn() -> Result<identity::DeviceIdentity, String>,
+    observe: Box<dyn Fn() -> Result<recovery_windows::ServiceObservation, String>>,
+    probe: Box<dyn Fn(&std::path::Path, u64) -> Result<super::health::Response, String>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod health_observation {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/management_agent_status_contract/health_observation.rs"));
+    }
     mod delivery_contract {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/management_agent_status_contract/mod.rs"));
     }

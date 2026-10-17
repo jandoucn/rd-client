@@ -170,6 +170,10 @@ pub(super) fn check_gates(layout: &Layout, installation: &str, key: &str) -> Res
 }
 
 fn fixed_layout() -> Result<Layout, String> {
+    #[cfg(test)]
+    if let Some(layout) = WORKER_SCOPE.with(|v| v.borrow().as_ref().map(|s| super::fixture(&s.root))) {
+        return Ok(layout);
+    }
     let agent = PathBuf::from(AGENT);
     let identity = hbb_common::config::Config::file();
     if ![
@@ -194,6 +198,15 @@ fn fixed_layout() -> Result<Layout, String> {
 }
 
 fn live(layout: &Layout, key: &str, build: u64) -> Result<(u32, u32), String> {
+    #[cfg(test)]
+    if WORKER_SCOPE.with(|v| {
+        if let Some(scope) = v.borrow().as_ref() {
+            scope.health_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else { false }
+    }) {
+        return Err("isolated worker health unavailable".into());
+    }
     use super::super::service_control::{self, Contract};
     use windows_service::service::{ServiceStartType, ServiceState};
     let client = Contract {
@@ -833,6 +846,12 @@ fn prepare(
 }
 
 fn registered(code: &str, name: &str) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(result) = WORKER_SCOPE.with(|v| v.borrow().as_ref().map(|s| {
+        if s.product_code.eq_ignore_ascii_case(code) && s.source.file_name().and_then(|v|v.to_str()) == Some(name) {
+            Ok(s.source.clone())
+        } else { Err("isolated registered source mismatch".to_owned()) }
+    })) { return result; }
     let source = msi_metadata::installed_source(code)?;
     if source.package_name != name {
         return Err("first installation registered basename mismatch".into());
@@ -894,13 +913,28 @@ impl Worker {
         }
     }
 }
-fn start_checked(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
+fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope>) -> std::io::Result<Worker> {
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new().name("agent-rescue-first-install".into()).spawn(move||{
+        #[cfg(test)]
+        WORKER_SCOPE.with(|v| *v.borrow_mut() = scope);
         let mut last=None;
         for () in receiver{
             if last.is_some_and(|time:Instant|time.elapsed()<Duration::from_secs(300)){continue;}last=Some(Instant::now());
             let result=(||{let layout=fixed_layout()?;if !absent(&layout.destination.join("current"))?{return Ok(());}
+                #[cfg(not(test))]
+                if absent(&layout.agent.join("release-cache/first-install.json"))? {
+                    if let Err(error)=super::super::first_install_approval_delivery::coordinate_current_installation(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation approval unavailable: {error:?}");}
+                }
+                #[cfg(test)]
+                if absent(&layout.agent.join("release-cache/first-install.json"))? {
+                    WORKER_SCOPE.with(|v| {
+                        if let Some(scope) = v.borrow().as_ref() {
+                            let outcome = (scope.coordinate)(&scope.root);
+                            scope.coordination_results.lock().unwrap().push(outcome);
+                        }
+                    });
+                }
                 let report=match prepare(&layout,public.as_deref(),registered,live){Ok(report)=>report,Err(error)=>serde_json::json!({"state":"unavailable","error_code":"preparation_refused","error":error,"ready":false})};
                 let reports=layout.agent.join("first-install-status");if absent(&reports)?{workspace::create(&reports)?;}workspace::verify(&reports)?;
                 super::super::state_store::publish(&reports.join("last-check.json"),&serde_json::to_vec(&report).map_err(|_|"first installation status encoding")?).map_err(|e|e.to_string())?;
@@ -911,9 +945,27 @@ fn start_checked(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
     Ok(Worker { sender })
 }
 pub fn start() -> std::io::Result<Worker> {
-    start_checked(None)
+    start_checked(None, #[cfg(test)] None)
 }
 #[cfg(test)]
 pub fn start_fixture(public: &[u8]) -> std::io::Result<Worker> {
-    start_checked(Some(public.to_vec()))
+    start_checked(Some(public.to_vec()), None)
+}
+
+#[cfg(test)]
+std::thread_local! { static WORKER_SCOPE: std::cell::RefCell<Option<WorkerScope>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
+pub struct WorkerScope {
+    pub root: PathBuf,
+    pub source: PathBuf,
+    pub product_code: String,
+    pub health_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub coordination_results: std::sync::Arc<std::sync::Mutex<Vec<Result<(), String>>>>,
+    pub coordinate: Box<dyn Fn(&Path) -> Result<(), String> + Send>,
+}
+
+#[cfg(test)]
+pub fn start_scoped_fixture(scope: WorkerScope) -> std::io::Result<Worker> {
+    start_checked(None, Some(scope))
 }

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 #[path = "preservation_state_read.rs"]
 mod state_read;
+#[cfg(windows)]
+use super::super::workspace;
 
 #[cfg(test)]
 pub fn verified_state_read_fixture(

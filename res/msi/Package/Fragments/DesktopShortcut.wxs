@@ -1,0 +1,10 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <Property Id="RustDeskDesktopAllowed" Value="1" />
+    <CustomAction Id="InspectDesktopShortcut" DllEntry="InspectDesktopShortcut"
+                  BinaryRef="Custom_Actions_Dll" Execute="immediate" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="InspectDesktopShortcut" Before="CostFinalize" />
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

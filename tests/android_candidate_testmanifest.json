@@ -1,0 +1,35 @@
+{
+  "status": "candidate-unexecuted-awaiting-independent-review",
+  "working_directory": "flutter",
+  "command": "flutter --no-version-check test --no-pub --reporter=json --concurrency=1 test/android_two_finger_wheel_test.dart test/android_touch_pointer_widget_test.dart test/mobile_connection_resume_test.dart test/android_connection_resume_policy_test.dart test/android_resume_model_flow_test.dart",
+  "tests": [
+    {"path": "flutter/test/android_two_finger_wheel_test.dart", "expected_cases": 19},
+    {"path": "flutter/test/android_touch_pointer_widget_test.dart", "expected_cases": 34},
+    {"path": "flutter/test/mobile_connection_resume_test.dart", "expected_cases": 9},
+    {"path": "flutter/test/android_connection_resume_policy_test.dart", "expected_cases": 10},
+    {"path": "flutter/test/android_resume_model_flow_test.dart", "expected_cases": 21}
+  ],
+  "expected_total_cases": 93,
+  "sources": [
+    "flutter/lib/common/widgets/gestures.dart",
+    "flutter/lib/common/widgets/remote_input.dart",
+    "flutter/lib/mobile/android_connection_resume.dart",
+    "flutter/lib/models/model.dart",
+    "flutter/lib/mobile/pages/remote_page.dart",
+    "flutter/lib/common.dart",
+    "flutter/test/android_two_finger_wheel_test.dart",
+    "flutter/test/android_touch_pointer_widget_test.dart",
+    "flutter/test/mobile_connection_resume_test.dart",
+    "flutter/test/android_connection_resume_policy_test.dart",
+    "flutter/test/android_resume_model_flow_test.dart"
+  ],
+  "dependency_preconditions": ["flutter/pubspec.yaml", "flutter/pubspec.lock"],
+  "acceptance": "Require actual registered case counts, no skips, no failures, done.success=true and exit=0. Compile failure is not behavioral RED; zero tests is failure.",
+  "limitations": [
+    "RED cases authored but not executed; no host Flutter tests and no VM access in this turn.",
+    "Widget tests use production detector/recognizer with fake input/canvas; do not prove native wheel delivery or Android device behavior.",
+    "Model tests replace showMsgBox/reconnect; do not cover real reconnect timers, timer races, native connection, or the complete FFI.close/mobileReset lifecycle.",
+    "Prior host 45 pass is not VM evidence or evidence for this candidate.",
+    "No claim of 80 percent coverage or bug completion; independent review and main-owner execution required."
+  ]
+}

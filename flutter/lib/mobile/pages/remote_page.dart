@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/mobile/android_connection_resume.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
@@ -47,7 +48,8 @@ class RemotePage extends StatefulWidget {
       this.password,
       this.isSharedPassword,
       this.forceRelay,
-      this.isViewOnly})
+      this.isViewOnly,
+      this.connectionResume})
       : super(key: key);
 
   final String id;
@@ -55,6 +57,7 @@ class RemotePage extends StatefulWidget {
   final bool? isSharedPassword;
   final bool? forceRelay;
   final bool? isViewOnly;
+  final AndroidConnectionResume? connectionResume;
 
   @override
   State<RemotePage> createState() => _RemotePageState(id);
@@ -170,6 +173,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    if (isAndroid) {
+      widget.connectionResume?.close();
+      gFFI.ffiModel
+          .closeAndroidConnectionResume(expected: widget.connectionResume);
+    }
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
     // after several awaits (canvas save, image update, the `enable_soft_keyboard`
@@ -208,6 +216,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.connectionResume?.lifecycle(state, android: isAndroid);
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
     }

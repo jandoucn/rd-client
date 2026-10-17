@@ -30,6 +30,21 @@ macro_rules! my_println{
 /// If it returns [`Some`], then the process will continue, and flutter gui will be started.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<Vec<String>> {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--ordinary-msi-supervisor") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let result = crate::updater::ordinary_update_receipts::supervisor::run(&args);
+        if let Err(error) = &result { eprintln!("ordinary MSI supervisor: {error}"); }
+        std::process::exit(if result.is_ok() { 0 } else { 75 });
+    }
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--ordinary-msi-outcome") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let result = crate::updater::ordinary_update_receipts::OutcomeWriteRequest::parse(&args)
+            .and_then(|request| request.write());
+        if let Err(error) = &result { eprintln!("ordinary MSI outcome: {error}"); }
+        std::process::exit(if result.is_ok() { 0 } else { 75 });
+    }
     #[cfg(target_os = "macos")]
     let permission_output_path = std::env::args().find_map(|arg| {
         arg.strip_prefix("--macos-permission-output=")
@@ -290,7 +305,9 @@ pub fn core_main() -> Option<Vec<String>> {
                     )),
                     Ok(true) => platform::update_me(false).map_err(|err| {
                         let message = err.to_string();
-                        failure_status = if message.contains("[update-rolled-back]") {
+                        failure_status = if message.contains("[update-pending]") {
+                            "pending"
+                        } else if message.contains("[update-rolled-back]") {
                             "rolled_back"
                         } else if message.contains("[update-rollback-failed]") {
                             "rollback_failed"

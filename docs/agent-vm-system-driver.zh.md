@@ -4,6 +4,10 @@
 
 ### 后续增量核验
 
+- 通讯录连接关联缺陷的当前修复只涉及非 legacy Ab 的元数据重载：同地址簿保留 await 后最新在线状态、失败保留旧列表；GUID 改变时隔离旧状态，旧在途响应不提交。有效 profile RED 为 8 passed/2 failed，四套件 GREEN 为 30 passed/0 skipped，另当前 Ab 十项重跑通过，独立复审关闭。均为 VM 中模型/widget 与 MockClient 测试，真实远程会话 E2E 尚未完成。见 `tests/peer_online_reload_handoff.zh.md`。
+- 旧 EXE 联合更新新增真实本地 SOS 候选成功：SYSTEM 运行实际 runner --update，主程序、驻留 Agent 均为 1501 且主程序 ready；新 Agent 自行初始化 installation，bootstrap 任务及摘要匹配，LocalService 配置原字节保持，迁移审计保留。Stop-Main 竞态及 prebackup 恢复归属修复经独立复审关闭。此为旧 runner/assets 搭配新 DLL/agent 的离线混合候选，不是正式签名在线升级，见 TEMP `legacy-sos-racefix-1501/`。
+- 上述成功现场单次正常重启后，同一 installation 保持，session generation 1→2，1501 主程序/Agent ready，DLL/agent/bootstrap/config/audit 摘要保持，bootstrap 最近结果0。首次有效后采样距启动约183秒，不能称整个开机窗口连续健康。Defender保护开启、排除为空，未验证选中信任。取证后恢复原SOS0510健康基线，恢复快照仅为测试清理。见 `sos1501-single-reboot.zh.md`。
+
 - 首次打包交付约束：Android 仅 standard，Windows/macOS 各 standard/SOS；Windows 各 profile 包含 EXE 和 MSI，因此完整矩阵为七个包。当前 `.github`、build.py/build.rs、Cargo 清单/锁及 Android/macOS 签名配置相对本轮基线未改；未核验 Actions Secret 内实际 Android 证书，不能称证书指纹已验收。macOS 两个指定成功 run 的签名方法比对保持；历史同 run 同名 artifact 成功证据已取得，撤回此前“必定冲突”的静态判断。
 - Windows 发布 Rust 1.75 兼容性：两处新增 is_none_or 已改为等价 map_or，真实 1.75 最小编译 RED→GREEN，生产 agent debug build 和 source 测试 target no-run 成功；不扩大为 Flutter release 或七包完整构建通过。purge 测试 cfg 不一致另外修复，标准 agentbin 测试编译通过。
 - 默认在线更新兼容：旧 --update 不再自动注入 agent 事务参数，保留原提取/broker/异步行为；新事务仅显式入口使用。Win10 参数六项、PendingEvent parser、MSI gate 六项及签名双 Base64 编码回归已执行。真实 portable 外包搭配受控 inner 两次验证参数/目录/异步退出语义，不替代真实 Flutter 安装验收。显式入口携带尚不支持的旧事件时提前拒绝；禁用安装时显式入口退出 1 而非误报成功，独立复审关闭该 P2。

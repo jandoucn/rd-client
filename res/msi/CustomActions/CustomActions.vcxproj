@@ -95,6 +95,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CustomActions.cpp" />
+    <ClCompile Include="DesktopShortcut.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Admission.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
