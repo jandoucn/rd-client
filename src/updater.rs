@@ -1249,7 +1249,8 @@ fn check_update_request(
         log::debug!("No update available.");
         return Ok(UpdateCommandRunOutcome::NoUpdate);
     };
-    if !response.update_available || (response.mode == "disabled" && command.is_none()) {
+    if !response.update_available || (response.mode == "disabled" && !manually && command.is_none())
+    {
         return Ok(UpdateCommandRunOutcome::NoUpdate);
     }
     let Some(ref manifest) = response.manifest else {
@@ -1303,7 +1304,7 @@ fn check_update_request(
         &response,
         update_option_enabled(&config::Config::get_option(keys::OPTION_ALLOW_AUTO_UPDATE)),
     );
-    if manually && response.update_available && response.mode != "disabled" {
+    if manually && response.update_available {
         action = UpdateAction::AutoInstall;
     }
     if let Some(command) = command {

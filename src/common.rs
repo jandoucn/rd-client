@@ -1200,7 +1200,10 @@ pub struct SoftwareUpdateCheckResult {
 }
 
 fn update_check_should_stop(update_available: bool, mode: &str, request_origin: &str) -> bool {
-    !update_available || (mode == "disabled" && !request_origin.starts_with("command"))
+    !update_available
+        || (mode == "disabled"
+            && request_origin != "manual"
+            && !request_origin.starts_with("command"))
 }
 
 pub fn do_check_software_update_with_context(
@@ -4300,6 +4303,14 @@ mod tests {
         assert!(update_check_should_stop(false, "auto_install", "command"));
         assert!(update_check_should_stop(true, "disabled", "system"));
         assert!(!update_check_should_stop(true, "disabled", "command"));
+    }
+
+    #[test]
+    fn manual_checks_ignore_disabled_background_update_policy() {
+        assert!(!update_check_should_stop(true, "disabled", "manual"));
+        assert!(update_check_should_stop(false, "disabled", "manual"));
+        assert!(update_check_should_stop(true, "disabled", "startup"));
+        assert!(update_check_should_stop(true, "disabled", "scheduled"));
     }
 
     // The route probe is awaited on the connection path, so whatever it finds - an address, or

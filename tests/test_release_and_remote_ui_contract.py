@@ -214,7 +214,8 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         rust_updater = (ROOT / "src/updater.rs").read_text()
         self.assertIn('"software_update_event"', rust_updater)
         self.assertIn("update_check_should_stop(resp.update_available, &resp.mode, request_origin)", rust_common)
-        self.assertIn('mode == "disabled" && !request_origin.starts_with("command")', rust_common)
+        self.assertIn('request_origin != "manual"', rust_common)
+        self.assertIn('!request_origin.starts_with("command")', rust_common)
         self.assertIn(
             "update_client_identity(\n        &hbb_common::config::Config::get_id(),",
             rust_common,
