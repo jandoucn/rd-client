@@ -177,6 +177,28 @@ class _GestureHelpState extends State<GestureHelp> {
                             ),
                           ]),
                         ),
+                      if (widget.android ?? isAndroid)
+                        Transform.translate(
+                          offset: const Offset(-10.0, 0.0),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Checkbox(
+                              key: const ValueKey('two-finger-canvas-scaling'),
+                              value: _virtualMouseMode.twoFingerCanvasScaling,
+                              onChanged: (value) async {
+                                if (value == null) return;
+                                await _virtualMouseMode.toggleCanvasScaling();
+                                if (mounted) setState(() {});
+                              },
+                            ),
+                            InkWell(
+                              onTap: () async {
+                                await _virtualMouseMode.toggleCanvasScaling();
+                                if (mounted) setState(() {});
+                              },
+                              child: Text(translate('Two-finger canvas scaling')),
+                            ),
+                          ]),
+                        ),
                       if (_touchMode && _virtualMouseMode.showVirtualMouse)
                         Padding(
                           // Indent "Virtual mouse size"
@@ -307,6 +329,7 @@ class _GestureHelpState extends State<GestureHelp> {
                   android: widget.android,
                   translator: widget.translator,
                   canvasMovement: _virtualMouseMode.twoFingerCanvasMovement,
+                  canvasScaling: _virtualMouseMode.twoFingerCanvasScaling,
                   width: width,
                   space: space,
                   touchMode: _touchMode,
@@ -325,6 +348,7 @@ class GestureHelpCards extends StatelessWidget {
     this.android,
     this.translator = translate,
     this.canvasMovement = false,
+    this.canvasScaling = false,
   }) : super(key: key);
 
   final double width;
@@ -333,6 +357,7 @@ class GestureHelpCards extends StatelessWidget {
   final bool? android;
   final String Function(String) translator;
   final bool canvasMovement;
+  final bool canvasScaling;
 
   @override
   Widget build(BuildContext context) {
@@ -373,7 +398,8 @@ class GestureHelpCards extends StatelessWidget {
                               GestureIcons.iconGestureFDrag,
                               translate("Two-Finger Move"),
                               translate("Canvas Move")),
-                          GestureInfo(
+                          if (!androidHelp || canvasScaling)
+                            GestureInfo(
                               width,
                               GestureIcons.iconGesturePinch,
                               translate("Pinch to Zoom"),
@@ -410,7 +436,8 @@ class GestureHelpCards extends StatelessWidget {
                               GestureIcons.iconGestureFDrag,
                               translate("Two-Finger Move"),
                               translate("Canvas Move")),
-                          GestureInfo(
+                          if (!androidHelp || canvasScaling)
+                            GestureInfo(
                               width,
                               GestureIcons.iconGesturePinch,
                               translate("Pinch to Zoom"),

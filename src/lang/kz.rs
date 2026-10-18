@@ -799,5 +799,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("hours", ""),
         ("Two-finger vertical swipe", ""),
         ("Two-finger canvas movement", ""),
+        ("Two-finger canvas scaling", ""),
     ].iter().cloned().collect();
 }

@@ -14,6 +14,7 @@ Future<void> _pumpCards(WidgetTester tester,
         android: android,
         touchMode: touchMode,
         translator: _localized,
+        canvasScaling: true,
       ),
     ),
   ));

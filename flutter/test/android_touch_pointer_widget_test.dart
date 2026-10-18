@@ -46,6 +46,11 @@ class FakeModel extends Fake implements FfiModel {
 class PointerVirtualMouseMode extends VirtualMouseMode {
   PointerVirtualMouseMode(super.model);
   String stored = '';
+  String storedScale = '';
+  @override
+  String readCanvasScalingOption() => storedScale;
+  @override
+  Future<void> writeCanvasScalingOption(String value) async { storedScale = value; }
   @override
   String readCanvasMovementOption() => stored;
   @override
@@ -139,6 +144,7 @@ void main() {
   for (final touch in [false, true]) {
     testWidgets('enabled canvas option retains wheel priority and pinch touch=$touch', (tester) async {
       final ffi = FakeController(touch);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
       await ffi.ffiModel.virtualMouseMode.toggleCanvasMovement();
       var pointers = await startTouches(tester, ffi);
       await move(tester, pointers, const Offset(0, 30));
@@ -175,6 +181,7 @@ void main() {
     testWidgets('fixed finger continuous pinch returns to one touch=$touch',
         (tester) async {
       final ffi = FakeController(touch);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
       final pointers = await startTouches(tester, ffi);
       for (var step = 0; step < 8; step++) {
         await tester.sendEventToBinding(
@@ -195,6 +202,7 @@ void main() {
     for (final delta in [const Offset(30, 0), const Offset(30, 20)]) {
       testWidgets('Android mouse parallel cannot pan spacing=$spacing delta=$delta', (tester) async {
         final ffi = FakeController(false);
+        await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
         final pointers = await startTouches(tester, ffi, spacing: spacing);
         await move(tester, pointers, delta);
         await move(tester, pointers, delta);
@@ -234,6 +242,7 @@ void main() {
       });
       testWidgets('batched opposite pointers pinch touch=$touch spacing=$spacing', (tester) async {
         final ffi = FakeController(touch);
+        await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
         final pointers = await startTouches(tester, ffi, spacing: spacing);
         final spread = spacing / spacing.distance * 30;
         await tester.sendEventToBinding(pointers[0].move(pointers[0].location! - spread));
@@ -264,6 +273,7 @@ void main() {
     testWidgets('pinch remains canvas when held and translated touch=$touch',
         (tester) async {
       final ffi = FakeController(touch);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
       final pointers = await startTouches(tester, ffi);
       await tester.sendEventToBinding(
           pointers[1].move(const Offset(380, 200)));
@@ -346,6 +356,7 @@ void main() {
     testWidgets('raw two pointers retain mobile canvas android=$android',
         (tester) async {
       final ffi = FakeController(android);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
       final pointers = await startTouches(tester, ffi, android: android);
       await move(tester, pointers, const Offset(30, 0));
       await tester.sendEventToBinding(pointers[1].move(const Offset(350, 250)));
@@ -375,6 +386,7 @@ void main() {
   testWidgets('raw Android touch-mode horizontal swipe cannot pan without scroll',
       (tester) async {
     final ffi = FakeController(true);
+    await ffi.ffiModel.virtualMouseMode.toggleCanvasScaling();
     final pointers = await startTouches(tester, ffi);
     await move(tester, pointers, const Offset(30, 0));
     await move(tester, pointers, const Offset(20, 0));

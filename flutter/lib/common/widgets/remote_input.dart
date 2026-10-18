@@ -570,7 +570,10 @@ class _RawTouchGestureDetectorRegionState
     final pointerDelta = d.focalPointDelta;
     // Pointer moves arrive separately, so a parallel swipe has small scale jitter.
     // Compare to the gesture origin: a held pinch must remain a canvas gesture.
-    final scaleChanged = (d.scale - 1).abs() > 0.05;
+    final allowCanvasScaling = !isAndroid ||
+        widget.isCamera ||
+        ffiModel.virtualMouseMode.twoFingerCanvasScaling;
+    final scaleChanged = allowCanvasScaling && (d.scale - 1).abs() > 0.05;
     if (isAndroid &&
         d.pointerCount == 2 &&
         !widget.isCamera &&
@@ -616,7 +619,9 @@ class _RawTouchGestureDetectorRegionState
       }
     } else {
       // mobile
-      ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
+      if (allowCanvasScaling) {
+        ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
+      }
       _scale = d.scale;
       if (isAndroid &&
           !widget.isCamera &&
