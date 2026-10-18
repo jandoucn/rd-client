@@ -34,11 +34,22 @@ class FakeInput extends Fake implements InputModel {
 class FakeModel extends Fake implements FfiModel {
   FakeModel(this.touchMode);
   @override
+  late final PointerVirtualMouseMode virtualMouseMode = PointerVirtualMouseMode(this);
+  @override
   final bool touchMode;
   @override
   bool get isPeerAndroid => false;
   @override
   bool get isPeerMobile => false;
+}
+
+class PointerVirtualMouseMode extends VirtualMouseMode {
+  PointerVirtualMouseMode(super.model);
+  String stored = '';
+  @override
+  String readCanvasMovementOption() => stored;
+  @override
+  Future<void> writeCanvasMovementOption(String value) async { stored = value; }
 }
 
 class FakeCanvas extends Fake implements CanvasModel {
@@ -125,6 +136,61 @@ Future<void> finish(WidgetTester tester, List<TestPointer> pointers,
 
 void main() {
   tearDown(() => isSpecialHoldDragActive = false);
+  for (final touch in [false, true]) {
+    testWidgets('enabled canvas option retains wheel priority and pinch touch=$touch', (tester) async {
+      final ffi = FakeController(touch);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasMovement();
+      var pointers = await startTouches(tester, ffi);
+      await move(tester, pointers, const Offset(0, 30));
+      await move(tester, pointers, const Offset(0, 20));
+      expect(ffi.inputModel.wheels, isNotEmpty);
+      expect(ffi.canvasModel.pans, isEmpty);
+      expect(ffi.canvasModel.scales, isEmpty);
+      await finish(tester, pointers);
+      pointers = await startTouches(tester, ffi);
+      await tester.sendEventToBinding(pointers[1].move(const Offset(350, 200)));
+      await tester.pump();
+      await tester.sendEventToBinding(pointers[1].move(const Offset(390, 200)));
+      await tester.pump();
+      expect(ffi.canvasModel.scales.any((value) => value > 1), isTrue);
+      await finish(tester, pointers);
+    });
+    testWidgets('explicit canvas option allows pan and disabling stops pan touch=$touch',
+        (tester) async {
+      final ffi = FakeController(touch);
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasMovement();
+      final pointers = await startTouches(tester, ffi);
+      await move(tester, pointers, const Offset(30, 0));
+      await move(tester, pointers, const Offset(20, 0));
+      expect(ffi.canvasModel.pans.where((value) => value != 0), isNotEmpty);
+      expect(ffi.inputModel.wheels, isEmpty);
+      ffi.canvasModel.pans.clear();
+      await ffi.ffiModel.virtualMouseMode.toggleCanvasMovement();
+      await move(tester, pointers, const Offset(20, 0));
+      expect(ffi.canvasModel.pans, isEmpty);
+      await finish(tester, pointers);
+    });
+  }
+  for (final touch in [false, true]) {
+    testWidgets('fixed finger continuous pinch returns to one touch=$touch',
+        (tester) async {
+      final ffi = FakeController(touch);
+      final pointers = await startTouches(tester, ffi);
+      for (var step = 0; step < 8; step++) {
+        await tester.sendEventToBinding(
+            pointers[1].move(pointers[1].location! + const Offset(12, 0)));
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+      expect(ffi.canvasModel.scales.length, greaterThan(1));
+      expect(ffi.canvasModel.scales.any((value) => value > 1), isTrue);
+      await tester.sendEventToBinding(pointers[1].move(const Offset(300, 200)));
+      await tester.pump();
+      final scale = ffi.canvasModel.scales.fold<double>(1, (a, b) => a * b);
+      expect(scale, closeTo(1, 0.000001));
+      expect(ffi.canvasModel.pans, isEmpty);
+      await finish(tester, pointers);
+    });
+  }
   for (final spacing in [const Offset(0, 100), const Offset(100, 0), const Offset(20, 100)]) {
     for (final delta in [const Offset(30, 0), const Offset(30, 20)]) {
       testWidgets('Android mouse parallel cannot pan spacing=$spacing delta=$delta', (tester) async {
@@ -175,7 +241,7 @@ void main() {
         await tester.pump();
         expect(ffi.inputModel.wheels, isEmpty);
         expect(ffi.canvasModel.scales.any((value) => value > 1.05), isTrue);
-        if (!touch) expect(ffi.canvasModel.pans, isEmpty);
+        expect(ffi.canvasModel.pans, isEmpty);
         await finish(tester, pointers);
       });
     }
@@ -206,11 +272,7 @@ void main() {
       await move(tester, pointers, const Offset(0, 30));
       await move(tester, pointers, const Offset(0, 20));
       expect(ffi.inputModel.wheels, isEmpty);
-      if (touch) {
-        expect(ffi.canvasModel.pans.where((v) => v != 0), isNotEmpty);
-      } else {
-        expect(ffi.canvasModel.pans, isEmpty);
-      }
+      expect(ffi.canvasModel.pans, isEmpty);
       await finish(tester, pointers);
     });
     testWidgets('camera vertical remains canvas touch=$touch', (tester) async {
@@ -289,7 +351,11 @@ void main() {
       await tester.sendEventToBinding(pointers[1].move(const Offset(350, 250)));
       await tester.pump();
       expect(ffi.canvasModel.scales, isNotEmpty);
-      expect(ffi.canvasModel.pans.where((v) => v != 0), isNotEmpty);
+      if (android) {
+        expect(ffi.canvasModel.pans, isEmpty);
+      } else {
+        expect(ffi.canvasModel.pans.where((v) => v != 0), isNotEmpty);
+      }
       expect(ffi.inputModel.wheels, isEmpty);
       await finish(tester, pointers);
     });
@@ -306,7 +372,7 @@ void main() {
     expect(ffi.canvasModel.pans, isEmpty);
     await finish(tester, pointers);
   });
-  testWidgets('raw Android touch-mode horizontal swipe pans without scroll',
+  testWidgets('raw Android touch-mode horizontal swipe cannot pan without scroll',
       (tester) async {
     final ffi = FakeController(true);
     final pointers = await startTouches(tester, ffi);
@@ -314,7 +380,7 @@ void main() {
     await move(tester, pointers, const Offset(20, 0));
     expect(ffi.inputModel.wheels, isEmpty);
     expect(ffi.canvasModel.scales, isNotEmpty);
-    expect(ffi.canvasModel.pans.where((value) => value != 0), isNotEmpty);
+    expect(ffi.canvasModel.pans, isEmpty);
     await finish(tester, pointers);
   });
   testWidgets('raw iOS three pointers retain wheel path', (tester) async {

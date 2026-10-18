@@ -57,13 +57,14 @@ void main() {
     _expectZoom();
   });
 
-  testWidgets('Android touch keeps its original canvas move card',
+  testWidgets('Android touch omits canvas move and retains pinch zoom',
       (tester) async {
     await _pumpCards(tester, android: true, touchMode: true);
-    _expectCard('Two-Finger Move', 'Canvas Move', GestureIcons.iconGestureFDrag);
+    expect(find.text(_localized('Canvas Move')), findsNothing);
+    expect(find.text(_localized('Two-Finger Move')), findsNothing);
     _expectCard('One-Finger Move', 'Mouse Drag',
         GestureIcons.iconGestureFSwipeRight);
-    expect(find.byType(GestureInfo), findsNWidgets(6));
+    expect(find.byType(GestureInfo), findsNWidgets(5));
     _expectZoom();
   });
 

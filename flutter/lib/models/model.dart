@@ -1975,6 +1975,25 @@ class VirtualMouseMode with ChangeNotifier {
   bool _showVirtualMouse = false;
   double _virtualMouseScale = 1.0;
   bool _showVirtualJoystick = false;
+  bool _twoFingerCanvasMovement = false;
+
+  bool get twoFingerCanvasMovement => _twoFingerCanvasMovement;
+
+  String readCanvasMovementOption() =>
+      bind.mainGetLocalOption(key: kOptionTwoFingerCanvasMovement);
+
+  Future<void> writeCanvasMovementOption(String value) =>
+      bind.mainSetLocalOption(key: kOptionTwoFingerCanvasMovement, value: value);
+
+  void loadCanvasMovementOption() {
+    _twoFingerCanvasMovement = readCanvasMovementOption() == 'Y';
+    notifyListeners();
+  }
+
+  Future<void> toggleCanvasMovement() async {
+    await writeCanvasMovementOption(twoFingerCanvasMovement ? 'N' : 'Y');
+    loadCanvasMovementOption();
+  }
 
   bool get showVirtualMouse => _showVirtualMouse;
   double get virtualMouseScale => _virtualMouseScale;
@@ -2011,6 +2030,7 @@ class VirtualMouseMode with ChangeNotifier {
   }
 
   void loadOptions() {
+    loadCanvasMovementOption();
     _showVirtualMouse = showVirtualMouseFromStoredOption(
       value: bind.mainGetLocalOption(key: kOptionShowVirtualMouse),
       android: isAndroid,

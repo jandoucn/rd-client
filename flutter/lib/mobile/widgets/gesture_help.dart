@@ -42,12 +42,16 @@ class GestureHelp extends StatefulWidget {
       required this.touchMode,
       required this.onTouchModeChange,
       required this.virtualMouseMode,
+      this.android,
+      this.translator = translate,
       this.inputModel})
       : super(key: key);
   final bool touchMode;
   final OnTouchModeChange onTouchModeChange;
   final VirtualMouseMode virtualMouseMode;
   final InputModel? inputModel;
+  final bool? android;
+  final String Function(String) translator;
 
   @override
   State<StatefulWidget> createState() =>
@@ -75,6 +79,7 @@ class _GestureHelpState extends State<GestureHelp> {
 
   @override
   Widget build(BuildContext context) {
+    final translate = widget.translator;
     final size = MediaQuery.of(context).size;
     final space = 12.0;
     var width = size.width - 2 * space;
@@ -150,6 +155,28 @@ class _GestureHelpState extends State<GestureHelp> {
                           ],
                         ),
                       ),
+                      if (widget.android ?? isAndroid)
+                        Transform.translate(
+                          offset: const Offset(-10.0, 0.0),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Checkbox(
+                              key: const ValueKey('two-finger-canvas-movement'),
+                              value: _virtualMouseMode.twoFingerCanvasMovement,
+                              onChanged: (value) async {
+                                if (value == null) return;
+                                await _virtualMouseMode.toggleCanvasMovement();
+                                if (mounted) setState(() {});
+                              },
+                            ),
+                            InkWell(
+                              onTap: () async {
+                                await _virtualMouseMode.toggleCanvasMovement();
+                                if (mounted) setState(() {});
+                              },
+                              child: Text(translate('Two-finger canvas movement')),
+                            ),
+                          ]),
+                        ),
                       if (_touchMode && _virtualMouseMode.showVirtualMouse)
                         Padding(
                           // Indent "Virtual mouse size"
@@ -277,6 +304,9 @@ class _GestureHelpState extends State<GestureHelp> {
                 ),
                 Container(
                     child: GestureHelpCards(
+                  android: widget.android,
+                  translator: widget.translator,
+                  canvasMovement: _virtualMouseMode.twoFingerCanvasMovement,
                   width: width,
                   space: space,
                   touchMode: _touchMode,
@@ -294,6 +324,7 @@ class GestureHelpCards extends StatelessWidget {
     this.space = 12.0,
     this.android,
     this.translator = translate,
+    this.canvasMovement = false,
   }) : super(key: key);
 
   final double width;
@@ -301,6 +332,7 @@ class GestureHelpCards extends StatelessWidget {
   final bool touchMode;
   final bool? android;
   final String Function(String) translator;
+  final bool canvasMovement;
 
   @override
   Widget build(BuildContext context) {
@@ -335,7 +367,8 @@ class GestureHelpCards extends StatelessWidget {
                                   ? "Two-finger vertical swipe"
                                   : "Three-Finger vertically"),
                               translate("Mouse Wheel")),
-                          GestureInfo(
+                          if (!androidHelp || canvasMovement)
+                            GestureInfo(
                               width,
                               GestureIcons.iconGestureFDrag,
                               translate("Two-Finger Move"),
@@ -371,7 +404,7 @@ class GestureHelpCards extends StatelessWidget {
                                   ? "Two-finger vertical swipe"
                                   : "Three-Finger vertically"),
                               translate("Mouse Wheel")),
-                          if (!androidHelp)
+                          if (!androidHelp || canvasMovement)
                             GestureInfo(
                                width,
                               GestureIcons.iconGestureFDrag,

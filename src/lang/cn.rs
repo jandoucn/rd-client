@@ -798,5 +798,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Update check interval", "更新检查间隔"),
         ("hours", "小时"),
         ("Two-finger vertical swipe", "两指垂直滑动"),
+        ("Two-finger canvas movement", "双指移动画布"),
     ].iter().cloned().collect();
 }
