@@ -69,6 +69,42 @@ class _GestureHelpState extends State<GestureHelp> {
     _selectedIndex = _touchMode ? 1 : 0;
   }
 
+  Widget _androidOptions() => LayoutBuilder(builder: (context, constraints) {
+        Widget option(String label, String key, bool value,
+            Future<void> Function() toggle) {
+          Future<void> change() async {
+            await toggle();
+            if (mounted) setState(() {});
+          }
+
+          return ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+            child: IntrinsicWidth(child: MergeSemantics(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Checkbox(key: ValueKey(key), value: value,
+                    onChanged: (_) => change()),
+                Flexible(child: InkWell(onTap: change,
+                    child: Text(widget.translator(label)))),
+              ]),
+            )),
+          );
+        }
+
+        return Wrap(spacing: 12, children: [
+          option('Show virtual mouse', 'show-virtual-mouse',
+              _virtualMouseMode.showVirtualMouse, () async {
+            await _virtualMouseMode.toggleVirtualMouse();
+            _exitRelativeMouseModeIf(!_virtualMouseMode.showVirtualMouse);
+          }),
+          option('Two-finger canvas movement', 'two-finger-canvas-movement',
+              _virtualMouseMode.twoFingerCanvasMovement,
+              _virtualMouseMode.toggleCanvasMovement),
+          option('Two-finger canvas scaling', 'two-finger-canvas-scaling',
+              _virtualMouseMode.twoFingerCanvasScaling,
+              _virtualMouseMode.toggleCanvasScaling),
+        ]);
+      });
+
   /// Helper to exit relative mouse mode when certain conditions are met.
   /// This reduces code duplication across multiple UI callbacks.
   void _exitRelativeMouseModeIf(bool condition) {
@@ -126,7 +162,9 @@ class _GestureHelpState extends State<GestureHelp> {
                           });
                         },
                       ),
-                      Transform.translate(
+                      if (widget.android ?? isAndroid)
+                        _androidOptions()
+                      else Transform.translate(
                         offset: const Offset(-10.0, 0.0),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
@@ -155,50 +193,6 @@ class _GestureHelpState extends State<GestureHelp> {
                           ],
                         ),
                       ),
-                      if (widget.android ?? isAndroid)
-                        Transform.translate(
-                          offset: const Offset(-10.0, 0.0),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Checkbox(
-                              key: const ValueKey('two-finger-canvas-movement'),
-                              value: _virtualMouseMode.twoFingerCanvasMovement,
-                              onChanged: (value) async {
-                                if (value == null) return;
-                                await _virtualMouseMode.toggleCanvasMovement();
-                                if (mounted) setState(() {});
-                              },
-                            ),
-                            InkWell(
-                              onTap: () async {
-                                await _virtualMouseMode.toggleCanvasMovement();
-                                if (mounted) setState(() {});
-                              },
-                              child: Text(translate('Two-finger canvas movement')),
-                            ),
-                          ]),
-                        ),
-                      if (widget.android ?? isAndroid)
-                        Transform.translate(
-                          offset: const Offset(-10.0, 0.0),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Checkbox(
-                              key: const ValueKey('two-finger-canvas-scaling'),
-                              value: _virtualMouseMode.twoFingerCanvasScaling,
-                              onChanged: (value) async {
-                                if (value == null) return;
-                                await _virtualMouseMode.toggleCanvasScaling();
-                                if (mounted) setState(() {});
-                              },
-                            ),
-                            InkWell(
-                              onTap: () async {
-                                await _virtualMouseMode.toggleCanvasScaling();
-                                if (mounted) setState(() {});
-                              },
-                              child: Text(translate('Two-finger canvas scaling')),
-                            ),
-                          ]),
-                        ),
                       if (_touchMode && _virtualMouseMode.showVirtualMouse)
                         Padding(
                           // Indent "Virtual mouse size"

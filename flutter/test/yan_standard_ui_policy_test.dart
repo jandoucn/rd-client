@@ -13,10 +13,10 @@ import 'package:flutter_hbb/models/rustdesk_terminal.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('Android defaults virtual mouse on unless explicitly disabled', () {
+  test('Android defaults virtual mouse off and respects saved choices', () {
     expect(
       showVirtualMouseFromStoredOption(value: '', android: true),
-      isTrue,
+      isFalse,
     );
     expect(
       showVirtualMouseFromStoredOption(value: 'Y', android: true),

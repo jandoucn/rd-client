@@ -1969,7 +1969,7 @@ bool showVirtualMouseFromStoredOption({
   required String value,
   required bool android,
 }) =>
-    value == 'Y' || (android && value.isEmpty);
+    value == 'Y';
 
 class VirtualMouseMode with ChangeNotifier {
   bool _showVirtualMouse = false;
