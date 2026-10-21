@@ -4,7 +4,7 @@
 
 ## 0. 总结
 
-远程救援 / 保活 / 兜底恢复 / 升级的**主体链路均已实现且有测试**，全模块 `unimplemented!/todo!/stub` 零命中。待完善项集中在五处：① 两个服务都未配 SC failure actions（进程崩溃无秒级自愈）；② status 投影误报可恢复性；③ 救援命令非近实时（无命令创建唤醒）；④ 单文件损坏无自主修复（缺文件级批准清单）；⑤ total-loss 真装 commit 无 CI。其余为已知设计边界。
+远程救援 / 保活 / 兜底恢复 / 升级的**主体链路均已实现且有测试**，全模块 `unimplemented!/todo!/stub` 零命中。待完善项：**[F1，生产实测确证] 同构建 `agent.update` 卡死命令处理**（见 §5 P0）；① 两个服务都未配 SC failure actions（进程崩溃无秒级自愈）；② status 投影误报可恢复性；③ 救援命令非近实时（无命令创建唤醒）；④ 单文件损坏无自主修复（缺文件级批准清单）；⑤ total-loss 真装 commit 无 CI。其余为已知设计边界。
 
 ## 1. 架构:两套更新链 + 两套命令面(先厘清,避免误判)
 
@@ -85,8 +85,9 @@
 ## 5. 按优先级的待完善清单
 
 **P0（真缺口，影响核心诉求）**
-1. **两个服务都配 SC failure actions**：给 `RustDesk` + `RustDeskManagementAgent` 配 `sc failure ... actions= restart/N reset= M`，进程崩溃秒级自愈，取代"最长等 5 分钟计划任务"。纯增量、小改。
-2. **修 status 投影误报**：让 installed_msi 的 `local_repair` 反映真实支持、`ready`/组件状态反映 verified 引擎能力（或后端/控制台不把 `ready=false` 当"不可恢复"）。直接影响远程救援的可观测与决策。
+1. **[实测确证 F1] agent.update 同构建自升级卡死命令处理**：生产 win10-gs 实测确证——同构建 `agent.update` 终态 `reconciliation_required` 且**永不自解**（自升级替换运行中 agent → 无法确认事务终态证据，`operations_runtime.rs:538/552` 的 `transaction_evidence_unconfirmed`/`interrupted_mutation`），经 `journal.rs:364` 门禁（有命令处于 `Running`/`ReconciliationRequired` 即拒新命令）**阻断后续所有变更类命令**，且 agent 反复重领该未完成命令自堵，直到命令过期（最长 30 分钟）。机器功能仍健康（agent 在跑、build/identity/binding 不变），但远程变更命令被堵。对比 package.reinstall（升主程序、agent 不自替换）能确认 → succeeded，故 bug 专属"自升级且目标=当前构建"。修法：自升级后由新 agent 自校验（build/identity/健康==目标）即把命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加自愈/超时降级，避免无限阻断其他命令。详见 `management-agent-delivery-plan.zh.md` Phase 3 实测记录。
+2. **两个服务都配 SC failure actions**：给 `RustDesk` + `RustDeskManagementAgent` 配 `sc failure ... actions= restart/N reset= M`，进程崩溃秒级自愈，取代"最长等 5 分钟计划任务"。纯增量、小改。
+3. **修 status 投影误报**：让 installed_msi 的 `local_repair` 反映真实支持、`ready`/组件状态反映 verified 引擎能力（或后端/控制台不把 `ready=false` 当"不可恢复"）。直接影响远程救援的可观测与决策。
 
 **P1（能力完善，中优先）**
 3. **命令近实时**：命令创建加 SSE 唤醒（第 3 节）。后端小改 + 客户端零新能力。

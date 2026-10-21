@@ -6,7 +6,7 @@
 
 1. 后端重构（`~/github/rustdesk-api`）：① 能力注册表数据化；③ 后端镜像客户端 status schema（rescue/files），修 status 误报。纯后端，不卡 Windows 构建。
 2. 验证现有安装/升级/Management Agent 全能力流程，抓日志修现有 bug。
-3. P0 客户端（`~/github/rustdesk`）：SC failure actions（崩溃秒级自愈）+ status 投影修正。
+3. P0 客户端（`~/github/rustdesk`）：SC failure actions（崩溃秒级自愈）+ status 投影修正 + **F1 修复（agent.update 同构建自升级 reconciliation_required 卡死命令处理，见 Phase 3 实测记录与能力评估 §5 P0-1）**。
 
 ## 2. 机器 / 环境 / 部署模型
 
@@ -47,7 +47,11 @@
 目标：不依赖新客户端，先把当前"安装/升级/agent 全能力"在 win10-gs 跑穿，建基线+抓现有 bug。
 - 用例：干净装 standard MSI / sos MSI；旧 build→新 build 升级；远程命令全类型（service.*/recovery.reconcile/package.verify/reinstall/update/agent.update/diagnostics/network.probe）经后端下发→执行→事件回报；失败回滚旧版可用；救援包暂存→verified。
 - 验收：每用例实测通过或记录 bug+修复。
-- 实测记录：_（待填）_
+- 实测记录：**进行中（后端 ①③ 已部署生产，经管理端 `/yanolly` olly 会话活体联调）**。
+  - **③ recoverability 活体验证通过**：win10-gs（client_id 1338209581）status 上报被新后端接受（presence=online，证明 rescue/files 轻校验不拒真机），管理总览 `recoverability={evidence:verified, verified_components:[agent_backup,bootstrap_backup,client,credentials,offline_package]}`——真机报 `ready=false` 但后端正确判"可恢复"，③ 修复成立。binding 授权全权限、installation_id `0b2a3040…`。
+  - **命令全链活体验证**（create→claim→execute→event→终态）：**8 种命令**经管理端下发实测——`service.inspect`/`network.probe`/`diagnostics.collect`/`package.verify`/`service.restart`/`recovery.reconcile`/**`package.reinstall`（完整重装事务 2026101805）** 全部 **succeeded**；`service.restart` 后服务 running/ready 干净恢复；`package.reinstall` 后 win10-gs 健康（build 2026101805、PackageName 规范、双服务 Running、救援无错）。
+  - **F1 发现（agent.update → reconciliation_required）**：同构建 agent.update 终态为 `reconciliation_required`（非 succeeded），根因 `operations_runtime.rs:538/552` 自升级替换自身进程 → 无法确认终态证据（`transaction_evidence_unconfirmed`/`interrupted_mutation`）。机器功能正常（agent 跑着、build 2026101805、installation_id 不变、binding 有效）。判定：自升级固有限制，非故障；**P1 客户端改进候选**——自升级后新 agent 核对自身 build/identity/健康一致时把命令 reconcile 成 succeeded。
+  - **待补**：`package.update` 旧→新升级 E2E（需更低构建号包；OSS 旧 tag URL 探测 404，且本地构建新版本后在最终发版自然产生更高 build，届时做 old(2026101805)→new 的真实升级验收。package.reinstall 已验证同一安装引擎）；`service.start`/`service.repair`（次要）；失败/回滚路径（install_execution 单测已覆盖，真机留最终发版触发）。
 
 ### Phase 4 — P0 客户端 SC failure actions
 目标：给 `RustDesk` + `RustDeskManagementAgent` 服务注册 SC failure actions（崩溃自动重启），缩短崩溃恢复从分钟级→秒级；纯增量，不改既有恢复链。
@@ -60,6 +64,13 @@
 - 失败测试：installed_msi + 引擎支持 total-loss/local_repair 时，投影不得输出 `installed_msi_local_repair_not_supported`；组件 verified 正确透出。
 - 机器验收：win10-gs 实测 status 与真实恢复能力一致。
 - 实测记录：_（待填）_
+
+### Phase 5b — P0 客户端 F1 修复（agent.update 卡死）
+目标：修复生产实测确证的 F1——同构建 `agent.update` 终态 `reconciliation_required` 永不自解、经 `journal.rs:364` 门禁卡死后续变更命令。
+- 方案：自升级提交后，新 agent 在 resume/reconcile 路径自校验（当前 build/identity/健康 == 目标且事务已落地）即把该命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加超时/自愈降级，使其不无限阻断其他命令。改在 `operations_runtime.rs` resume/reconcile 与 `command_transaction` 终态确认处，不动既有 package.reinstall/update 成功路径。
+- 失败测试（Rust）：构造「自升级目标==当前 build、事务证据缺失但 agent 健康一致」场景，断言命令 reconcile 为 `succeeded`（或在超时后降级为明确终态），且不再阻断新变更命令；回归 package.reinstall/update 的 succeeded/rolled_back 路径不变。
+- 机器验收：win10-gs 下发 agent.update 后命令达终态、后续 service.* 命令可正常处理（不被堵）。
+- 实测记录：_（待填，当前以命令过期自然解卡；修复后应无需等过期）_
 
 ### Phase 6 — 全链机器验收 + 发版门槛
 - win10-gs：新客户端包 干净装 + 升级 + 全能力 + 崩溃自愈 + 失败回滚 全绿。
