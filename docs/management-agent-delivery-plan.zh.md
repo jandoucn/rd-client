@@ -40,6 +40,10 @@
 - 实测记录：**已完成（后端 commit `901175f`，未推送）**。发现 overview 本就经 `agent_status_snapshot` 原样回传客户端 payload（含 rescue/files），且客户端 status 上报确实带 `rescue`（完整 snapshot）+ `files`（`status.rs:170-171`）。实现：① `agent_recoverability()` 只读组件级 `verified` 派生可恢复性（不照 `ready=false` 误判，installed_msi 组件 verified 时判"可恢复"）；② 管理总览新增 `recoverability` 字段；③ `agent_status_validate` 对 rescue/files 向后兼容轻校验。测试：新增 `agent_status_recoverability_test` **12 断言**；回归 PHP 四连（registry 86 / operations 76 / status 30 / recoverability 12）+ python 非浏览器 HTTP **80 测试** 全绿。**遗留**：`agents.html` 可视化卡片（前端，需 playwright 浏览器）放到 win10-gs 联调阶段加+验；本地容器无浏览器，playwright e2e 未跑。
 
 ### Phase 3 — 验证现有流程（win10-gs 机器 E2E，用现有已发布包）
+
+> 后端 ①③ 已于 2026-10-21 13:31 部署生产（NTServer-SH `/opt/1panel/apps/rustdesk-api`，`upgrade-api.sh latest` → 镜像 `cf718342`=commit `901175f`，SQLite 已备份 `rustdesk.pre-upgrade-latest-20261021133119.db`，健康检查通过，可回滚）。部署后冒烟：manifest 200 / publish 401 / agent/commands 401，发布数据完好（1.5.3 / 2026101805 / 7 targets）。
+> **本阶段首项**：确认 win10-gs 真机 agent ↔ 新后端 status 上报被接受（验证 rescue/files 轻校验不拒真机）+ 管理总览 `recoverability` 字段对真机返回 `verified`（需管理端鉴权）。
+
 目标：不依赖新客户端，先把当前"安装/升级/agent 全能力"在 win10-gs 跑穿，建基线+抓现有 bug。
 - 用例：干净装 standard MSI / sos MSI；旧 build→新 build 升级；远程命令全类型（service.*/recovery.reconcile/package.verify/reinstall/update/agent.update/diagnostics/network.probe）经后端下发→执行→事件回报；失败回滚旧版可用；救援包暂存→verified。
 - 验收：每用例实测通过或记录 bug+修复。
