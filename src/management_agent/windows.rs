@@ -285,6 +285,69 @@ pub fn restart_service(state: &AgentState, paths: &AgentPaths) -> Result<bool, S
     repair_service(state, paths, !observed.normal_present && observed.fallback_present)
 }
 
+// SCM restarts a crashed service within seconds once failure actions are set,
+// instead of waiting for the recovery scheduled task (up to 5 minutes).
+const FAILURE_RESTART_DELAY: Duration = Duration::from_secs(5);
+const FAILURE_RESET_PERIOD: Duration = Duration::from_secs(86_400);
+
+fn failure_actions() -> windows_service::service::ServiceFailureActions {
+    use windows_service::service::{
+        ServiceAction, ServiceActionType, ServiceFailureActions, ServiceFailureResetPeriod,
+    };
+    ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(FAILURE_RESET_PERIOD),
+        reboot_msg: None,
+        command: None,
+        // Restart three times in a row; the reset window gives a machine that
+        // crashes once a day its own budget instead of tripping into no-action.
+        actions: Some(
+            (0..3)
+                .map(|_| ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: FAILURE_RESTART_DELAY,
+                })
+                .collect(),
+        ),
+    }
+}
+
+// Idempotent on every agent start. An in-place upgrade stops and restarts the
+// services without running the install script that creates them, so configuring
+// failure actions only at install time would never reach an upgraded machine.
+// Running this from the agent's own startup makes an upgrade behave like a fresh
+// install for this capability: the new binary configures what it needs. A missing
+// service is skipped (bootstrap/repair owns creation); success means every present
+// service accepted the configuration, so a transient SCM error retries on the next
+// start instead of being silently lost.
+pub fn ensure_service_failure_actions() -> Result<bool, String> {
+    use windows_service::service::ServiceAccess;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|error| format!("service manager: {error}"))?;
+    let mut configured = true;
+    let app_name = crate::get_app_name();
+    for name in [app_name.as_str(), "RustDeskManagementAgent"] {
+        let service = match manager.open_service(name, ServiceAccess::CHANGE_CONFIG) {
+            Ok(service) => service,
+            Err(windows_service::Error::Winapi(error)) if is_missing_service(&error) => continue,
+            Err(error) => return Err(format!("service {name} open: {error}")),
+        };
+        if let Err(error) = service.update_failure_actions(failure_actions()) {
+            configured = false;
+            hbb_common::throttled_log!(
+                Duration::from_secs(3600),
+                warn,
+                "service failure actions for {name} refused: {error}"
+            );
+        }
+    }
+    Ok(configured)
+}
+
+fn is_missing_service(error: &std::io::Error) -> bool {
+    // ERROR_SERVICE_DOES_NOT_EXIST (1060)
+    error.raw_os_error() == Some(1060)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

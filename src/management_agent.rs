@@ -1569,6 +1569,22 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     })?;
     let paths = AgentPaths::from_program_data(program_data, config.edition);
     ensure_agent_layout(&paths).map_err(windows_service::Error::Winapi)?;
+    // Re-apply SCM failure actions on every start so an in-place upgrade (which
+    // never re-runs the install script) still gains sub-second crash recovery.
+    // Non-fatal: a failure is retried on the next start.
+    match recovery_windows::ensure_service_failure_actions() {
+        Ok(true) => {}
+        Ok(false) => hbb_common::throttled_log!(
+            Duration::from_secs(3600),
+            warn,
+            "service failure actions not fully applied"
+        ),
+        Err(error) => hbb_common::throttled_log!(
+            Duration::from_secs(3600),
+            warn,
+            "service failure actions setup failed: {error}"
+        ),
+    }
     let intent = if hbb_common::config::Config2::file().exists() {
         recovery_windows::read_intent().unwrap_or(recovery::Intent::Unknown)
     } else {

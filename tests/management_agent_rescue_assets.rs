@@ -3618,10 +3618,13 @@ fn rescuestatus_real_fixed_bundle_production_key_rejects_fixture_key_full_verifi
         "degraded"
     );
     if value["source_kind"] == "installed_msi" {
+        // The automatic local-repair engine accepts installed_msi, so status must
+        // not claim it is unsupported; it reports not_assessed because status
+        // cannot confirm the full approval chain.
         assert_eq!(
             rescue_status::snapshot_fixture(bundle, &reports, installation, key, 1003)
                 ["components"]["local_repair"]["state"],
-            "unsupported_source"
+            "not_assessed"
         );
     }
     assert_eq!(std::fs::read(bundle.join("bundle.json")).unwrap(), original);

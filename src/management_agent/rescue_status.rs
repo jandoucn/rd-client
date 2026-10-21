@@ -127,13 +127,24 @@ fn projection(
             serde_json::json!({"supported":null,"state":"not_assessed","ready":false}),
         );
     }
-    if record.is_some_and(|r| r.assets["source_kind"] == "installed_msi") {
-        components.insert("local_repair".into(),serde_json::json!({"supported":false,"state":"unsupported_source","ready":false,"reason":"installed_msi_local_repair_not_supported"}));
+    if let Some(component) = local_repair_component(record) {
+        components.insert("local_repair".into(), component);
     }
     serde_json::json!({"schema":1,"state":state,"ready":false,"verification_supported":true,"full_recovery_supported":false,
         "freshness":fresh,"error_code":error,"verification_interval_seconds":MAX_AGE,"evidence":"cached_full_verification","current_integrity":"not_rechecked_by_status",
         "checked_at":record.map(|r|r.checked_at),"source_reference":record.and_then(|r|r.source_reference.as_deref()),"source_digest":record.map(|r|r.source_digest.as_str()),
         "components":components,"blocked_reason":"full_recovery_not_confirmed"})
+}
+// The automatic local-repair engine (local_repair_schedule::approval) accepts
+// installed_msi sources, so status must not advertise installed_msi local repair
+// as unsupported. Status alone cannot confirm the full approval chain
+// (installed_source_id, package hash, runtime gates), so it reports not_assessed
+// rather than asserting support either way, matching the sibling components above.
+// committed_transaction sources carry no local_repair projection, as before.
+fn local_repair_component(record: Option<&Record>) -> Option<serde_json::Value> {
+    record
+        .filter(|r| r.assets["source_kind"] == "installed_msi")
+        .map(|_| serde_json::json!({"supported":null,"state":"not_assessed","ready":false}))
 }
 fn snapshot_at(
     bundle: &Path,
@@ -414,4 +425,56 @@ fn start_checked(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
             }
         })?;
     Ok(Worker { sender })
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn record_with(assets: serde_json::Value) -> Record {
+        Record {
+            schema: 1,
+            installation: "c".repeat(32),
+            target_key: "windows-x86_64-msi-standard".into(),
+            checked_at: 1000,
+            source_digest: "d".repeat(64),
+            source_reference: Some("ref".into()),
+            authority: "yan-release-2026".into(),
+            state: "degraded".into(),
+            error_code: None,
+            assets,
+        }
+    }
+
+    #[test]
+    fn installed_msi_local_repair_is_not_assessed_not_unsupported() {
+        let record = record_with(serde_json::json!({"source_kind": "installed_msi"}));
+        let component = local_repair_component(Some(&record)).expect("installed_msi has a local_repair projection");
+        assert_eq!(component["supported"], serde_json::Value::Null);
+        assert_eq!(component["state"], "not_assessed");
+        assert_eq!(component["ready"], false);
+        assert!(component.get("reason").is_none(), "must not advertise installed_msi_local_repair_not_supported");
+
+        let projected = projection("degraded", "fresh", None, Some(&record));
+        assert_eq!(projected["components"]["local_repair"]["state"], "not_assessed");
+        assert_ne!(projected["components"]["local_repair"]["state"], "unsupported_source");
+        // Contract fields the status layer must still hold constant.
+        assert_eq!(projected["ready"], false);
+        assert_eq!(projected["full_recovery_supported"], false);
+    }
+
+    #[test]
+    fn committed_transaction_source_has_no_local_repair_component() {
+        let record = record_with(serde_json::json!({"source_kind": "committed_transaction"}));
+        assert!(local_repair_component(Some(&record)).is_none());
+        let projected = projection("degraded", "fresh", None, Some(&record));
+        assert!(projected["components"].get("local_repair").is_none());
+    }
+
+    #[test]
+    fn absent_record_has_no_local_repair_component() {
+        assert!(local_repair_component(None).is_none());
+        let projected = projection("unavailable", "unverified", Some("bundle_missing"), None);
+        assert!(projected["components"].get("local_repair").is_none());
+    }
 }

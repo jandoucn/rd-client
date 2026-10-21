@@ -540,6 +540,17 @@ fn poll_with_identity(
                     hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent transaction evidence refused: {error}");
                 }
             }
+            // A self-update's terminal evidence can be lost when the agent replaces
+            // itself, leaving the command wedged. If the running agent is already the
+            // target build, the self-update landed; reconcile it so the journal gate
+            // stops blocking later mutating commands. Only agent.update qualifies, and
+            // only when concrete evidence above did not already reach a terminal state.
+            if matches!(log.state(&command.id), Some(ExecutionState::Running | ExecutionState::ReconciliationRequired))
+                && agent_self_update_confirmed(wire)? {
+                log.finish(&command.id, "succeeded",
+                    serde_json::json!({"transaction_id":command.id,"self_update_confirmed":true}),
+                    unix_timestamp())?;
+            }
             upload_events(identity, base, &binding, &mut log)?;
             continue;
         }
@@ -633,6 +644,26 @@ fn command_type(wire: &serde_json::Value) -> Result<&str, PollError> {
     wire["type"].as_str().ok_or_else(|| PollError::from("command type missing"))
 }
 
+// A self-updating agent is, after it restarts, provably the target build: it is
+// the running process executing this poll, its identity was already bound by the
+// signed command envelope, and version.json reports its compiled build. When that
+// build equals the command's target, the self-update has landed regardless of what
+// transaction evidence survived the self-replacement. This lets a same-construct
+// agent.update (whose target equals the current build) reconcile to succeeded
+// instead of wedging at reconciliation_required forever and blocking later mutating
+// commands via the journal gate. It never fires for package.reinstall/package.update
+// (those keep their evidence-bound terminal path), and concrete terminal evidence
+// still wins because Ok(Some(..)) finishes the command before this check runs.
+fn agent_self_update_confirmed(wire: &serde_json::Value) -> Result<bool, PollError> {
+    if command_type(wire)? != "agent.update" {
+        return Ok(false);
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../version.json")).map_err(|e| e.to_string())?;
+    let current = metadata["build_seq"].as_u64().ok_or("current agent build missing")?;
+    Ok(wire["args"]["target_build_seq"].as_u64() == Some(current))
+}
+
 fn terminal_event_result(id: &str, status: &str) -> serde_json::Value {
     let mut result = serde_json::json!({"transaction_id":id});
     match status {
@@ -685,6 +716,41 @@ fn upload_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn current_build_seq() -> u64 {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!("../../version.json")).unwrap();
+        metadata["build_seq"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn self_update_confirmed_only_when_running_agent_is_the_target_build() {
+        let current = current_build_seq();
+        let same = serde_json::json!({"type":"agent.update","args":{"target_build_seq":current}});
+        assert!(agent_self_update_confirmed(&same).unwrap());
+
+        let newer = serde_json::json!({"type":"agent.update","args":{"target_build_seq":current + 1}});
+        assert!(!agent_self_update_confirmed(&newer).unwrap(), "a later target is not yet self-applied");
+
+        let older = serde_json::json!({"type":"agent.update","args":{"target_build_seq":current.saturating_sub(1)}});
+        assert!(!agent_self_update_confirmed(&older).unwrap());
+    }
+
+    #[test]
+    fn self_update_confirmed_never_masks_package_commands() {
+        let current = current_build_seq();
+        for command_type in ["package.reinstall", "package.update"] {
+            let wire = serde_json::json!({"type":command_type,"args":{"target_build_seq":current}});
+            assert!(!agent_self_update_confirmed(&wire).unwrap(),
+                "{command_type} must keep its evidence-bound terminal path");
+        }
+    }
+
+    #[test]
+    fn self_update_confirmed_requires_type_and_target() {
+        assert!(agent_self_update_confirmed(&serde_json::json!({"args":{"target_build_seq":1}})).is_err());
+        let missing_target = serde_json::json!({"type":"agent.update","args":{}});
+        assert!(!agent_self_update_confirmed(&missing_target).unwrap());
+    }
 
     #[test]
     fn delivery_rollback_events_have_fixed_codes_and_keep_local_error() {
