@@ -38,6 +38,20 @@
 
 构建失败时只修改导致当前构建错误的最小代码范围。不得借修复构建错误改变既有功能、协议、字段语义、固定密码、服务器地址、公钥、认证配置或默认权限；修复后必须进行代码审查并重新构建验证。
 
+## Windows 本地编译环境（win10-gs）
+
+本地编译/真机验收只用 `win10-gs`（termark `01a15c96-d93e-7ecc-ab71-6d5f1d90323d`，10.0.0.100）。仓库在 `D:\github\rd-client`（remote `jandoucn/rd-client.git`）。工具链已从 C 盘 `%TEMP%\opencode`（temp 会被清理）迁移到 **`D:\build-env`**，机器级环境变量已设。以下配置是实测编译通过（530+ crate，`cargo build --locked --bin rustdesk-management-agent` 退出码 0）的版本，不要再改回去：
+
+* **Rust 工具链**：`D:\build-env\rustup\toolchains\1.90.0-x86_64-pc-windows-msvc\bin`（rustc/cargo 1.90.0），`RUSTUP_HOME=D:\build-env\rustup`，`CARGO_HOME=D:\build-env\cargo`。
+* **关键坑：不要用 `D:\build-env\cargo\bin` 里那套 rustup 代理 shim，也不要把它在 PATH 中排在前面。** 复制过来的 rustup 代理会自触发「重装 rust-src 组件」→ 缓存校验失败 → `rustc` 被回滚 → 报 `failed to extract package: premature eof` / `could not compile proc-macro2`；ghost 情况下代理还会挑到 gnu 工具链报 `dlltool.exe: program not found`。正确做法是显式指定 `RUSTC=<toolchain>\bin\rustc.exe`、`RUSTUP_TOOLCHAIN=1.90.0-x86_64-pc-windows-msvc`，并把 toolchain `bin` 放 PATH 最前、**不放** `cargo\bin` proxies。
+* **MSVC**：`C:\RustDeskBuildTools\VC\Auxiliary\Build\vcvars64.bat`（保留在 C 盘，不要迁）。编译前必须先 `call` 它，否则链接器/spawn 失败。
+* **vcpkg 依赖**：`VCPKG_ROOT=D:\build-env\vcpkg-agent`（已装好 `x64-windows-static` 全套 deps：aom/avcodec/avformat/avutil/jpeg/libmfx/opus/turbojpeg/vpx/yuv，无需重装）。
+* **libclang**：`LIBCLANG_PATH=D:\build-env\libclang-agent\clang\native`。
+* **Flutter**：`D:\build-env\flutter-3.24.5\bin\flutter.bat`（`FLUTTER_ROOT`）。GitHub CI 用 3.24.5 且需 `flutter_3.24.4_dropdown_menu_enableFilter.diff` 补丁与 rustdesk 自定义 engine，本地 UI 打包需照 `.github/workflows/flutter-build.yml` 的 windows job 处理。
+* **清理 target 时**：`target\debug` 若被上一次失败构建污染，必须彻底删干净（长路径用 `robocopy <空目录> <target\debug> /MIR` 再 `Remove-Item`），且在构建进程全部退出（`taskkill /f /im rustc.exe`、`cargo.exe`）后再删；脏的 proc-macro2 产物会导致 `syn` 报 `proc_macro2::extra::DelimSpan` 未解析。
+* **长任务**：SSH 非交互，脱离进程用 `schtasks /run` 跑 `.bat`/`.ps1`（普通进程写入日志会因 SSH 会话结束而中断）。中文输出经 SSH 会乱码，用 base64 传递输出。
+* **代码同步**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master` → win10-gs `git pull` 后本地编译验证。推 master 不触发构建，只有打 tag 才触发 Flutter Tag Build。
+
 ## 测试与验收约束
 
 所有功能开发、缺陷修复、协议调整、版本/更新逻辑和 UI 行为变更都必须按测试驱动开发（TDD）执行：
