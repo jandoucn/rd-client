@@ -12,10 +12,9 @@
 
 | 用途 | 机器 | 说明 |
 |---|---|---|
-| 客户端编译 | win10-gs（termark `01a15c96…`，10.0.0.100，`C:\RustDeskBuildTools`） | MSVC+vcpkg 已确认；rustc/cargo/flutter 位置待定位（客户端阶段解决） |
-| 客户端实测 | GepShare-ssh（termark `01a15c6a…`，10.0.0.254） | 随意下 sos/standard 各构建号包、升级、破坏、恢复、抓日志 |
-| 生产联调验证 | win10-gs（真 agent，client_id 1338209581） | 连固定 `rdapi.yan.life`；破坏性操作前先备份、不重启 OS、不碰非 RustDesk 数据目录 |
-| 后端联调/部署 | termark `a5f1409a…`（NTServer-SH 47.100.7.221）`/opt/1panel/apps/rustdesk-api` | 提交 GitHub api → Docker 镜像 → 该目录生产升级（`scripts/upgrade-api.sh` 带回滚快照） |
+| 客户端编译 + 实测（唯一测试机） | win10-gs（termark `01a15c96…`，10.0.0.100，`C:\RustDeskBuildTools`，client_id 1338209581，连固定 `rdapi.yan.life`） | MSVC+vcpkg 已确认；rustc/cargo/flutter 位置待定位。随意下 sos/standard 各构建号包、升级、破坏、恢复、抓日志。**破坏性操作前先备份状态可还原；不重启 OS；不碰非 RustDesk 数据目录（要碰先问）** |
+| ~~GepShare-ssh~~ | — | 已取消，不用 |
+| 后端联调/部署 | termark `a5f1409a…`（NTServer-SH 47.100.7.221）`/opt/1panel/apps/rustdesk-api` | 提交 GitHub api → Docker 镜像 → 该目录生产升级（带回滚快照） |
 | 最终发版 | GitHub Actions | 7 包：win/macOS 各 sos+standard 的 EXE/MSI/DMG + 安卓仅 standard APK；安卓/macOS 签名证书与方式**一律不动** |
 
 ## 3. TDD 分层要求（两仓 AGENTS.md 均强制）
@@ -23,7 +22,7 @@
 1. 先把需求拆成可验证行为与失败条件 → 2. 先写失败测试 → 3. 最小实现令其通过 → 4. 重构 + 补边界 + 保留回归。
 - **单元**：纯函数/状态机/校验/序列化/签名（Rust `#[test]` / PHP / `flutter_test`）。
 - **集成**：跨模块/HTTP/配置/事务/桥接，用本地 fixture/mock/真 PHP+SQLite，不依赖线上。
-- **E2E/机器**：桌面流程必须用**构建出的实际包**在真机跑（GepShare），覆盖安装/升级/下载校验/安装失败回滚/旧版可用。
+- **E2E/机器**：桌面流程必须用**构建出的实际包**在真机跑（win10-gs），覆盖安装/升级/下载校验/安装失败回滚/旧版可用。
 - 覆盖率目标 ≥80%，禁空过滤器/删测试凑数；失败路径必须断言错误类型+旧数据保留。
 
 ## 4. 阶段与 TDD 清单
@@ -40,8 +39,8 @@
 - 验收：`agent_status` 相关 test + 控制台 overview test 全绿。
 - 实测记录：_（待填）_
 
-### Phase 3 — 验证现有流程（GepShare 机器 E2E，用现有已发布包）
-目标：不依赖新客户端，先把当前"安装/升级/agent 全能力"在 GepShare 跑穿，建基线+抓现有 bug。
+### Phase 3 — 验证现有流程（win10-gs 机器 E2E，用现有已发布包）
+目标：不依赖新客户端，先把当前"安装/升级/agent 全能力"在 win10-gs 跑穿，建基线+抓现有 bug。
 - 用例：干净装 standard MSI / sos MSI；旧 build→新 build 升级；远程命令全类型（service.*/recovery.reconcile/package.verify/reinstall/update/agent.update/diagnostics/network.probe）经后端下发→执行→事件回报；失败回滚旧版可用；救援包暂存→verified。
 - 验收：每用例实测通过或记录 bug+修复。
 - 实测记录：_（待填）_
@@ -49,17 +48,17 @@
 ### Phase 4 — P0 客户端 SC failure actions
 目标：给 `RustDesk` + `RustDeskManagementAgent` 服务注册 SC failure actions（崩溃自动重启），缩短崩溃恢复从分钟级→秒级；纯增量，不改既有恢复链。
 - 失败测试（Rust）：服务安装/注册路径产出含 failure actions 的配置；禁用/维护意图下不改变（与既有门禁一致）；回归既有 service 安装测试。
-- 机器验收（GepShare）：kill agent/主进程 → 观测 SCM 自动重启秒级；与计划任务兜底不冲突。
+- 机器验收（win10-gs）：kill agent/主进程 → 观测 SCM 自动重启秒级；与计划任务兜底不冲突。
 - 实测记录：_（待填）_
 
 ### Phase 5 — P0 客户端 status 投影修正
 目标：`rescue_status.rs` 投影让 installed_msi 的 `local_repair`/组件状态反映引擎真实支持（与后端 Phase 2 对齐），不再误报"不可恢复"；`ready` 字段契约保持（如仍 false 则文档化语义），重点是组件级真实性。
 - 失败测试：installed_msi + 引擎支持 total-loss/local_repair 时，投影不得输出 `installed_msi_local_repair_not_supported`；组件 verified 正确透出。
-- 机器验收：GepShare 实测 status 与真实恢复能力一致。
+- 机器验收：win10-gs 实测 status 与真实恢复能力一致。
 - 实测记录：_（待填）_
 
 ### Phase 6 — 全链机器验收 + 发版门槛
-- GepShare：新客户端包 干净装 + 升级 + 全能力 + 崩溃自愈 + 失败回滚 全绿。
+- win10-gs：新客户端包 干净装 + 升级 + 全能力 + 崩溃自愈 + 失败回滚 全绿。
 - 后端：生产 `a5f1409a` 升级后，win10-gs 真 agent 联调全能力通过、无回归。
 - 全绿 → 通知用户走 GitHub 7 包构建（签名方式不动）。
 - 实测记录：_（待填）_
@@ -70,16 +69,16 @@
 |---|---|---|---|
 | 后端能力注册表 | ✅ | ✅(真 PHP+SQLite) | — |
 | 后端 status 镜像/控制台 | ✅ | ✅ | win10-gs 联调 |
-| 安装 standard/sos MSI | — | fixture | GepShare |
-| 旧→新 升级 + 回滚 | — | mock installer | GepShare |
-| 远程命令全类型 | ✅ | 真 PHP+SQLite | GepShare+后端 |
-| SC failure actions | ✅ | — | GepShare kill 测试 |
-| status 投影真实性 | ✅ | — | GepShare |
+| 安装 standard/sos MSI | — | fixture | win10-gs |
+| 旧→新 升级 + 回滚 | — | mock installer | win10-gs |
+| 远程命令全类型 | ✅ | 真 PHP+SQLite | win10-gs+后端 |
+| SC failure actions | ✅ | — | win10-gs kill 测试 |
+| status 投影真实性 | ✅ | — | win10-gs |
 
 ## 6. 验收标准（交付即可验收态）
 
 - 两仓 TDD 全绿：`cargo test`（Windows 目标，经 win10-gs/CI）、`flutter test`、后端 PHP/Python 全集；无空过滤器。
-- GepShare 机器 E2E：安装/升级/全能力/崩溃自愈/失败回滚逐项通过并留日志。
+- win10-gs 机器 E2E：安装/升级/全能力/崩溃自愈/失败回滚逐项通过并留日志。
 - 生产后端升级无回归，win10-gs 真 agent 联调通过。
 - 本文测试记录各阶段填实。
 - 固定配置（密码/ID 服务器/API/下载域/公钥/签名方式）零改动。
@@ -89,4 +88,4 @@
 - win10-gs 的 rustc/cargo/flutter 位置未定位（MSVC+vcpkg 已确认）——客户端阶段解决；若缺则装 rustup + 克隆仓库，不改既有 `C:\RustDeskBuildTools`。
 - 客户端能否本地出整包 MSI（需 Flutter+WiX）或仅 agent 二进制——定位后决定测试粒度。
 - 生产后端升级有真实风险，每次带回滚快照 + 用户知情。
-- 机器分工（编译 win10-gs / 实测 GepShare / 联调 win10-gs）以本文为准，可按用户调整。
+- 机器分工（编译+实测 win10-gs / 后端联调 NTServer-SH）以本文为准，可按用户调整。
