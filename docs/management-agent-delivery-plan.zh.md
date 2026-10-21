@@ -50,7 +50,7 @@
 - 实测记录：**进行中（后端 ①③ 已部署生产，经管理端 `/yanolly` olly 会话活体联调）**。
   - **③ recoverability 活体验证通过**：win10-gs（client_id 1338209581）status 上报被新后端接受（presence=online，证明 rescue/files 轻校验不拒真机），管理总览 `recoverability={evidence:verified, verified_components:[agent_backup,bootstrap_backup,client,credentials,offline_package]}`——真机报 `ready=false` 但后端正确判"可恢复"，③ 修复成立。binding 授权全权限、installation_id `0b2a3040…`。
   - **命令全链活体验证**（create→claim→execute→event→终态）：**8 种命令**经管理端下发实测——`service.inspect`/`network.probe`/`diagnostics.collect`/`package.verify`/`service.restart`/`recovery.reconcile`/**`package.reinstall`（完整重装事务 2026101805）** 全部 **succeeded**；`service.restart` 后服务 running/ready 干净恢复；`package.reinstall` 后 win10-gs 健康（build 2026101805、PackageName 规范、双服务 Running、救援无错）。
-  - **F1 发现（agent.update → reconciliation_required）**：同构建 agent.update 终态为 `reconciliation_required`（非 succeeded），根因 `operations_runtime.rs:538/552` 自升级替换自身进程 → 无法确认终态证据（`transaction_evidence_unconfirmed`/`interrupted_mutation`）。机器功能正常（agent 跑着、build 2026101805、installation_id 不变、binding 有效）。判定：自升级固有限制，非故障；**P1 客户端改进候选**——自升级后新 agent 核对自身 build/identity/健康一致时把命令 reconcile 成 succeeded。
+  - **F1 发现（agent.update → reconciliation_required，升级为 P0）**：同构建 agent.update 终态为 `reconciliation_required`（非 succeeded），根因 `operations_runtime.rs:538/552` 自升级替换自身进程 → 无法确认终态证据（`transaction_evidence_unconfirmed`/`interrupted_mutation`）；经 `journal.rs:364` 门禁阻断后续所有变更命令，agent 反复从后端重领该未完成命令自堵。**实测：命令过期（expires_at）后 `reconciliation_required` 并不转 `expired`、不自解**——即持久卡死命令处理直到人工介入。机器功能正常（agent 跑着、build 2026101805、installation_id 不变、binding 有效）。**恢复手段（已对 win10-gs 执行并验证）**：① 后端终结该命令（容器内 `php PDO` 将 `device_agent_commands.status` 由 `reconciliation_required` 改为 `cancelled`，agent 即不再被下发它；cancel API 对已领取命令拒绝，故走 DB）；② win10-gs 停 agent、删本地 journal `state\commands-1.json`（卡住条目在 generation=1 的 commands-1.json；备份留证 `commands-1.json.wedged-bak`）、启 agent；③ 下发全新 service.inspect 验证 **succeeded**，命令处理恢复，recoverability 仍 verified。**修复见 Phase 5b（客户端 P0）**。
   - **待补**：`package.update` 旧→新升级 E2E（需更低构建号包；OSS 旧 tag URL 探测 404，且本地构建新版本后在最终发版自然产生更高 build，届时做 old(2026101805)→new 的真实升级验收。package.reinstall 已验证同一安装引擎）；`service.start`/`service.repair`（次要）；失败/回滚路径（install_execution 单测已覆盖，真机留最终发版触发）。
 
 ### Phase 4 — P0 客户端 SC failure actions
@@ -70,7 +70,7 @@
 - 方案：自升级提交后，新 agent 在 resume/reconcile 路径自校验（当前 build/identity/健康 == 目标且事务已落地）即把该命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加超时/自愈降级，使其不无限阻断其他命令。改在 `operations_runtime.rs` resume/reconcile 与 `command_transaction` 终态确认处，不动既有 package.reinstall/update 成功路径。
 - 失败测试（Rust）：构造「自升级目标==当前 build、事务证据缺失但 agent 健康一致」场景，断言命令 reconcile 为 `succeeded`（或在超时后降级为明确终态），且不再阻断新变更命令；回归 package.reinstall/update 的 succeeded/rolled_back 路径不变。
 - 机器验收：win10-gs 下发 agent.update 后命令达终态、后续 service.* 命令可正常处理（不被堵）。
-- 实测记录：_（待填，当前以命令过期自然解卡；修复后应无需等过期）_
+- 实测记录：_（待填）_（注：F1 不随命令过期自解，恢复需「后端终结命令 + 清本地 journal + 重启」，见 Phase 3 记录；修复后应命令自达终态、无需人工恢复）
 
 ### Phase 6 — 全链机器验收 + 发版门槛
 - win10-gs：新客户端包 干净装 + 升级 + 全能力 + 崩溃自愈 + 失败回滚 全绿。

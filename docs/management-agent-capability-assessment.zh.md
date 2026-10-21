@@ -85,7 +85,7 @@
 ## 5. 按优先级的待完善清单
 
 **P0（真缺口，影响核心诉求）**
-1. **[实测确证 F1] agent.update 同构建自升级卡死命令处理**：生产 win10-gs 实测确证——同构建 `agent.update` 终态 `reconciliation_required` 且**永不自解**（自升级替换运行中 agent → 无法确认事务终态证据，`operations_runtime.rs:538/552` 的 `transaction_evidence_unconfirmed`/`interrupted_mutation`），经 `journal.rs:364` 门禁（有命令处于 `Running`/`ReconciliationRequired` 即拒新命令）**阻断后续所有变更类命令**，且 agent 反复重领该未完成命令自堵，直到命令过期（最长 30 分钟）。机器功能仍健康（agent 在跑、build/identity/binding 不变），但远程变更命令被堵。对比 package.reinstall（升主程序、agent 不自替换）能确认 → succeeded，故 bug 专属"自升级且目标=当前构建"。修法：自升级后由新 agent 自校验（build/identity/健康==目标）即把命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加自愈/超时降级，避免无限阻断其他命令。详见 `management-agent-delivery-plan.zh.md` Phase 3 实测记录。
+1. **[实测确证 F1] agent.update 同构建自升级卡死命令处理**：生产 win10-gs 实测确证——同构建 `agent.update` 终态 `reconciliation_required` 且**永不自解**（自升级替换运行中 agent → 无法确认事务终态证据，`operations_runtime.rs:538/552` 的 `transaction_evidence_unconfirmed`/`interrupted_mutation`），经 `journal.rs:364` 门禁（有命令处于 `Running`/`ReconciliationRequired` 即拒新命令）**阻断后续所有变更类命令**，且 agent 反复重领该未完成命令自堵，直到人工介入（实测命令过期后 reconciliation_required 不转 expired、不自解，需终结后端命令+清本地 journal+重启才恢复）。机器功能仍健康（agent 在跑、build/identity/binding 不变），但远程变更命令被堵。对比 package.reinstall（升主程序、agent 不自替换）能确认 → succeeded，故 bug 专属"自升级且目标=当前构建"。修法：自升级后由新 agent 自校验（build/identity/健康==目标）即把命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加自愈/超时降级，避免无限阻断其他命令。详见 `management-agent-delivery-plan.zh.md` Phase 3 实测记录。
 2. **两个服务都配 SC failure actions**：给 `RustDesk` + `RustDeskManagementAgent` 配 `sc failure ... actions= restart/N reset= M`，进程崩溃秒级自愈，取代"最长等 5 分钟计划任务"。纯增量、小改。
 3. **修 status 投影误报**：让 installed_msi 的 `local_repair` 反映真实支持、`ready`/组件状态反映 verified 引擎能力（或后端/控制台不把 `ready=false` 当"不可恢复"）。直接影响远程救援的可观测与决策。
 
