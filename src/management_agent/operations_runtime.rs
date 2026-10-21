@@ -1906,10 +1906,20 @@ mod tests {
             cmd
         };
         let target_key = "windows-x86_64-msi-standard";
+        // The fixture builds must sit at or above the checked-out build, otherwise
+        // resolve_approved_package refuses locally as a downgrade and never reaches
+        // the HTTP layer these cases are about.
+        let current_build: u64 =
+            serde_json::from_str::<serde_json::Value>(include_str!("../../version.json"))
+                .unwrap()["build_seq"]
+                .as_u64()
+                .unwrap();
+        let rollback_build = current_build;
+        let target_build = current_build + 1;
         let manifest = serde_json::json!({
             "schema":2,"product":"rustdesk-yan","edition":"multi","channel":"stable",
-            "catalog_revision":2026100503u64,
-            "targets": {target_key:{"version":"1.5.4","build_seq":2026100503u64,
+            "catalog_revision":target_build,
+            "targets": {target_key:{"version":"1.5.4","build_seq":target_build,
                 "source_commit":"fixture","primary":"https://download.yan.life/rustdesk/stable/1.5.4/client.msi",
                 "size":4,"sha256":"a".repeat(64),"signature_key_id":"yan-release-2026",
                 "signature":STANDARD.encode([0u8;64]),"mirrors":[]}},
@@ -1923,12 +1933,12 @@ mod tests {
         let reply: serde_json::Value = serde_json::from_slice(&reference.stdout).unwrap();
         let reference = reply["package_id"].as_str().unwrap();
         assert_eq!(package_gate::package_reference(&reply["manifest"],target_key).unwrap(), reference);
-        let resolved = package_gate::bind_resolved(&reply,reference,target_key,2026100503).unwrap();
+        let resolved = package_gate::bind_resolved(&reply,reference,target_key,target_build).unwrap();
         assert_eq!(resolved.targets[target_key].size,4);
-        assert!(package_gate::verify(&resolved,target_key,2026100502).is_err(), "matching reference is not a valid release signature");
+        assert!(package_gate::verify(&resolved,target_key,rollback_build).is_err(), "matching reference is not a valid release signature");
         let mut changed = reply.clone();
         changed["manifest"]["targets"][target_key]["size"] = 5.into();
-        assert!(package_gate::bind_resolved(&changed,reference,target_key,2026100503).is_err());
+        assert!(package_gate::bind_resolved(&changed,reference,target_key,target_build).is_err());
         assert_eq!(reply["manifest"],manifest,"reference verification must preserve unknown manifest fields");
         let directory = std::env::temp_dir().join(format!(
             "agent-status-test-rust-{}-{}",
@@ -2126,7 +2136,7 @@ mod tests {
                 "created_at":now,"expires_at":now+300,"timeout_seconds":900,
                 "preconditions":{"active_sessions":"defer"},
                 "args":{"package_id":"f".repeat(64),"target_key":"windows-x86_64-msi-standard",
-                    "target_build_seq":2026100503u64,"allow_downgrade":false}
+                    "target_build_seq":target_build,"allow_downgrade":false}
             });
             let envelope = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
             let digest = hex::encode(Sha256::digest(envelope.as_bytes()));
@@ -2153,8 +2163,8 @@ mod tests {
                 schema:1,transaction_id:command_id.clone(),trigger:Trigger::RemoteCommand,
                 command_id:Some(command_id.clone()),installation_id:state.agent_installation_id.clone(),
                 identity_fingerprint:"c".repeat(64),target_key:"windows-x86_64-msi-standard".into(),
-                original_version:"1.5.3".into(),original_build_seq:2026100502,
-                target_version:"1.5.4".into(),target_build_seq:2026100503,
+                original_version:"1.5.3".into(),original_build_seq:rollback_build,
+                target_version:"1.5.4".into(),target_build_seq:target_build,
                 normal_install_path:r"C:\Program Files\RustDesk".into(),
                 package:artifact("package.msi"),client_backup:artifact("backups/client.json"),
                 agent_backup:artifact("backups/agent.exe"),identity_backup:artifact("backups/identity.toml"),
@@ -2208,8 +2218,11 @@ mod tests {
             if after.process_id != before.process_id || after.state != before.state || after.command != before.command {
                 return Err("terminal reconciliation changed actual service".into());
             }
-            let package_seed = r#"require getenv('AGENT_FIXTURE_ROOT').'/sqlite/lib.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_status.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_operations.php';$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));configure_pdo($db);$now=time();$manifest=json_decode(getenv('AGENT_REFERENCE_MANIFEST'),true,64,JSON_THROW_ON_ERROR);$key='windows-x86_64-msi-standard';$rollback=$manifest;$rollback['targets'][$key]['build_seq']=2026100502;foreach([$manifest,$rollback] as $release)db_insert_ignore($db,'update_releases',['version'=>'1.5.4','build_seq'=>$release['targets'][$key]['build_seq'],'channel'=>'stable','manifest'=>agent_ops_json($release),'active'=>1,'published_at'=>$now]);$payload=['schema'=>1,'client_id'=>'test-device','client_uuid'=>'test-uuid','agent_installation_id'=>str_repeat('a',32),'boot_id'=>str_repeat('b',32),'session_generation'=>1,'sequence'=>1,'agent'=>['version'=>'1.5.3','build_seq'=>2026100502],'capabilities'=>['agent.status@1','package.update@1'],'package_identity'=>['edition'=>'standard','arch'=>'x86_64','kind'=>'msi'],'service'=>['state'=>'running'],'application'=>['state'=>'ready'],'recovery'=>['effective_enabled'=>true]];agent_status_store($db,$payload,$now);echo agent_ops_json(agent_command_create($db,['id'=>1,'address_book_scope'=>'all'],'test-device','test-uuid',['type'=>'package.update','type_version'=>1,'idempotency_key'=>'package-resolver-rejection','args'=>['package_id'=>agent_package_reference($manifest,$key),'target_key'=>$key,'target_build_seq'=>2026100503,'allow_downgrade'=>false]],$now));"#;
-            let seeded = php_command().args(["-r",package_seed]).env("AGENT_FIXTURE_ROOT",&api)
+            let package_seed = r#"require getenv('AGENT_FIXTURE_ROOT').'/sqlite/lib.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_status.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_operations.php';$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));configure_pdo($db);$now=time();$manifest=json_decode(getenv('AGENT_REFERENCE_MANIFEST'),true,64,JSON_THROW_ON_ERROR);$key='windows-x86_64-msi-standard';$rollback=$manifest;$rollback['targets'][$key]['build_seq']=ROLLBACK_BUILD;foreach([$manifest,$rollback] as $release)db_insert_ignore($db,'update_releases',['version'=>'1.5.4','build_seq'=>$release['targets'][$key]['build_seq'],'channel'=>'stable','manifest'=>agent_ops_json($release),'active'=>1,'published_at'=>$now]);$payload=['schema'=>1,'client_id'=>'test-device','client_uuid'=>'test-uuid','agent_installation_id'=>str_repeat('a',32),'boot_id'=>str_repeat('b',32),'session_generation'=>1,'sequence'=>1,'agent'=>['version'=>'1.5.3','build_seq'=>ROLLBACK_BUILD],'capabilities'=>['agent.status@1','package.update@1'],'package_identity'=>['edition'=>'standard','arch'=>'x86_64','kind'=>'msi'],'service'=>['state'=>'running'],'application'=>['state'=>'ready'],'recovery'=>['effective_enabled'=>true]];agent_status_store($db,$payload,$now);echo agent_ops_json(agent_command_create($db,['id'=>1,'address_book_scope'=>'all'],'test-device','test-uuid',['type'=>'package.update','type_version'=>1,'idempotency_key'=>'package-resolver-rejection','args'=>['package_id'=>agent_package_reference($manifest,$key),'target_key'=>$key,'target_build_seq'=>TARGET_BUILD,'allow_downgrade'=>false]],$now));"#;
+            let package_seed = package_seed
+                .replace("ROLLBACK_BUILD",&rollback_build.to_string())
+                .replace("TARGET_BUILD",&target_build.to_string());
+            let seeded = php_command().args(["-r",&package_seed]).env("AGENT_FIXTURE_ROOT",&api)
                 .env("AGENT_HTTP_FIXTURE_DB",&db).env("AGENT_REFERENCE_MANIFEST",serde_json::to_string(&manifest).map_err(|e|e.to_string())?)
                 .output().map_err(|e|e.to_string())?;
             if !seeded.status.success() { return Err(format!("package fixture seed: {}",String::from_utf8_lossy(&seeded.stderr))); }
@@ -2226,10 +2239,11 @@ mod tests {
             let preserved = before_records(evidence_sql)?;
             for (update, expected_http) in [
                 ("UPDATE device_agent_bindings SET permissions='[\"observe\"]'", Some(403)),
-                ("UPDATE device_agent_bindings SET permissions='[\"observe\",\"install\"]'; UPDATE update_releases SET active=0 WHERE build_seq=2026100502", Some(409)),
+                ("UPDATE device_agent_bindings SET permissions='[\"observe\",\"install\"]'; UPDATE update_releases SET active=0 WHERE build_seq=ROLLBACK_BUILD", Some(409)),
                 ("UPDATE update_releases SET active=1", None),
             ] {
-                let sql = format!(r#"$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));$db->exec({});"#,serde_json::to_string(update).map_err(|e|e.to_string())?);
+                let update = update.replace("ROLLBACK_BUILD",&rollback_build.to_string());
+                let sql = format!(r#"$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));$db->exec({});"#,serde_json::to_string(&update).map_err(|e|e.to_string())?);
                 before_records(&sql)?;
                 let error = match resolve_approved_package(&identity,&format!("http://{address}"),&binding,&package_state,&command,&paths) {
                     Err(error) => error,
