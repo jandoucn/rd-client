@@ -285,17 +285,46 @@ pub fn restart_service(state: &AgentState, paths: &AgentPaths) -> Result<bool, S
     repair_service(state, paths, !observed.normal_present && observed.fallback_present)
 }
 
-// SCM restarts a crashed service within seconds once failure actions are set,
-// instead of waiting for the recovery scheduled task (up to 5 minutes).
+// SCM restart delays are expressed in milliseconds; 5000 is the smallest value
+// the SCM accepts that still leaves the process time to release its socket.
 const FAILURE_RESET_SECONDS: u32 = 86_400;
 const FAILURE_RESTART_DELAY_MS: u32 = 5_000;
 const FAILURE_ACTION_COUNT: u32 = 3;
 
-// `sc failure` argument value. Order matters to sc.exe: reset= precedes actions=.
-fn failure_actions_arg() -> String {
+// `sc failure` takes the form `reset= <sec> actions= <a>/<ms>/<a>/<ms>...`, with a
+// space after each `=` and reset before actions. Returned as separate argv tokens
+// so the process is launched without any shell: cmd.exe and PowerShell quote and
+// escape differently, and neither is involved here.
+fn failure_actions_tokens() -> Vec<String> {
     let actions = vec![format!("restart/{FAILURE_RESTART_DELAY_MS}"); FAILURE_ACTION_COUNT as usize]
         .join("/");
-    format!("reset= {FAILURE_RESET_SECONDS} actions= {actions}")
+    vec![
+        "reset=".to_owned(),
+        FAILURE_RESET_SECONDS.to_string(),
+        "actions=".to_owned(),
+        actions,
+    ]
+}
+
+#[cfg(test)]
+fn failure_actions_arg() -> String {
+    failure_actions_tokens().join(" ")
+}
+
+// Whether the service is installed is decided by the SCM, not by parsing sc.exe
+// output: that text is localized (a Chinese Windows never prints "does not exist"
+// and wraps the 1060 code in translated words), so matching on it would silently
+// misread a present service as absent and skip configuring it.
+fn service_exists(name: &str) -> Result<bool, String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|error| format!("service manager: {error}"))?;
+    match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
+        Ok(_) => Ok(true),
+        Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1060) => {
+            Ok(false)
+        }
+        Err(error) => Err(format!("service query {name}: {error}")),
+    }
 }
 
 // Idempotent on every agent start. An in-place upgrade stops and restarts the
@@ -316,30 +345,31 @@ pub fn ensure_service_failure_actions() -> Result<bool, String> {
         .map(std::path::PathBuf::from)
         .ok_or("Windows system directory unavailable")?
         .join("System32/sc.exe");
-    let actions = failure_actions_arg();
+    let tokens = failure_actions_tokens();
     let mut configured = true;
     // The agent binary has no access to the client crate root, so the service
     // name is the same fixed literal used by inspect/repair/rescue_recovery.
     for name in ["RustDesk", "RustDeskManagementAgent"] {
+        // Absent services belong to bootstrap/repair; nothing to configure here.
+        if !service_exists(name).unwrap_or(true) {
+            continue;
+        }
         let output = Command::new(&sc)
             .args(["failure", name])
-            .args(actions.split(' '))
+            .args(&tokens)
             .output()
             .map_err(|error| format!("service failure actions {name}: {error}"))?;
         if output.status.success() {
             continue;
         }
-        // 1060: the service does not exist yet; bootstrap/repair creates it.
-        let detail = String::from_utf8_lossy(&output.stderr);
-        if detail.contains("1060") || detail.contains("does not exist") {
-            continue;
-        }
         configured = false;
+        // The message is localized and its encoding is the console codepage, so
+        // it is logged for an operator to read rather than interpreted here.
         hbb_common::throttled_log!(
             Duration::from_secs(3600),
             warn,
             "service failure actions for {name} refused: {}",
-            detail.trim()
+            output.status
         );
     }
     Ok(configured)
@@ -359,6 +389,21 @@ mod tests {
         );
         assert!(arg.find("reset=").unwrap() < arg.find("actions=").unwrap());
         assert_eq!(arg.matches("restart/").count(), 3);
+    }
+
+    // The tokens are passed to sc.exe as separate argv entries with no shell in
+    // between, so each "=" must stay glued to its value and carries its own space
+    // only when joined. This is what keeps cmd.exe and PowerShell quoting rules
+    // (which differ) out of the path entirely.
+    #[test]
+    fn failure_actions_tokens_keep_equals_signs_attached() {
+        assert_eq!(
+            failure_actions_tokens(),
+            vec!["reset=", "86400", "actions=", "restart/5000/restart/5000/restart/5000"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
