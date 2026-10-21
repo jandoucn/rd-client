@@ -287,70 +287,79 @@ pub fn restart_service(state: &AgentState, paths: &AgentPaths) -> Result<bool, S
 
 // SCM restarts a crashed service within seconds once failure actions are set,
 // instead of waiting for the recovery scheduled task (up to 5 minutes).
-const FAILURE_RESTART_DELAY: Duration = Duration::from_secs(5);
-const FAILURE_RESET_PERIOD: Duration = Duration::from_secs(86_400);
+const FAILURE_RESET_SECONDS: u32 = 86_400;
+const FAILURE_RESTART_DELAY_MS: u32 = 5_000;
+const FAILURE_ACTION_COUNT: u32 = 3;
 
-fn failure_actions() -> windows_service::service::ServiceFailureActions {
-    use windows_service::service::{
-        ServiceAction, ServiceActionType, ServiceFailureActions, ServiceFailureResetPeriod,
-    };
-    ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(FAILURE_RESET_PERIOD),
-        reboot_msg: None,
-        command: None,
-        // Restart three times in a row; the reset window gives a machine that
-        // crashes once a day its own budget instead of tripping into no-action.
-        actions: Some(
-            (0..3)
-                .map(|_| ServiceAction {
-                    action_type: ServiceActionType::Restart,
-                    delay: FAILURE_RESTART_DELAY,
-                })
-                .collect(),
-        ),
-    }
+// `sc failure` argument value. Order matters to sc.exe: reset= precedes actions=.
+fn failure_actions_arg() -> String {
+    let actions = vec![format!("restart/{FAILURE_RESTART_DELAY_MS}"); FAILURE_ACTION_COUNT as usize]
+        .join("/");
+    format!("reset= {FAILURE_RESET_SECONDS} actions= {actions}")
 }
 
 // Idempotent on every agent start. An in-place upgrade stops and restarts the
 // services without running the install script that creates them, so configuring
 // failure actions only at install time would never reach an upgraded machine.
 // Running this from the agent's own startup makes an upgrade behave like a fresh
-// install for this capability: the new binary configures what it needs. A missing
-// service is skipped (bootstrap/repair owns creation); success means every present
-// service accepted the configuration, so a transient SCM error retries on the next
-// start instead of being silently lost.
+// install for this capability: the new binary configures what it needs.
+//
+// Uses `sc.exe` rather than ChangeServiceConfig2 through the windows-service
+// crate: the shell command is the same mechanism repair_service and
+// rescue_recovery already use to write service configuration, and it was
+// verified against the real SCM on the test machine. A missing service is
+// skipped (bootstrap/repair owns creation); success means every present service
+// accepted the configuration, so a transient failure retries on the next start
+// instead of being silently lost.
 pub fn ensure_service_failure_actions() -> Result<bool, String> {
-    use windows_service::service::ServiceAccess;
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .map_err(|error| format!("service manager: {error}"))?;
+    let sc = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .ok_or("Windows system directory unavailable")?
+        .join("System32/sc.exe");
+    let actions = failure_actions_arg();
     let mut configured = true;
-    let app_name = crate::get_app_name();
-    for name in [app_name.as_str(), "RustDeskManagementAgent"] {
-        let service = match manager.open_service(name, ServiceAccess::CHANGE_CONFIG) {
-            Ok(service) => service,
-            Err(windows_service::Error::Winapi(error)) if is_missing_service(&error) => continue,
-            Err(error) => return Err(format!("service {name} open: {error}")),
-        };
-        if let Err(error) = service.update_failure_actions(failure_actions()) {
-            configured = false;
-            hbb_common::throttled_log!(
-                Duration::from_secs(3600),
-                warn,
-                "service failure actions for {name} refused: {error}"
-            );
+    // The agent binary has no access to the client crate root, so the service
+    // name is the same fixed literal used by inspect/repair/rescue_recovery.
+    for name in ["RustDesk", "RustDeskManagementAgent"] {
+        let output = Command::new(&sc)
+            .args(["failure", name])
+            .args(actions.split(' '))
+            .output()
+            .map_err(|error| format!("service failure actions {name}: {error}"))?;
+        if output.status.success() {
+            continue;
         }
+        // 1060: the service does not exist yet; bootstrap/repair creates it.
+        let detail = String::from_utf8_lossy(&output.stderr);
+        if detail.contains("1060") || detail.contains("does not exist") {
+            continue;
+        }
+        configured = false;
+        hbb_common::throttled_log!(
+            Duration::from_secs(3600),
+            warn,
+            "service failure actions for {name} refused: {}",
+            detail.trim()
+        );
     }
     Ok(configured)
-}
-
-fn is_missing_service(error: &std::io::Error) -> bool {
-    // ERROR_SERVICE_DOES_NOT_EXIST (1060)
-    error.raw_os_error() == Some(1060)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_actions_argument_is_restart_three_times_with_daily_reset() {
+        let arg = failure_actions_arg();
+        // sc.exe requires reset= before actions= and a space after each "=".
+        assert_eq!(
+            arg,
+            "reset= 86400 actions= restart/5000/restart/5000/restart/5000"
+        );
+        assert!(arg.find("reset=").unwrap() < arg.find("actions=").unwrap());
+        assert_eq!(arg.matches("restart/").count(), 3);
+    }
 
     #[test]
     fn disabled_mutations_do_not_read_intent_or_change_the_service() {

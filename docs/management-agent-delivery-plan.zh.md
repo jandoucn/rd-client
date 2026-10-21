@@ -57,7 +57,12 @@
 目标：给 `RustDesk` + `RustDeskManagementAgent` 服务注册 SC failure actions（崩溃自动重启），缩短崩溃恢复从分钟级→秒级；纯增量，不改既有恢复链。
 - 失败测试（Rust）：服务安装/注册路径产出含 failure actions 的配置；禁用/维护意图下不改变（与既有门禁一致）；回归既有 service 安装测试。
 - 机器验收（win10-gs）：kill agent/主进程 → 观测 SCM 自动重启秒级；与计划任务兜底不冲突。
-- 实测记录：_（待填）_
+- 实测记录：**已完成，真机验证通过**。
+  - **设计修正（升级≈新装）**：最初打算只在安装脚本里加 `sc failure`，发现原地升级**不重跑安装脚本**（`native_install.rs` 只做 stop→install→start），已装机永远拿不到该能力。改为 **agent 每次启动时幂等配置**（`service_main` 调用 `recovery_windows::ensure_service_failure_actions()`），安装/升级/修复/bootstrap 重建全部覆盖。
+  - **实现方式修正**：先用 `windows-service` 0.6 的 `update_failure_actions()`（ChangeServiceConfig2），真机清空后重启**未写入**（PID 确实变化、代码确实执行，但注册表仍为空）。改为与 `repair_service`/`rescue_recovery` 一致的 `sc.exe failure reset= 86400 actions= restart/5000/...`，真机立即生效。
+  - **真机证据（win10-gs）**：删除两个服务的 `FailureActions` 注册表值 → 重启 agent → `RustDesk=PRESENT`、`RustDeskManagementAgent=PRESENT`；`sc qfailure` 显示 `RESET_PERIOD=86400`、三条「重启动 -- 延迟 = 5000 微秒」。
+  - **自愈实测**：`taskkill /f` 强杀（不手工 start）→ **5225ms** 后 SCM 自动拉起新进程（pid 34828→9360），服务回到 Running。对照：此前只能等 `RustDeskManagementAgentRecovery` 计划任务（最长 5 分钟）。
+  - 单元测试：`failure_actions_argument_is_restart_three_times_with_daily_reset` 断言 `reset= 86400 actions= restart/5000/restart/5000/restart/5000` 且 `reset=` 在 `actions=` 之前（sc.exe 对顺序敏感）。
 
 ### Phase 5 — P0 客户端 status 投影修正
 目标：`rescue_status.rs` 投影让 installed_msi 的 `local_repair`/组件状态反映引擎真实支持（与后端 Phase 2 对齐），不再误报"不可恢复"；`ready` 字段契约保持（如仍 false 则文档化语义），重点是组件级真实性。

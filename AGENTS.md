@@ -50,7 +50,7 @@
 * **Flutter**：`D:\build-env\flutter-3.24.5\bin\flutter.bat`（`FLUTTER_ROOT`）。GitHub CI 用 3.24.5 且需 `flutter_3.24.4_dropdown_menu_enableFilter.diff` 补丁与 rustdesk 自定义 engine，本地 UI 打包需照 `.github/workflows/flutter-build.yml` 的 windows job 处理。
 * **清理 target 时**：`target\debug` 若被上一次失败构建污染，必须彻底删干净（长路径用 `robocopy <空目录> <target\debug> /MIR` 再 `Remove-Item`），且在构建进程全部退出（`taskkill /f /im rustc.exe`、`cargo.exe`）后再删；脏的 proc-macro2 产物会导致 `syn` 报 `proc_macro2::extra::DelimSpan` 未解析。
 * **长任务**：SSH 非交互，脱离进程用 `schtasks /run` 跑 `.bat`/`.ps1`（普通进程写入日志会因 SSH 会话结束而中断）。中文输出经 SSH 会乱码，用 base64 传递输出。
-* **代码同步**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master` → win10-gs `git pull` 后本地编译验证。推 master 不触发构建，只有打 tag 才触发 Flutter Tag Build。
+* **代码同步（重要）**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master`，但 **win10-gs 上 `git pull` 不可用**：SSH 是非交互会话，Git 凭据管理器（wincredman）无法持久化，拉取会报 `could not read Username for 'https://github.com'`。正确做法是 **用 `termark upload` 把改动的源文件逐个覆盖到 `D:\github\rd-client` 对应路径，然后直接编译**。上传后 win10-gs 工作树相对其 HEAD 会显示为已修改，这是预期状态，不要试图在远端修复。推 master 不触发构建，只有打 tag 才触发 Flutter Tag Build。
 
 ## 测试与验收约束
 
