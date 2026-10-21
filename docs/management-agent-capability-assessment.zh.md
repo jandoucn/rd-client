@@ -103,3 +103,48 @@
 
 - 以上为能力评估，未改任何代码。真要补 P0/P1 须按 TDD（先失败测试→最小实现→补边界）；本地 disable-recovery/disable-agent/签名哈希校验/回滚门禁优先于远程命令；不借补能力改协议/字段语义/固定配置/默认权限。固定配置（密码/ID 服务器/API/下载域/公钥）不变。
 - 需客户端改动的项攒成一次构建，经 `agent.update` 铺开，贯彻"少构建"。
+
+## 7. 以客户端能力为准重构后端 agent 模块（蓝图）
+
+客户端源码是字段与能力权威（`rustdesk-api/docs/client-management-contract.md`）。后端独立 agent 模块应完全对齐客户端已声明/可执行的能力，并做到"后端单独升级即可获取新能力"——与客户端"少构建"互补（客户端能力是地板，后端在其上做编排/选包/策略，无需每次改客户端）。
+
+### 7.1 后端 agent 模块清单
+
+- 文件：`sqlite/agent_operations.php`（命令/绑定/包解析/事件）、`agent_status.php`（状态校验/入库/快照）、`agent_batches.php`（批量）、`agent_console.php` + `agents.html`（控制台）。
+- 表：`device_agent_commands`、`device_agent_events`、`device_agent_bindings`、`device_agent_batch`、`agent_operations_audit`（+ 共享 `device_update_policies`）。
+- 设备端点（SQLite-only + Ed25519，`agent_operations_route`）：`/agent/enroll`、`GET /agent/commands`、`/agent/commands/{id}/claim`、`/agent/events`、`/agent/package/resolve`、`/agent/status`（`agent_status_receive`）。
+- 管理端点（`agent_operations_admin_route`）：`binding`（授权）、`commands`（建单）、`commands/{id}/cancel`、`overview`、`batches/*`。
+
+### 7.2 客户端能力 ↔ 后端命令类型 对齐矩阵
+
+客户端 `capabilities()`（`status.rs:17-32`，`@1` 版本令牌）+ 可执行命令（`operations.rs` `execution_rejection`）对后端 `agent_command_types()`（`agent_operations.php:107`）：
+
+| 类型 | 客户端能力声明 | 客户端可执行 | 后端命令类型 | 对齐 |
+|---|---|---|---|---|
+| agent.status | ✅（基础） | 否（status 通道非命令） | 否（走 `/agent/status`） | ✅ 一致 |
+| service.inspect/start/restart/repair | ✅（基础） | ✅ | ✅ | ✅ |
+| recovery.reconcile | ✅（基础） | ✅ | ✅ | ✅ |
+| package.verify / diagnostics.collect / network.probe | ✅（基础） | ✅ | ✅ | ✅ |
+| package.reinstall / package.update / agent.update | ✅（仅 installed MSI） | ✅ | ✅ | ✅ |
+| **client.enable** | ❌ 不声明 | ❌ `execution_rejection` 拒 | ✅ 后端有（`:107,116,219`） | ⚠️ **孤儿** |
+
+**唯一不匹配**：后端定义 `client.enable`（含 `agent_command_validate` 的 `intent_revision` arg 与 `enable` 权限桶），但客户端既不声明 `client.enable@1`、也不执行它 → `agent_command_create` 的 `in_array(type.'@1', capabilities)` 门会 409，根本建不出。以客户端为准应清理。
+
+### 7.3 后端"能力驱动"程度:一半到位,一半硬编码
+
+- **已到位**：`agent_status.php` 把客户端上报的 `capabilities[]`（≤64、去重）、`package_identity`、`agent.build_seq` 当权威入库；`agent_command_create` 建单时 `in_array(type.'@1', status.capabilities)`——**客户端没声明的能力后端建不出来**（已是能力驱动的闸）。
+- **未到位（3 处硬编码，加能力要同步手改）**：`agent_command_types()`（白名单）、`agent_command_validate()`（每类型 args schema + 版本写死 `type_version===1`）、`agent_command_permission()`（类型→`observe/service/install/agent_update/enable` 权限桶映射）。新增客户端能力时这 3 处都要改 PHP 逻辑。
+
+### 7.4 重构方向(原则 + 具体)
+
+1. **能力注册表数据化（核心）**：把 `agent_command_types` + 每类型 args schema + 权限桶 从 3 个硬编码函数收敛成一张「能力注册表」（SQLite 表或配置），每行含 `type`、`version`、`args_schema`、`permission_bucket`、`needs_approved_package`。新增客户端能力 → 后端**只加一行数据、不改逻辑** → 真正实现"后端单独升级即获取能力"。注册表仍受 `in_array(type@N, 客户端 capabilities)` 闸约束，不越客户端地板。
+2. **清理 `client.enable` 孤儿**：要么客户端实现并声明 `client.enable@1` + `execution_rejection` 接受，要么后端移除。以客户端为准。
+3. **镜像客户端 status schema 为权威**：后端已收 capabilities/package_identity/build_seq；扩展建模 `rescue.*`（组件/ready/freshness/source_digest）与 `files.*`，让控制台**如实反映可恢复性**——直接修 §5 的 P0-2「status 误报」：控制台不得把 installed_msi 的 `ready=false` 当"不可恢复"，应读组件级 `verified` + 引擎真实支持。
+4. **保留批准签名包门为安全核心**：`agent_package_reference/find/resolve/rollback` 的固定域名 `download.yan.life` + 固定 key `yan-release-2026` + 64 字节签名 + exact `package_id` + active stable 匹配 + 预锁/再锁 + 回滚包，**重构中一律不得放宽**。
+5. **形式化能力/版本协商**：capabilities 用 `type@N`、命令 `type_version`。后端应按客户端上报的 `type@N` 决定接受哪些，而非写死版本；演进时老客户端优雅降级。
+6. **显式决定边界（别默认继承）**：SQLite-only（MySQL→404，`agent_operations.php:394`）、包管线仅 Windows x86_64 MSI、批量 package 救援未开（`agent_batches.php:28`）——重构时明确"保留"还是"泛化"，并写进文档。
+7. **命令近实时唤醒**（与 §3 一致）：命令入库时在现有 SSE policy 流 emit `command_pending`（纯后端改），救援命令秒级触达，客户端零新能力。
+
+### 7.5 重构次序建议
+
+先做纯后端、不碰客户端的：7.4 的 ①（能力注册表）③（status 镜像修误报）⑥（边界决策）⑦（命令唤醒）——这些**只升后端就见效**。②（client.enable）若选"客户端实现"则并入下一次客户端构建；选"后端移除"则纯后端。全程保持 ④ 安全门不松、按后端仓 `AGENTS.md` 的 TDD 与 SQLite-only 约束。
