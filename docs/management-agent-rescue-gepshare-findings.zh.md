@@ -41,9 +41,35 @@ GepShare 清空后用**规范文件名** MSI `rustdesk-1.5.3-2026101805-standard
 
 这不是生产问题：在线更新器 `src/updater.rs` 走 `primary_package_name(&target.primary, "msi")`，落地文件名必为规范名；生产机不会因此命中该门。改用规范名安装后此门即消失（PackageName 变回规范名）。
 
-## 4. 生产机卡在 UntrustedPath（ACL），尚未定位
+## 4. 生产机 UntrustedPath 已定位并修复：C:\ProgramData 的 ACL 被改松
 
-生产机 `1338209581` 的节流日志为 `first installation approval unavailable: UntrustedPath`——卡在最早的 ACL/installed-state 门（`preservation_state_read.rs` 对 `C:\`、`ProgramData`、`RustDesk`、`ManagementAgent` 及各 state 目录做严格 owner+ACE 白名单校验）。GepShare 的目录 ACL 干净、未复现该门，故生产机的具体 ACL 偏差仍需在那台真机上取证（dump 各级目录 owner/ACE 与白名单比对），不在本轮范围。
+生产机 `1338209581`（SSH 资产 `win10-gs` / `10.0.0.100`，经 termark 直接驱动）节流日志为 `first installation approval unavailable: UntrustedPath`，卡在 `first_install_approval_delivery.rs:251` 的 `hold_installed_root(C:\ProgramData\RustDesk\ManagementAgent)`——它对该目录及全部祖先逐级跑 `directory_acl(path, state=false)`（`preservation_state_read.rs`）。
+
+逐级与 GepShare（过了门、成功暂存）比对，**只有 `C:\ProgramData` 不同，且分两处被改松**：
+
+1. 多一条显式 ACE `(A;;0x12019f;;;WD)` = Everyone 对本文件夹 读执行+写（`0x12019F` 比默认只读执行 `0x1200A9` 多出 `0x116` 写位）。
+2. DACL 控制位是 `AI`（继承开启）而非 Windows 默认的 `PAI`（受保护），因此**继承了 C:\ 的 AuthenticatedUsers 通用写**（C:\ 上 `(A;OICIIO;SDGXGWGR;;;AU)` 向下传播，generic 映射成 `0x1301BF` Modify，落到 ProgramData 本层）。
+
+`directory_acl` 对非 SYSTEM/Admins/TrustedInstaller 的 SID 只放行 CreatorOwner 继承 GA、Users(`S-1-5-32-545`) 的 create 特殊权（`0x116/0x110`）、或只读执行（mask⊆`0x1200a9`）；C:\ **根**另有专用例外放行 AU 的 `mask==4` 与 `0xe0010000`，但这个例外**只对根生效**，不覆盖 ProgramData。Everyone 带写、AU 带写两条都命中 `ace.Mask & !0x1200a9 != 0` → `untrusted directory rights` → `UntrustedPath` → sidecar 不写 → 永远 `waiting_approval`。
+
+**修复（非破坏性，是安全加固，恢复默认）：**
+
+```
+icacls C:\ProgramData /remove:g *S-1-1-0     # 删掉 Everyone 那条显式 ACE
+icacls C:\ProgramData /inheritance:r         # 断继承 + 删继承来的 AU 写权，保留 5 条显式 ACE，恢复 PAI
+```
+
+修复后 `C:\ProgramData` 的 SDDL 与 GepShare 完全一致：`O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)`。无需改客户端代码——agent 的 ACL 严格校验是安全控制，正确地拒绝了「Everyone/AU 能写救援包父目录」；根子在环境被改松，可能复发，复发再跑一遍即可。备份在 `C:\Windows\Temp\programdata-acl-backup.txt`（但那是改前的坏状态）。
+
+## 4.1 修复后收敛轨迹与 MSI 的 ready 设计上限
+
+ACL 修好后 worker 自动重跑 coordinate（无需手动重启），越过 UntrustedPath，救援包下载、解压、**暂存并提升到 `C:\ProgramData\RustDesk\ManagementAgent\rescue\current`**（含 client/image/agent.exe/bootstrap.exe/bundle.json/config.dpapi/identity.dpapi/installation-receipt.json/approved-manifest.json 与规范名 MSI）。
+
+期间短暂出现 `error_code=source_changed`（`rescue_status.rs:191`：当前救援包摘要 ≠ 上次验证报告摘要）——这是读侧看到包已换新、而写侧 `refresh_at` 的验证报告滞后；因包稳定（单一时间戳簇、未 churn），下一个 `refresh_at` 周期写入匹配报告后即自愈，**非故障**。
+
+收敛终态（`status --json` 的 `rescue`）：`error_code=null`、`freshness=fresh`、`state=degraded`，各备份组件 `agent_backup/bootstrap_backup/client/credentials/offline_package` 全 `verified`；`source_digest`/`source_reference` 均在。但 `ready=false`、`full_recovery_supported=false`、`blocked_reason=full_recovery_not_confirmed`，唯一 `supported=false` 的组件是 `local_repair`，reason `installed_msi_local_repair_not_supported`。
+
+**结论：对 installed_msi，`rescue.ready` 永远到不了 `True`，这是设计上限而非缺陷。** MSI 不做「本地原地修复」，其恢复走 `package.reinstall`/`recovery.reconcile`，用的正是已验证的 `offline_package`（`rescue\current` 规范 MSI）。MSI 的健康终态就是 `error_code=null + freshness=fresh + 各备份组件 verified`。生产机现已处于此态，救援子系统已修好、健康。`files.fallback_present=false` 指更新器 fallback 安装文件、与救援包无关，`normal_present=true` 表示主程序在，均正常。
 
 ## 5. 卸载残留 RecoveryBootstrap → 全新安装 1603 的处置
 
@@ -62,6 +88,7 @@ GepShare 清空后用**规范文件名** MSI `rustdesk-1.5.3-2026101805-standard
 
 ## 7. 约束与不改项
 
-- 未改客户端代码；未重启 GepShare 操作系统；未触碰 RustDesk 以外数据目录。
+- 未改客户端代码。GepShare 与生产机均未重启操作系统、未触碰 RustDesk 以外数据目录。
+- 生产机本轮操作仅限：装 OpenSSH Server（GitHub 免 WU 包，不碰被禁的 Windows Update/TrustedInstaller）、`icacls` 恢复 `C:\ProgramData` 默认 ACL、读取诊断。SSH 资产为 termark `win10-gs`（`10.0.0.100:22`）。
 - 固定配置不变：密码 `asd123asd`、ID 服务器 `rd.yan.life`、API `https://rdapi.yan.life`、下载域 `download.yan.life`、更新公钥 `yan-release-2026`。
-- 后续若改代码定位生产机 UntrustedPath，须按 TDD（先失败测试→最小实现→补边界），本地 disable-recovery/disable-agent/签名哈希校验/回滚门禁优先于远程命令，不借修复改协议/字段语义/默认权限。
+- UntrustedPath 已定位为环境 ACL 问题（见 §4），**无需改客户端代码**；agent 的 ACL 严格校验是须保留的安全控制，不得为迁就被改松的环境而放宽。若未来确需改代码,须按 TDD（先失败测试→最小实现→补边界），本地 disable-recovery/disable-agent/签名哈希校验/回滚门禁优先于远程命令，不借修复改协议/字段语义/默认权限。
