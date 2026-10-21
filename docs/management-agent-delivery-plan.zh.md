@@ -31,13 +31,13 @@
 目标：把 `agent_command_types()` + `agent_command_validate()` 每类型 args schema + `agent_command_permission()` 权限桶，收敛成一张「能力注册表」（PHP const/表），新增能力只加一行数据、不改 3 处逻辑；受 `in_array(type@N, 客户端 capabilities)` 闸约束，不越客户端地板；清理 `client.enable` 孤儿。
 - 失败测试（先写）：注册表为唯一真源——(a) 命令类型集合 = 注册表 keys；(b) 每类型权限桶 = 注册表值；(c) args schema 校验走注册表；(d) 加一条测试用注册表项即新增一个可建能力、无需改三函数；(e) 不在客户端 capabilities 的类型仍被能力门 409 挡；(f) 回归 `agent_operations_test.php` 全绿（行为不变）。
 - 验收：`tests/agent_operations_test.php` + 新增注册表测试全绿；行为与重构前逐项一致。
-- 实测记录：_（待填）_
+- 实测记录：**已完成（后端 commit `6a8ec13`，未推送）**。实现 `agent_command_registry()` 为唯一真源，`agent_command_types`/权限桶/args 校验/包类判定/observe 策略门全部派生自它（改 `agent_operations.php` 5 处，行为保持）；`client.enable` 本轮保留（被能力门天然 gate，孤儿去留留作单独决策）。测试（Docker `rdapi-test` 镜像 php8.3+python3）：新增 `agent_command_registry_test` **86 断言**绿；回归 `agent_operations` **76**、`agent_status` **30**、python HTTP 套件 **67 测试** 全绿，行为零变化。
 
 ### Phase 2 — 后端 ③ status 镜像（纯后端）
 目标：`agent_status.php` 已收 capabilities/package_identity/build_seq；扩展建模 `rescue.*`（组件/ready/freshness/source_digest）与 `files.*`，`overview`/控制台如实反映可恢复性——installed_msi 的 `ready=false` 不得呈现为"不可恢复"，须读组件级 `verified` + 引擎真实支持。
 - 失败测试：上报含 rescue/files 的 status → snapshot/overview 正确存取与呈现；installed_msi 且组件 verified 时，控制台可恢复性判定为"可恢复（引擎级）"而非 ready=false 直译。
 - 验收：`agent_status` 相关 test + 控制台 overview test 全绿。
-- 实测记录：_（待填）_
+- 实测记录：**已完成（后端 commit `901175f`，未推送）**。发现 overview 本就经 `agent_status_snapshot` 原样回传客户端 payload（含 rescue/files），且客户端 status 上报确实带 `rescue`（完整 snapshot）+ `files`（`status.rs:170-171`）。实现：① `agent_recoverability()` 只读组件级 `verified` 派生可恢复性（不照 `ready=false` 误判，installed_msi 组件 verified 时判"可恢复"）；② 管理总览新增 `recoverability` 字段；③ `agent_status_validate` 对 rescue/files 向后兼容轻校验。测试：新增 `agent_status_recoverability_test` **12 断言**；回归 PHP 四连（registry 86 / operations 76 / status 30 / recoverability 12）+ python 非浏览器 HTTP **80 测试** 全绿。**遗留**：`agents.html` 可视化卡片（前端，需 playwright 浏览器）放到 win10-gs 联调阶段加+验；本地容器无浏览器，playwright e2e 未跑。
 
 ### Phase 3 — 验证现有流程（win10-gs 机器 E2E，用现有已发布包）
 目标：不依赖新客户端，先把当前"安装/升级/agent 全能力"在 win10-gs 跑穿，建基线+抓现有 bug。
