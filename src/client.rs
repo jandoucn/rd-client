@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     check_port,
-    common::input::{MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
+    common::input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
     create_symmetric_key_msg, decode_id_pk, decode_id_pk_dtls, dtls_fingerprint_bound, get_rs_pk,
     is_keyboard_mode_supported,
     kcp_stream::KcpStream,
@@ -4390,30 +4390,31 @@ pub fn send_pointer_device_event(
     interface.send(Data::Message(msg_out));
 }
 
-/// Activate OS by sending mouse movement.
+fn activate_os_mouse_events(send_left_click: bool) -> Vec<(i32, i32, i32)> {
+    // Nothing is typed when there is no password, so there is nothing to prepare. The peer wakes
+    // its own display when a session starts (Windows relative nudge, macOS caffeinate, session
+    // wakelock), and any move sent from here drags the peer cursor into a fixed corner: harmless
+    // on Windows, a hot corner on macOS, and always a lost position for the user.
+    if !send_left_click {
+        return Vec::new();
+    }
+    let left_down = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_DOWN;
+    let left_up = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_UP;
+    // The click lands on the peer's current cursor position: DOWN/UP carry no coordinates, so no
+    // preceding move is needed, and a move would only put the click somewhere the user did not pick.
+    vec![(left_down, 0, 0), (left_up, 0, 0)]
+}
+
+/// Activate OS by sending mouse events.
 ///
 /// # Arguments
 ///
 /// * `interface` - The interface for sending data.
 /// * `send_left_click` - Whether to send a click event.
 fn activate_os(interface: &impl Interface, send_left_click: bool) {
-    let left_down = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_DOWN;
-    let left_up = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_UP;
-    let right_down = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_DOWN;
-    let right_up = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_UP;
-    send_mouse(left_up, 0, 0, false, false, false, false, interface);
-    std::thread::sleep(Duration::from_millis(50));
-    send_mouse(0, 0, 0, false, false, false, false, interface);
-    std::thread::sleep(Duration::from_millis(50));
-    send_mouse(0, 3, 3, false, false, false, false, interface);
-    let (click_down, click_up) = if send_left_click {
-        (left_down, left_up)
-    } else {
-        (right_down, right_up)
-    };
-    std::thread::sleep(Duration::from_millis(50));
-    send_mouse(click_down, 0, 0, false, false, false, false, interface);
-    send_mouse(click_up, 0, 0, false, false, false, false, interface);
+    for (mask, x, y) in activate_os_mouse_events(send_left_click) {
+        send_mouse(mask, x, y, false, false, false, false, interface);
+    }
     /*
     let mut key_event = KeyEvent::new();
     // do not use Esc, which has problem with Linux
@@ -4447,13 +4448,16 @@ pub fn input_os_password(p: String, activate: bool, interface: impl Interface) {
 /// * `interface` - The interface for sending data.
 fn _input_os_password(p: String, activate: bool, interface: impl Interface) {
     let input_password = !p.is_empty();
+    if !input_password {
+        // Nothing will be typed, so nothing has to be prepared. The peer wakes its own display
+        // when a session starts, and a click or move from here only lands where the user did not
+        // ask for: on Windows the desktop context menu, on macOS a hot corner.
+        return;
+    }
     if activate {
         // Click event is used to bring up the password input box.
         activate_os(&interface, input_password);
         std::thread::sleep(Duration::from_millis(1200));
-    }
-    if !input_password {
-        return;
     }
     let mut key_event = KeyEvent::new();
     key_event.mode = KeyboardMode::Legacy.into();
@@ -5993,5 +5997,193 @@ mod kx_tests {
         let (seen, decrypted) = handshake(KX_VERSION_LATEST, Some(0)).await;
         assert_eq!(seen.picked, 1);
         assert!(!seen.decrypted && !decrypted);
+    }
+}
+
+#[cfg(test)]
+mod activate_os_tests {
+    use super::*;
+    use crate::common::input::{
+        MOUSE_BUTTON_RIGHT, MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE, MOUSE_TYPE_MOVE_RELATIVE,
+        MOUSE_TYPE_TRACKPAD, MOUSE_TYPE_WHEEL,
+    };
+
+    fn button(mask: i32) -> i32 {
+        mask >> 3
+    }
+
+    fn kind(mask: i32) -> i32 {
+        mask & MOUSE_TYPE_MASK
+    }
+
+    #[test]
+    fn activate_os_without_password_sends_no_right_button() {
+        let events = activate_os_mouse_events(false);
+        assert!(
+            events
+                .iter()
+                .all(|(mask, _, _)| button(*mask) & MOUSE_BUTTON_RIGHT == 0),
+            "{:?}",
+            events
+        );
+        assert!(
+            events
+                .iter()
+                .all(|(mask, _, _)| kind(*mask) != MOUSE_TYPE_DOWN),
+            "{:?}",
+            events
+        );
+    }
+
+    #[test]
+    fn activate_os_without_password_sends_nothing() {
+        // Nothing is typed, so there is nothing to prepare. Both peers we ship wake their own
+        // display when a session starts, and any move sent from here drags their cursor.
+        assert!(activate_os_mouse_events(false).is_empty());
+    }
+
+    #[test]
+    fn activate_os_sends_no_pointer_moves() {
+        // A move is what puts the peer cursor in a fixed corner. On Windows that is harmless,
+        // on macOS it runs a hot corner, and on every OS it loses the position the user had.
+        for send_left_click in [false, true] {
+            let events = activate_os_mouse_events(send_left_click);
+            assert!(
+                events
+                    .iter()
+                    .all(|(mask, _, _)| kind(*mask) != MOUSE_TYPE_MOVE
+                        && kind(*mask) != MOUSE_TYPE_WHEEL
+                        && kind(*mask) != MOUSE_TYPE_TRACKPAD
+                        && kind(*mask) != MOUSE_TYPE_MOVE_RELATIVE),
+                "{:?}",
+                events
+            );
+        }
+    }
+
+    #[test]
+    fn activate_os_with_password_keeps_left_click() {
+        let events = activate_os_mouse_events(true);
+        let left_down = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_DOWN;
+        let left_up = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_UP;
+        let n = events.len();
+        assert!(n >= 2, "{:?}", events);
+        assert_eq!(events[n - 2].0, left_down);
+        assert_eq!(events[n - 1].0, left_up);
+        assert!(
+            events
+                .iter()
+                .all(|(mask, _, _)| button(*mask) & MOUSE_BUTTON_RIGHT == 0),
+            "{:?}",
+            events
+        );
+    }
+
+    /// Records what the client would put on the wire.
+    #[derive(Clone)]
+    struct Recorder {
+        lc: Arc<RwLock<LoginConfigHandler>>,
+        sent: Arc<Mutex<Vec<Data>>>,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Self {
+                lc: Arc::new(RwLock::new(LoginConfigHandler::default())),
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn mouse_events(&self) -> Vec<MouseEvent> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|d| match d {
+                    Data::Message(m) => match &m.union {
+                        Some(message::Union::MouseEvent(me)) => Some(me.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl Interface for Recorder {
+        fn send(&self, data: Data) {
+            self.sent.lock().unwrap().push(data);
+        }
+        fn msgbox(&self, _msgtype: &str, _title: &str, _text: &str, _link: &str) {}
+        fn handle_login_error(&self, _err: &str) -> bool {
+            false
+        }
+        fn handle_peer_info(&self, _pi: PeerInfo) {}
+        fn set_multiple_windows_session(&self, _sessions: Vec<WindowsSession>) {}
+        async fn handle_hash(&self, _pass: &str, _hash: Hash, _peer: &mut Stream) -> bool {
+            false
+        }
+        async fn handle_login_from_ui(
+            &self,
+            _os_username: String,
+            _os_password: String,
+            _password: String,
+            _remember: bool,
+            _peer: &mut Stream,
+        ) {
+        }
+        async fn handle_test_delay(&self, _t: TestDelay, _peer: &mut Stream) {}
+        fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
+            self.lc.clone()
+        }
+    }
+
+    #[test]
+    fn no_password_puts_nothing_on_the_wire() {
+        // The 1.5s "waiting for image" timer calls in with an empty password. Whatever it sends
+        // is applied to the peer's real pointer while the peer user may be watching.
+        let recorder = Recorder::new();
+        _input_os_password(String::new(), true, recorder.clone());
+        assert!(
+            recorder.sent.lock().unwrap().is_empty(),
+            "{:?}",
+            recorder.mouse_events()
+        );
+    }
+
+    #[test]
+    fn a_password_still_clicks_and_types() {
+        let recorder = Recorder::new();
+        _input_os_password("secret".into(), true, recorder.clone());
+        let events = recorder.mouse_events();
+        assert!(events.len() >= 2, "{:?}", events);
+        assert!(events
+            .iter()
+            .all(|e| e.mask & MOUSE_TYPE_MASK != MOUSE_TYPE_MOVE));
+        let keys: Vec<_> = recorder
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|d| match d {
+                Data::Message(m) => match &m.union {
+                    Some(message::Union::KeyEvent(ke)) => Some(ke.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys.len(), 2, "{:?}", keys);
+        assert_eq!(keys[0].seq(), "secret");
+        assert!(
+            matches!(
+                keys[1].union,
+                Some(key_event::Union::ControlKey(ck))
+                    if ck.value() == ControlKey::Return as i32
+            ),
+            "{:?}",
+            keys[1]
+        );
     }
 }

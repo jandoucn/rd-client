@@ -2606,8 +2606,12 @@ class CanvasModel with ChangeNotifier {
     if (notify) {
       notifyListeners();
     }
-    if (!isMobile && refreshMousePos) {
-      parent.target?.inputModel.refreshMousePos();
+    final inputModel = parent.target?.inputModel;
+    if (!isMobile &&
+        refreshMousePos &&
+        inputModel != null &&
+        peerCursorHasPosition(inputModel.lastMousePos)) {
+      inputModel.refreshMousePos();
     }
     tryUpdateScrollStyle(Duration.zero, style);
   }
@@ -3991,13 +3995,17 @@ class CursorModel with ChangeNotifier {
     notifyListeners();
   }
 
-  updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
+  /// [movePeer] stays false where the origin is only being learned rather than switched to.
+  /// On the first frame nothing here knows the peer cursor better than the peer does, and a
+  /// move to the origin throws away the position the user left and runs macOS hot corners.
+  updateDisplayOrigin(double x, double y,
+      {updateCursorPos = true, movePeer = true}) {
     _displayOriginX = x;
     _displayOriginY = y;
     if (updateCursorPos) {
       _x = x + 1;
       _y = y + 1;
-      parent.target?.inputModel.moveMouse(x, y);
+      if (movePeer) parent.target?.inputModel.moveMouse(x, y);
     }
     parent.target?.canvasModel.resetOffset();
     notifyListeners();
@@ -4009,7 +4017,6 @@ class CursorModel with ChangeNotifier {
     _displayOriginY = y;
     _x = xCursor;
     _y = yCursor;
-    parent.target?.inputModel.moveMouse(x, y);
     notifyListeners();
   }
 
@@ -4803,6 +4810,13 @@ Future<Map<String, dynamic>?> getCanvasConfig(SessionID sessionId) async {
   }
 }
 
+/// A view style refresh re-sends the last pointer position so the peer cursor follows a scroll
+/// or scale change. [InputModel.lastMousePos] is zero until the pointer has been over the image,
+/// and re-sending that placeholder puts the peer cursor at the corner of its display, so there is
+/// nothing to refresh yet.
+bool peerCursorHasPosition(ui.Offset lastMousePos) =>
+    lastMousePos != ui.Offset.zero;
+
 Future<void> initializeCursorAndCanvas(FFI ffi) async {
   var p = await getCanvasConfig(ffi.sessionId);
   int currentDisplay = 0;
@@ -4810,8 +4824,10 @@ Future<void> initializeCursorAndCanvas(FFI ffi) async {
     currentDisplay = p['currentDisplay'];
   }
   if (p == null || currentDisplay != ffi.ffiModel.pi.currentDisplay) {
+    // First frame: learn the origin, leave the peer cursor where the peer left it.
     ffi.cursorModel.updateDisplayOrigin(
-        ffi.ffiModel.rect?.left ?? 0, ffi.ffiModel.rect?.top ?? 0);
+        ffi.ffiModel.rect?.left ?? 0, ffi.ffiModel.rect?.top ?? 0,
+        movePeer: false);
     return;
   }
   double xCursor = p['xCursor'];
