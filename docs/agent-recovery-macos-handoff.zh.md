@@ -27,7 +27,7 @@
 | 仓库 | 远程 | 必须使用的主分支 |
 | --- | --- | --- |
 | RustDesk 客户端 | `https://github.com/jandoucn/rustdesk.git` | `master` |
-| RustDesk API | `https://github.com/jandoucn/rustdesk-api.git` | `main` |
+| RustDesk API | `https://github.com/jandoucn/rd-api.git` | `main` |
 
 禁止创建/切换功能分支。已经有 checkout 时先看 status，不覆盖现场未提交内容；源码依赖按 `.gitmodules` 初始化，客户端有子模块。两仓库建议并排放在同一父目录，文档的相对链接据此组织。
 
@@ -64,7 +64,7 @@ Mac 可运行：Rust 平台独立测试、PHP/SQLite 集成、Go broker、Playwr
 
 Windows 必须运行：SCM/LocalSystem、计划任务、EXE/MSI 安装和升级、UAC/锁屏/登录桌面、helper 退出/断电接续和实际远控。Mac 交叉编译只能证明编译，不能替代 Windows E2E。
 
-Apple Silicon Mac 需要明确 Windows ARM VM 与 x86_64 产品目标差异。Windows ARM 上模拟运行 x64 可提供补充证据，但不能宣称完整替代原生 Windows x64/Windows 10 矩阵；优先准备受控 x64 Windows VM/独立测试机。不得测试时切断唯一远程管理链路。
+Apple Silicon Mac 需要明确 Windows ARM 环境与 x86_64 产品目标差异。Windows ARM 上模拟运行 x64 可提供补充证据，但不能宣称完整替代原生 Windows x64/Windows 10 矩阵；实际验收用受控 x64 真机 win10-gs（原隔离 VM 已停用，见仓库 `AGENTS.md`）。不得测试时切断唯一远程管理链路。
 
 Windows 未就绪时继续独立低层开发，标记平台验收 BLOCKED；不能为了消除阻塞改 macOS 签名、Android 证书或产品固定配置。
 
@@ -110,4 +110,4 @@ go test -count=1 ./...
 
 可以直接使用下面文字，按本机实际路径替换仓库位置：
 
-> 继续开发 RustDesk Management Agent。客户端与后台两个仓库已经在本机，分别使用 master 和 main，禁止创建功能分支。先读取两仓库 AGENTS.md、客户端 docs/agent-recovery-macos-handoff.zh.md、agent-recovery-upgrade-plan.zh.md 和 agent-recovery-test-runbook.zh.md。此前完成的是方案和测试规范，没有新 agent 功能实现；先核对远程新增提交再按 TDD 开发。目标是主程序离线自动逐级救活，多层本地/在线 fallback，agent 自身 SCM/bootstrap 兜底，EXE/MSI 旧版一次在线升级获得全部适用能力。先验证 POC-EXE、POC-MSI、POC-RESUME，建设固定 fixtures、能力测试清单和执行驱动，再实现状态机、SQLite 后台接口、事务/helper/接续、保底包和控制台。Mac 运行低层/API/浏览器测试，Windows 实机或隔离 VM 验证服务、四包安装/升级、UAC和断电恢复；未执行项记 BLOCKED。保留所有固定密码、服务器、公钥、权限、手动构建、macOS 签名和 Android 证书约束；MySQL 冻结。代码完成执行全量检查与实际包 E2E，报告源码/包摘要、测试数量、错误和回归面。先完成本地开发，不擅自提交、push、发布或改生产。
+> 继续开发 RustDesk Management Agent。客户端与后台两个仓库已经在本机，分别使用 master 和 main，禁止创建功能分支。先读取两仓库 AGENTS.md、客户端 docs/agent-recovery-macos-handoff.zh.md、agent-recovery-upgrade-plan.zh.md 和 agent-recovery-test-runbook.zh.md。此前完成的是方案和测试规范，没有新 agent 功能实现；先核对远程新增提交再按 TDD 开发。目标是主程序离线自动逐级救活，多层本地/在线 fallback，agent 自身 SCM/bootstrap 兜底，EXE/MSI 旧版一次在线升级获得全部适用能力。先验证 POC-EXE、POC-MSI、POC-RESUME，建设固定 fixtures、能力测试清单和执行驱动，再实现状态机、SQLite 后台接口、事务/helper/接续、保底包和控制台。Mac 运行低层/API/浏览器测试，Windows 真机 win10-gs 验证服务、四包安装/升级、UAC和断电恢复；未执行项记 BLOCKED。保留所有固定密码、服务器、公钥、权限、手动构建、macOS 签名和 Android 证书约束；MySQL 冻结。代码完成执行全量检查与实际包 E2E，报告源码/包摘要、测试数量、错误和回归面。先完成本地开发，不擅自提交、push、发布或改生产。

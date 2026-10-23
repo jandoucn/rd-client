@@ -1,6 +1,6 @@
 # Management Agent 远程救援与保活能力评估
 
-本文汇总对定制 rustdesk 客户端 `/Users/olly/github/rustdesk` 的 Management Agent 与配套后端 `/Users/olly/github/rustdesk-api`（PHP+SQLite+Go broker）的远程救援、保活、兜底恢复、升级能力的只读代码评估，给出逐维判定、待完善缺口（按优先级）、传输设计建议与"少构建"策略。结论基于本仓源码与测试，非上游 rustdesk 假设。
+本文汇总对定制 rustdesk 客户端 `/Users/olly/github/rustdesk` 的 Management Agent 与配套后端 `/Users/olly/github/rd-api`（PHP+SQLite+Go broker）的远程救援、保活、兜底恢复、升级能力的只读代码评估，给出逐维判定、待完善缺口（按优先级）、传输设计建议与"少构建"策略。结论基于本仓源码与测试，非上游 rustdesk 假设。
 
 ## 0. 总结
 

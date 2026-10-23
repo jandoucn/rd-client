@@ -6,7 +6,7 @@
 
 适用仓库：`D:\github\rustdesk`、`D:\github\rustdesk-api`。
 
-执行环境：新安装的 OpenCode、Windows 测试机、隔离 Windows VM、可用的本地 API 测试环境。
+执行环境：新安装的 OpenCode、Windows 真机测试机 win10-gs（原隔离 VM 已停用，见仓库 `AGENTS.md`「Windows 真机测试统一在 win10-gs」）、可用的本地 API 测试环境。
 
 本文是可由新机器上的 OpenCode 按阶段读取和执行的测试规范。它不是“跑几个命令看是否编译通过”的清单，而是从测试先行、源码级测试、API/数据库集成、真实安装包、Windows 服务、故障注入、旧版本升级到提交前全量门禁的完整验收流程。
 
@@ -39,7 +39,7 @@ nuget help
 | L2/L3 后台 | PHP CLI、Python、SQLite、FrankenPHP 或仓库规定运行时 |
 | L4 broker | Go toolchain |
 | L5 Playwright | Node、npx、`@playwright/test`、Chromium |
-| L6/L7 Windows 包 | Windows x64、管理员权限、MSBuild、NuGet、WiX/构建依赖、隔离 VM |
+| L6/L7 Windows 包 | Windows x64、管理员权限、MSBuild、NuGet、WiX/构建依赖、win10-gs 真机 |
 | L8 容器 | Docker Engine/Desktop、Compose |
 
 检查仓库和工具路径：
@@ -73,7 +73,7 @@ Test-Path "D:\github\rustdesk-api\stream-broker\go.mod"
 
 - 测试编号、日期、执行人和 OpenCode 会话标识。
 - 客户端仓库 commit、后台仓库 commit、构建版本和 `build_seq`。
-- Windows 版本、架构、VM 快照名、standard/SOS、EXE/MSI。
+- Windows 版本、架构、win10-gs 备份标签（替代原 VM 快照名）、standard/SOS、EXE/MSI。
 - 测试前置状态、实际命令、输入参数和测试数据身份。
 - 预期结果、实际结果、退出码、关键日志和截图/事件日志路径。
 - API 响应、SQLite 直接查询结果、服务状态和文件摘要。
@@ -103,13 +103,13 @@ Test-Path "D:\github\rustdesk-api\stream-broker\go.mod"
 
 ### 1.4 测试机角色与重启接续
 
-区分控制/证据机、Windows 被测机、隔离 API/SQLite 环境，可使用同一宿主的多个 VM。真实远控需独立控制端，不能对同一 GUI 自连证明 E2E。
+区分控制/证据机（Mac）、Windows 被测机（win10-gs，原 VM 已全部停用）、隔离 API/SQLite 环境。真实远控需独立控制端，不能对同一 GUI 自连证明 E2E。
 
-- 新物理机可执行授权安装/升级；破坏文件、删服务、断电和禁用系统组件仅在隔离 VM 或明确授权且可带外恢复的机器执行。
-- 断网不能切断唯一 OpenCode/远控入口；由宿主控制台或独立链路注入，限定目标和持续时间，先保存恢复方法。
-- 重启前持久化 `resume.json`，包含 run_id、当前用例、快照、源码/包摘要、最后动作和下一步；恢复后先查实际状态，不盲目重做。
-- 快照 revert 后核对时钟、测试身份和后台绑定；同 ID/UUID 的快照不与另一台测试机并行启动。
-- 证据复制到控制机再清理 VM；不删除唯一恢复点。缺少 VM/带外入口则破坏性项记 BLOCKED，继续独立低层测试。
+- 安装/升级、破坏文件、删服务和禁用系统组件均在 win10-gs 执行，前提是已完成完整备份并空跑恢复成功；断电/关机类注入必须能自动回到可 SSH 状态，否则记 BLOCKED。
+- 断网不能切断唯一远控入口（termark SSH）；只能用限定目标、限定时长并自动复原的方式注入，先保存恢复方法。
+- 重启前持久化 `resume.json`，包含 run_id、当前用例、备份标签、源码/包摘要、最后动作和下一步；恢复后先查实际状态，不盲目重做。
+- 每次从备份恢复后核对逐文件哈希、属性、ACL、服务定义、测试身份（installation_id、`--get-id`、key_pair）和后台绑定；agent 启动代次不得回退，否则后台会以 409 拒绝上报。
+- 证据复制到控制机再清理 win10-gs；不删除唯一备份；不得删除或改动 `D:\build-env`、`D:\github`。缺少可用备份或带外入口则破坏性项记 BLOCKED，继续独立低层测试。
 
 ## 2. 测试对象矩阵
 
@@ -125,6 +125,8 @@ Test-Path "D:\github\rustdesk-api\stream-broker\go.mod"
 | `SOS-MSI` | sos | MSI | `windows-x86_64-msi-sos` |
 
 同一台机器不能在未清理的情况下切换 standard/SOS 或 EXE/MSI。`RustDeskManagementAgent` 服务名共用，混装会使测试结论失真。
+
+`STD-EXE`、`SOS-EXE` 两包当前没有 R3 保底切换、R4 离线包修复和 agent 备份恢复路径（`local_repair_schedule.rs`、`rescue_assets.rs` 只接受 `windows-x86_64-msi-*`），依赖这些能力的用例在 EXE 包上记 `NOT_APPLICABLE`，原因写“实现仅支持 MSI”，不能记 `PASS`。
 
 ### 2.2 测试层级
 
@@ -176,9 +178,9 @@ agent 能力清单至少覆盖：
 
 | 能力组 | 必测能力 |
 | --- | --- |
-| 自身生命周期 | SCM failure action、周期 bootstrap、服务修复、二进制备份恢复、事务接续、单实例互斥、卸载不复活 |
+| 自身生命周期 | SCM failure action、周期 bootstrap、服务修复、二进制备份恢复、事务接续、单实例（由 SCM 服务模型与计划任务 `IgnoreNew` 保证，副作用段由安装互斥串行，不是进程级锁）、卸载不复活 |
 | 观测 | 服务状态、binpath、账户/启动类型、文件完整性、版本/edition/package kind、意图、迁移、事务、rescue readiness |
-| 本地恢复 | R0 IPC 重连、R1 启动/重启、R2 服务修复、R3 保底切换、R4 离线包、R5 在线固定目标、R6 熔断与告警 |
+| 本地恢复 | R0 IPC 重连、R1 启动/重启、R2 服务修复、R3 保底切换（仅 MSI）、R4 离线包（仅 MSI）、R5 在线固定目标、R6 退避与错误可见性（熔断与告警未实现，见 9.0 用例） |
 | 远程命令 | inspect、start、restart、repair、reconcile、verify、reinstall、update、diagnostics、network probe、agent update、client enable |
 | 安全 | Ed25519 签名、nonce、防重、时间窗口、身份/实例/代次绑定、包签名/hash/size、ACL、路径/重解析点检查 |
 | 事务 | claim、状态转换、迁移、helper 接管、断电接续、回滚、outbox、重复事件、结果补报 |
@@ -213,11 +215,11 @@ agent 能力清单至少覆盖：
 
 | 行为 | 前置条件 | 触发 | 预期结果 | 失败结果 |
 | --- | --- | --- | --- | --- |
-| 服务停止自动救活 | 意图允许，agent 可运行 | 停止 `RustDesk` | 服务恢复、主程序 ready、事件上报 | 保留旧文件、记录错误、按预算退避 |
-| 主安装损坏切换保底 | 保底包可信 | 删除/破坏主安装 | 保底服务启动并标记 degraded | 不启动不可信文件 |
-| 离线包恢复 | API 不可达，本地包可信 | 两个客户端路径损坏 | 从本地包恢复 | agent 保持可管理，不循环重装 |
+| 服务停止自动救活 | 意图允许，agent 可运行 | 停止 `RustDesk` | 服务恢复（SCM `Running`）、R1 事件上报；主程序 ready 需另行核对，agent 只确认 SCM 状态转换 | 保留旧文件、记录错误、按预算退避 |
+| 主安装损坏切换保底 | 保底包可信（仅 MSI） | 删除主安装 | 保底服务启动并标记 degraded | 不启动不可信文件 |
+| 离线包恢复 | API 不可达，本地包可信（仅 MSI） | 两个客户端路径缺失（只识别缺失，不识别内容被篡改） | 从本地包恢复 | agent 保持可管理，不循环重装 |
 | 旧版在线迁移 | 旧主程序可更新 | 执行一次在线升级 | 新 agent 实际运行并上报全部能力 | 旧 agent/主程序可回退或接续 |
-| agent 自身崩溃 | bootstrap/SCM 可用 | 终止 agent | agent 恢复 | 有界重试，不能双实例 |
+| agent 自身崩溃 | bootstrap/SCM 可用 | 终止 agent | agent 恢复 | 有界重试；单实例由 SCM 服务模型与计划任务 `IgnoreNew` 保证 |
 
 没有行为表，不开始实现或手工验收。
 
@@ -231,7 +233,7 @@ agent 能力清单至少覆盖：
 - API 用本地 SQLite fixture 和真实 HTTP 请求。
 - broker 用 Go 测试服务器和批量 snapshot 测试。
 - 页面用 Playwright 场景。
-- Windows 行为用真实程序/安装包或隔离 VM 驱动。
+- Windows 行为用真实程序/安装包在 win10-gs 上驱动。
 
 ### 3.3 最小实现、回归和覆盖率
 
@@ -434,12 +436,12 @@ docker compose --env-file .env.test -f docker-compose.yaml config --quiet
 
 ### 7.1 每个组合的前置清理
 
-在隔离 Windows VM 中执行。必须确认：
+在 win10-gs 上执行（先完成完整备份）。必须确认：
 
 - 没有 `RustDesk`、`RustDesk Service`、`RustDeskManagementAgent` 服务。
 - `C:\Program Files\RustDesk` 和 `C:\ProgramData\RustDesk` 已清理。
 - 没有旧计划任务、RecoveryBootstrap、临时 helper 和残留安装注册表。
-- 测试快照和安装包 hash 已记录。
+- 备份标签和安装包 hash 已记录。
 
 只能使用当前测试轮创建的清理资源。不得删除用户已有数据或生产资源。
 
@@ -462,12 +464,12 @@ docker compose --env-file .env.test -f docker-compose.yaml config --quiet
 - service.inspect、service.start、service.restart、service.repair。
 - service 停止后的 R1 自动救活。
 - binpath 错误后的 R2 修复。
-- 主文件损坏后的 R3 保底切换。
-- 本地批准包 R4 恢复。
-- API 正常和 API 不可达时的 R5/R6 行为。
-- agent 进程崩溃、服务停止、服务删除和 agent 文件损坏后的 bootstrap/SCM 恢复。
+- 主安装缺失后的 R3 保底切换（仅 MSI；不识别“文件在但内容被篡改”）。
+- 本地批准包 R4 恢复（仅 MSI）。
+- API 正常和 API 不可达时的 R5/R6 行为。已知限制：自动 R5 无镜像回退、有 `rescue\current` bundle 时不运行；R6 只有有界退避，无熔断态与告警。
+- agent 进程崩溃、服务停止、服务删除后的 bootstrap/SCM 恢复；agent 文件“缺失”可恢复（仅 MSI、同 build），文件“损坏”不恢复。
 - 本地禁止、主动停用、远程暂停恢复和卸载后的不复活。
-- 状态、事件、outbox、重启和后台页面投影。
+- 状态、事件、outbox、重启和后台页面投影。已知限制：本地恢复事件只有 R1/R3/R4，R0/R2/自动 R5/R6/bootstrap 只写 `agent.json` 或日志，不发事件。
 
 ## 8. 旧版本升级路径 `LEGACY_UPGRADE`
 
@@ -495,7 +497,7 @@ docker compose --env-file .env.test -f docker-compose.yaml config --quiet
 
 ### 8.3 升级中断矩阵
 
-在快照中逐项中断并重启：
+在 win10-gs 上逐项中断并重启（每项前确认备份可用，结束后恢复并核对身份）：
 
 - 下载完成但安装未开始。
 - 主服务停止前。
@@ -534,21 +536,23 @@ docker compose --env-file .env.test -f docker-compose.yaml config --quiet
 
 ### 9.0 带编号的验收用例
 
-每个用例在单独快照执行，前置必须包括精确包/身份、意图、最后可用资产、后台策略、当前没有活跃事务。除用例显式关闭的条件外，不手工运行 `check-now`、安装器或 Start-Service 帮产品恢复。
+每个用例从已验证的备份状态开始、结束后恢复，前置必须包括精确包/身份、意图、最后可用资产、后台策略、当前没有活跃事务。除用例显式关闭的条件外，不手工运行 `check-now`、安装器或 Start-Service 帮产品恢复。
+
+在已装生产 agent 的 win10-gs 上跑 `#[ignore]` 真机测试二进制时，测试构建取的是 `Global\RustDeskAgentTestInstallGuard`，与生产 agent 的 `Global\RustDeskManagementAgentInstall` 互斥名不同，两者不会互斥。不先规避就会让测试动作与生产 agent 的 R1–R4 并发修改服务/安装目录，故障注入结论作废。前置二选一：停用生产 agent 的自愈，或置 `maintenance.json`。
 
 | 编号 | 操作 | 必须观察与断言 | 截止/复原 |
 | --- | --- | --- | --- |
-| AG-RECOVERY-R1-001 | 直接 SCM 停主服务，不写主动停用 | agent 自动启动；原 ID/UUID/配置不变；只有必要动作 | 180 秒初始目标；留证后回快照 |
-| AG-RECOVERY-R2-001 | 停服并将 binpath 改为不存在路径 | 恢复原固定契约、参数与账户；无任意路径执行；服务/ready 成功 | 实测门限，不反复删建 |
-| AG-RECOVERY-R3-001 | 隔离 API/下载，停服并使主安装不可用 | 完整保底启动，degraded；文件/版本来源正确 | 恢复网络后真实远控 |
-| AG-RECOVERY-R4-001 | 主/保底不可用，网络隔离，保留批准包 | 本地修复无下载依赖；agent 最终恢复；身份保留 | ≤15 分钟试点目标，不手工救援算通过 |
-| AG-RECOVERY-R5-001 | 本地包无效，允许网络、主对象返回 404 | 固定目标允许同域回退；hash/signature 正确；不换未知包 | 按下载/安装预算，恢复 fixture |
-| AG-RECOVERY-R6-001 | 使所有客户端恢复选项不可用，保留 agent | 有界动作、熔断、准确错误；agent 联络保留 | 覆盖预算上限与冷却周期 |
-| AG-BOOTSTRAP-001 | 终止 agent，再使主程序故障 | SCM/bootstrap 恢复 agent 后执行主程序自愈 | agent ≤7 分钟试点目标，不能同存双实例 |
-| AG-BOOTSTRAP-002 | 服务删除或 agent 文件无效 | 本地固定契约/批准备份恢复；原身份不变 | 不临时下载未知 exe |
+| AG-RECOVERY-R1-001 | 直接 SCM 停主服务，不写主动停用。前置无需手建 `service-recovery-enabled`：agent 服务启动时在该标记缺失且门禁允许（意图 `Enabled`、无 `disable-agent`/`maintenance.json`/purge 标记）的情况下会自动补写 | agent 自动启动；原 ID/UUID/配置不变；只有必要动作；恢复成功的判据是 SCM `Running`，主程序 ready 另测 | 180 秒初始目标；复原不能靠删标记——删掉后下一次 agent 服务启动会重新写入，要关闭恢复只能改意图或置本地禁止标记 |
+| AG-RECOVERY-R2-001 | 停服并将 binpath 改为不存在路径 | 恢复原固定契约、参数与账户；无任意路径执行；判据为 SCM `Running`，主程序 ready 另测。已知限制：R2 只写 `agent.json` 的恢复尝试/结果，不发本地恢复事件 | 实测门限，不反复删建 |
+| AG-RECOVERY-R3-001 | 隔离 API/下载，停服并使主安装缺失（仅 MSI；主安装目录与 `RustDesk.exe` 都在、只是内容被替换时 R3 不切换） | 完整保底启动，degraded；文件/版本来源正确 | 恢复网络后真实远控 |
+| AG-RECOVERY-R4-001 | 主/保底不可用，网络隔离，保留批准包（仅 MSI） | 本地修复无下载依赖；agent 最终恢复；身份保留 | ≤15 分钟试点目标，不手工救援算通过 |
+| AG-RECOVERY-R5-001 | 本地包无效，允许网络、主对象返回 404 | 已知限制：自动 R5 只取 manifest 的 `target.primary`，不读镜像；404 后按 5/15/30/60 分钟退避重试同一 primary。后果是 primary 长期 404 时永远用不到同域备用路径或镜像，直到 primary 恢复或运维下发远程命令；设备上存在 `rescue\current` 签名 bundle 时自动 R5 整体不运行，该场景直接无动作。镜像回退只在远程命令路径生效；接入自动路径并补 R4→R5 跃迁需要新阶梯规则，须维护者批准。本用例按现码预期 `FAIL` | 按下载/安装预算，恢复 fixture |
+| AG-RECOVERY-R6-001 | 使所有客户端恢复选项不可用，保留 agent | 有界退避（30/120/300 秒后固定 3600 秒，无次数上限）、准确错误、agent 联络保留。后果是后台看不到“已熔断/冷却至何时/需要人工”，只有一个 `service_recovery_error` 字符串。熔断态、冷却期与告警事件均需新增状态与生命周期规则，须维护者批准；本用例按现码只验收退避与联络保留 | 观测退避阶梯，不宣称熔断 |
+| AG-BOOTSTRAP-001 | 终止 agent，再使主程序故障 | SCM/bootstrap 恢复 agent 后执行主程序自愈。无双实例的取证以 SCM 报告的 PID 加进程列表比对，不是查找互斥对象 | agent ≤7 分钟试点目标，不能同存双实例 |
+| AG-BOOTSTRAP-002 | 分两子场景：①删除 agent exe（MSI、同 build、门禁打开）②agent exe 存在但哈希不符 | ①本地固定契约/批准备份恢复，原身份不变，应 `PASS`；②bootstrap 记 `agent integrity unavailable; no start attempted`，既不启动也不替换，属已知限制，本子场景预期 `FAIL` | 不临时下载未知 exe |
 | AG-BOOTSTRAP-DTF-001 | 正常停止主服务与 agent；文件和注册保留，不调用 sc start | 定时/开机入口先启动 agent，再自动恢复主服务；主心跳/agent 联络分别恢复 | 开机和周期两条路径各测，无人工启动算通过 |
-| AG-BOOTSTRAP-DTF-002 | 恢复批准文件后服务仍 stopped；启动再次被拒绝/启动类型 disabled | 文件存在不伪造在线；启动检查、明确错误和有界退避；disabled 不擅改 | 用隔离 fixture，不操作安全软件排除项 |
-| AG-INTERRUPT-001 | helper 停 agent 后注入崩溃，再 VM 重启 | 事务接续/回滚；服务、版本、配置均核对 | 不人工补 agent；控制台留证 |
+| AG-BOOTSTRAP-DTF-002 | 恢复批准文件后服务仍 stopped；启动再次被拒绝/启动类型 disabled | 文件存在不伪造在线；启动检查与有界退避；disabled 不擅改。已实现的是“不擅改 + 无动作”：agent 服务为 `Disabled` 时 bootstrap 直接 `Observe`，计划任务退出码为成功、不写预算、不留错误记录。要求从产品侧取得“明确错误”的那一半属已知限制 | 用隔离 fixture，不操作安全软件排除项 |
+| AG-INTERRUPT-001 | helper 停 agent 后注入崩溃，再重启 win10-gs | 事务接续/回滚；服务、版本、配置均核对 | 不人工补 agent；控制台留证 |
 | AG-UPGRADE-STD-EXE-001 等四包 | 后台真实命令触发旧版到新包 | 主/agent 实际文件和运行版本；能力、任务、ID/UUID/pk 一致 | 重启复测，八路径各独立报告 |
 | AG-API-001 | 重投同命令/claim，丢掉返回 ack | 一次副作用；稳定事件补报；SQLite 行数/摘要一致 | 不凭界面成功判通过 |
 | AG-API-002 | 注入签名/时间/nonce/身份错误 | 明确错误码；不执行、不污染可信在线；旧数据保留 | 复原后合法请求正常 |
@@ -570,11 +574,11 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 
 1. R0：业务进程仍在但注册卡住，测试 IPC 重连。
 2. R1：停止主服务，等待自动启动/重启。
-3. R2：VM 中删除服务或改为确定不存在的测试 binpath，等待修复；不指向真实第三方程序。
-4. R3：破坏正常安装但保留可信完整保底客户端，验证降级启动。
-5. R4：断网并破坏主/保底客户端，使用本地签名离线包恢复。
-6. R5：恢复网络但让 API 失败、下载主路径失败、镜像路径成功，验证固定目标 fallback。
-7. R6：使主/保底/包资产不可用，但保留 agent、bootstrap、身份及证据，验证熔断/告警。连 agent 全删属于不能自恢复的边界，不能要求仍上报。
+3. R2：在 win10-gs 上删除服务或改为确定不存在的测试 binpath，等待修复；不指向真实第三方程序。成功判据是 SCM `Running`。
+4. R3：破坏正常安装但保留可信完整保底客户端，验证降级启动。只识别主安装目录或 `RustDesk.exe` 缺失；目录与文件都在、内容被替换时不会切换。仅 MSI 包具备该路径。
+5. R4：断网并破坏主/保底客户端，使用本地签名离线包恢复。仅 MSI 包具备该路径。
+6. R5：恢复网络但让 API 失败、下载主路径失败、镜像路径成功。已知限制：自动路径只取 `target.primary`，不读镜像；有 `rescue\current` bundle 时自动 R5 整体不运行。按现码该用例预期 `FAIL`。
+7. R6：使主/保底/包资产不可用，但保留 agent、bootstrap、身份及证据，验证退避与错误可见性。已实现的是有界退避（30/120/300 秒后固定 3600 秒）与 `service_recovery_error`，没有熔断态、冷却期和告警事件。连 agent 全删属于不能自恢复的边界，不能要求仍上报。
 
 ### 9.2 agent 自身
 
@@ -583,10 +587,10 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 - DTF：同时正常停止两个服务，在文件恢复状态下等待周期入口；另做重启入口，确认无需用户登录或手工 sc start。
 - DTF：主程序明确主动停用时 bootstrap 可恢复 agent 观测，但主程序仍保持停用；信任配置不是解除停用意图。
 - 删除 agent 服务配置，验证固定契约重建。
-- 破坏 agent 文件，验证本地 agent 备份恢复。
-- 让 agent 检查循环停滞，验证核心进度超时和有界重启。
+- 破坏 agent 文件，验证本地 agent 备份恢复。已实现的只是“文件缺失”：exe 存在但哈希不符时 bootstrap 记 `agent integrity unavailable; no start attempted`，既不启动也不替换，只能人工删掉坏文件后由下一轮走缺失恢复。仅 MSI、同 build、门禁打开时缺失恢复可用。
+- 让 agent 检查循环停滞，验证核心进度超时和有界重启。尚未实现：主循环是单线程 `recv_timeout(30s)` 循环，没有进度戳或看门狗，SCM 与 bootstrap 都只看到 `Running` 而不动作。该用例按现码预期 `FAIL`，无现成注入 fixture。
 - helper 在每个阶段退出，验证事务接续。
-- 禁用 Task Scheduler，验证 degraded 和 SCM fallback，不宣称双入口仍正常。
+- 禁用 Task Scheduler，验证 degraded 和 SCM fallback，不宣称双入口仍正常。SCM fallback 可验收；degraded 上报未实现，`rescue.components.recovery_entry` 恒为 `not_assessed`，后台无法区分“双入口正常”与“只剩 SCM”。
 - 执行彻底卸载并重启，确认所有入口遵循卸载标记，不复活 RustDesk。
 
 ### 9.3 网络和服务端
@@ -603,7 +607,7 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 
 ### 9.4 测试签名和网络隔离
 
-Defender 安装选择新增测试规范见 [Windows Defender 安装说明](windows-defender-install.zh.md)。当前用户禁止本开发机真实 Defender 测试：只执行 mock，不能 Get/Add/Set/Remove 真实偏好、启用防护或改变防篡改；真实写入/UAC/Windows 10/11 项均留给独立授权可恢复 VM，未执行记 BLOCKED。
+Defender 安装选择新增测试规范见 [Windows Defender 安装说明](windows-defender-install.zh.md)。当前用户禁止本开发机真实 Defender 测试：只执行 mock，不能 Get/Add/Set/Remove 真实偏好、启用防护或改变防篡改；真实写入/UAC 项原定在独立 VM 执行，VM 已停用；用户 2026-10-23 授权改在 win10-gs 开启 Defender 后实机执行：执行前导出偏好与策略，测完按记录恢复，不改变防篡改；Defender 无法开启时如实记 BLOCKED。Windows 11 项因无测试机记 BLOCKED。
 
 阶段实现和已运行证据以 [实施进度](agent-recovery-implementation-status.zh.md) 为准，不能将方案用例当作已实现驱动。`scripts/test-agent-foundation.py` 是现有可执行底座入口；Defender选择mock用 `tests/test_defender_installer.py`，无真实Defender/注册表IO。完整包和平台门禁仍需另行执行。
 
@@ -724,12 +728,12 @@ MSI preprocess 会改写模板，须在临时构建副本执行或精确恢复�
 4. 运行后台 PHP/Python/Go 静态检查和 SQLite 集成测试。
 5. 运行后台 Playwright E2E 和容器门禁。
 6. 构建实际 Windows EXE/MSI 及适用 Linux 包。
-7. 在隔离 Windows VM 执行四种全新安装路径。
-8. 在隔离 Windows VM 执行四种旧版本升级路径。
+7. 在 win10-gs 执行四种全新安装路径。
+8. 在 win10-gs 执行四种旧版本升级路径。
 9. 执行 R0–R6、agent 自身和事务中断故障注入。
 10. 重新读取后台 SQLite，核对 API、页面、agent state、事件和 outbox。
 11. 执行最终代码审查、`git diff --check` 和测试证据清点。
-12. 清理本轮临时资源，确认没有测试进程、容器、VM 锁、临时服务和测试数据库残留。
+12. 清理本轮临时资源，确认没有测试进程、容器、计划任务、临时服务和测试数据库残留，win10-gs 已恢复到测试前状态。
 
 ### 10.6 提交前阻断条件
 
@@ -737,7 +741,7 @@ MSI preprocess 会改写模板，须在临时构建副本执行或精确恢复�
 
 - 旧版本主程序升级了，但 ProgramData agent 没有升级或实际运行版本未知。
 - 主程序服务停止后只依赖后台命令才能救活，没有本地自治路径。
-- fallback 只写了代码路径，没有在真实 Windows VM 走通。
+- fallback 只写了代码路径，没有在 win10-gs 真机走通。
 - API 不可用时 agent 因等待上报而停止本地恢复。
 - agent、helper、bootstrap 之间可并发执行两个安装事务。
 - ID、UUID、公钥、配置或原版本丢失且没有明确失败结果。
@@ -764,7 +768,7 @@ MSI preprocess 会改写模板，须在临时构建副本执行或精确恢复�
 - API commit:
 - Build number / build_seq:
 - Windows version / architecture:
-- VM snapshot:
+- win10-gs backup tag:
 - Started at:
 - Finished at:
 
@@ -820,10 +824,10 @@ MSI preprocess 会改写模板，须在临时构建副本执行或精确恢复�
 1. 先检查两个仓库路径、当前 commit、工作区状态和可用工具。
 2. 读取两仓库 `AGENTS.md` 并遵守主分支、发布、测试和清理约束。
 3. 创建本轮唯一测试根目录，例如 `test-evidence/<timestamp>-agent-recovery/`。
-4. 在执行破坏性 Windows 测试前创建并记录 VM 快照。
+4. 在执行破坏性 Windows 测试前，在 win10-gs 上做完整备份（逐文件哈希、属性、ACL、服务定义）并空跑一次恢复，记录备份标签。
 5. 一次只运行一个改变服务/安装状态的测试；并行只允许用于互不影响的静态检查或只读报告。
 6. 每完成一层测试立即写证据和状态，不把全部步骤做完后凭记忆补写。
-7. 任一失败先停止扩展测试，保留现场，判断是否需要修复后重建快照。
+7. 任一失败先停止扩展测试，保留现场，判断是否需要修复后重新备份。
 8. L8 汇总 L0–L7、候选构建和最终审查，按第 10.5 节顺序推进，不形成“先 E2E 后允许构建”的循环依赖。
 9. L8 通过后仍需执行最终 diff、资源清理和测试证据审查。
 10. 未经明确请求不 commit、tag、push、部署或改生产。
@@ -855,7 +859,7 @@ Management Agent 只有在以下条件全部满足时，才能标记为“异地
 - 更新、重装、回滚、断电和 helper 中断都有事务证据。
 - ID、UUID、公钥、配置和旧版本保留规则通过。
 - 后台状态不混淆主程序在线、agent 在线、远控注册和 API 可达。
-- Rust、Flutter、后台、SQLite、Playwright、实际包、Windows VM 和提交前全量门禁全部通过。
+- Rust、Flutter、后台、SQLite、Playwright、实际包、win10-gs 真机和提交前全量门禁全部通过。
 - 没有未解释的 FAIL，也没有把未执行项伪装成 PASS。
 
 本手册不代表测试已经完成。它定义的是实现完成后必须执行的测试流程和发布门禁。

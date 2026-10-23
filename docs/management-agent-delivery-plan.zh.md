@@ -4,7 +4,7 @@
 
 ## 1. 范围
 
-1. 后端重构（`~/github/rustdesk-api`）：① 能力注册表数据化；③ 后端镜像客户端 status schema（rescue/files），修 status 误报。纯后端，不卡 Windows 构建。
+1. 后端重构（`~/github/rd-api`）：① 能力注册表数据化；③ 后端镜像客户端 status schema（rescue/files），修 status 误报。纯后端，不卡 Windows 构建。
 2. 验证现有安装/升级/Management Agent 全能力流程，抓日志修现有 bug。
 3. P0 客户端（`~/github/rustdesk`）：SC failure actions（崩溃秒级自愈）+ status 投影修正 + **F1 修复（agent.update 同构建自升级 reconciliation_required 卡死命令处理，见 Phase 3 实测记录与能力评估 §5 P0-1）**。
 
@@ -63,6 +63,17 @@
   - **真机证据（win10-gs）**：删除两个服务的 `FailureActions` 注册表值 → 重启 agent → `RustDesk=PRESENT`、`RustDeskManagementAgent=PRESENT`；`sc qfailure` 显示 `RESET_PERIOD=86400`、三条「重启动 -- 延迟 = 5000 微秒」。
   - **自愈实测**：`taskkill /f` 强杀（不手工 start）→ **5225ms** 后 SCM 自动拉起新进程（pid 34828→9360），服务回到 Running。对照：此前只能等 `RustDeskManagementAgentRecovery` 计划任务（最长 5 分钟）。
   - 单元测试：`failure_actions_argument_is_restart_three_times_with_daily_reset` 断言 `reset= 86400 actions= restart/5000/restart/5000/restart/5000` 且 `reset=` 在 `actions=` 之前（sc.exe 对顺序敏感）。
+  - **2026-10-22 实测追加修复**（均先在 win10-gs 复现再修）：
+    1. 服务存在性改用 SCM API 判定（`ERROR_SERVICE_DOES_NOT_EXIST`=1060 即不存在）：中文系统 `sc.exe` 输出无 `does not exist` 字样，存在的服务会被误判为缺失而跳过。
+    2. 写入受本地门禁约束：`disable-recovery`/`disable-agent`/`maintenance.json`/意图非 Enabled 时不写失败动作（`failure_actions_allowed`）；意图文件不存在视为 Enabled（与启动路径一致），存在但不可读视为 Unknown 拒绝。
+    3. 安装时序：agent 服务先于客户端服务启动（客户端服务在 InstallFinalize 附近创建），启动时一次性配置会漏掉客户端服务。改为后台线程按状态机重试：门禁每轮重读（原地升级持有 `maintenance.json` 期间等待、释放后自动配置），门禁打开后 120s 配置窗口、总时长 1800s，服务 Stop 时立即退出；客户端服务缺失不算完成（`failure_actions_complete`）。
+    4. 状态机与完成判定抽为纯函数并按 TDD 先红后绿：`failure_actions_complete_requires_client_applied_and_no_refusal`（8 组组合）、`retry_*`（停止/门禁等待/窗口重置/总时长区分门禁与失败）、`retry_gate_tracks_markers_that_change_after_startup`。
+  - **后台重试线程细则（以 `src/management_agent.rs` 线程 `agent-failure-actions` 与 `windows.rs` `FailureActionsRetry` 为准）**：
+    - 每轮先判停止、再判总时长、再判门禁：服务收到 Stop → 立即结束（`Stopped`）；自线程启动起满 `OVERALL`=1800s → 结束，从未遇到门禁打开记 `HeldByGate`（只写 info，属本地停止意图，不算故障），遇到过记 `Incomplete`（节流 warn）。
+    - 门禁（`failure_actions_allowed_now`）每轮重读：purge 标记、`disable-agent`、`maintenance.json` 任一存在或意图非 Enabled 时等待（5s 一轮），并**清空** 120s 窗口，维护期不消耗配置窗口。
+    - 门禁打开后开启 `WINDOW`=120s 配置窗口，窗口内每 5s 调用一次 `ensure_service_failure_actions()`；完成（`RustDesk` 必须 Applied 且无 Refused）→ `Configured`；窗口到期仍未完成 → `Incomplete`。
+    - 本地停止意图与门禁始终优先：线程只会"等待"或"放弃"，不会越过门禁写入失败动作。
+    - 已知限制（T8 L1/L2）：线程超时结束后需等 agent 下次启动才再次尝试；线程 spawn 失败会使 agent 服务启动失败。
 
 ### Phase 5 — P0 客户端 status 投影修正
 目标：`rescue_status.rs` 投影让 installed_msi 的 `local_repair`/组件状态反映引擎真实支持（与后端 Phase 2 对齐），不再误报"不可恢复"；`ready` 字段契约保持（如仍 false 则文档化语义），重点是组件级真实性。
@@ -75,7 +86,42 @@
 - 方案：自升级提交后，新 agent 在 resume/reconcile 路径自校验（当前 build/identity/健康 == 目标且事务已落地）即把该命令 reconcile 成 `succeeded`；或给 `reconciliation_required` 加超时/自愈降级，使其不无限阻断其他命令。改在 `operations_runtime.rs` resume/reconcile 与 `command_transaction` 终态确认处，不动既有 package.reinstall/update 成功路径。
 - 失败测试（Rust）：构造「自升级目标==当前 build、事务证据缺失但 agent 健康一致」场景，断言命令 reconcile 为 `succeeded`（或在超时后降级为明确终态），且不再阻断新变更命令；回归 package.reinstall/update 的 succeeded/rolled_back 路径不变。
 - 机器验收：win10-gs 下发 agent.update 后命令达终态、后续 service.* 命令可正常处理（不被堵）。
-- 实测记录：_（待填）_（注：F1 不随命令过期自解，恢复需「后端终结命令 + 清本地 journal + 重启」，见 Phase 3 记录；修复后应命令自达终态、无需人工恢复）
+- 实测记录：**客户端修复与集成测试已完成；真机验收 BLOCKED（见下）**。
+  - **根因修正**：F1 现场日志为 `agent transaction evidence refused: workspace path unavailable (os error 2)`，即事务工作区 `transactions\<id>` 在自升级后不存在。Windows 事件日志确认同一事务 MSI 13:52:29 已 **安装成功**，13:52:34 的第二次 MSI 事件是救援素材准备的 `msiexec /a` 管理员解包（不安装、不消费源事务）。代码全量排查（全部删除/改名 API、MSI 自定义动作、wxs）未找到删除者，删除发生在 13:52:35–13:56:33 之间，判断为外部操作（排除法，证据中等）。产品缺陷在于对账容错：工作区缺失即永久卡死。
+  - **修法（只针对 agent.update，且只在工作区不存在时）**：按可观测终态收敛——运行中 agent 即目标构建 → `succeeded`，result 写明 `evidence: target_build_observed`（不冒充读到事务回执）；不是目标构建 → `failed`（`transaction_workspace_absent`）。两者都是终态，解除 journal 门禁。工作区存在但证据被拒、事务仍在进行，保持原 `reconciliation_required` 路径不变。
+  - **终态判定顺序（以 `operations_runtime.rs` `poll_with_identity` 为准）**：仅对 journal 状态为 `Running`/`ReconciliationRequired` 的 `package.reinstall`/`package.update`/`agent.update` 生效。
+    1. `agent.update` 且 `transactions\<command_id>` 经 `symlink_metadata` 判定为 **NotFound**（`lost_self_update_workspace`）→ 按上条 `absent_workspace_terminal` 直接定终态；目录存在但不可读不算丢失。
+    2. 否则读事务证据（`command_transaction::read_terminal`）：有终态证据则按证据收敛；证据被拒且命令仍 `Running` → `reconciliation_required`（`transaction_evidence_unconfirmed`）。
+    3. 上一步之后仍为非终态、且是 `agent.update`、运行构建等于目标构建 → `succeeded`（result 为 `{transaction_id,self_update_confirmed:true}`，不带 `evidence` 字段）；构建不等则保持 `reconciliation_required` 等待人工。
+    - `package.reinstall`/`package.update` 不走 1、3，工作区缺失仍为 `reconciliation_required`（见下方已知限制）。
+  - **集成测试补充**：同一往返测试还覆盖"工作区存在但证据损坏"两段——同构建→`succeeded` 且 SQL result 为 `{transaction_id,self_update_confirmed:true}`；更高构建→保持 `reconciliation_required`（`transaction_evidence_unconfirmed`）。
+  - **测试**：单元 `absent_workspace_terminal_follows_observed_target_build`、`lost_workspace_exit_is_agent_update_only_and_requires_absence`；集成在真实 PHP+SQLite 往返测试 `signed_rust_command_roundtrip_uses_real_php_sqlite_and_journal` 中新增三段：同构建→journal `Succeeded`、SQL `succeeded` 且事件 result 含 `target_build_observed`；更高构建→`failed`+`transaction_workspace_absent`；`package.update` 工作区缺失仍 `reconciliation_required`。已用变异法确认该段确实执行（故意改错期望值→变红）。
+  - **真机验收 BLOCKED**：agent.update 安装的是后端已发布、CI 签名的包；生产当前仅有不含修复的 `2026101805`，新进程跑旧代码会复现 F1，本地无法签出可被接受的清单。需带修复的 CI 正式构建发布后执行：下发同构建 agent.update → 命令达终态 → 后续 `service.inspect` 正常处理。
+  - **已知限制（未修，按 AGENTS.md corner case 规则记录）**：`package.reinstall`/`package.update` 在工作区被外部删除时仍会停在 `reconciliation_required` 并阻断后续变更命令，恢复需人工（后端终结命令 + 清本地 journal）。修复需要为包命令引入新的终态判定依据，属新增状态，待维护者决定。
+
+### Phase 5c — 远程操作静默与远程日志调取（台账 T2，进行中）
+
+目标：远程后端发起的安装/升级/修复/重装/卸载（后台更新命令、策略自动安装、Agent 命令、救援、首装、purge），不论 EXE 还是 MSI，一律完全静默（无 Toast/窗口/msiexec UI/托盘），成功与失败相同；本地用户手动操作（主界面检查更新、在线更新、手动安装/卸载）保持原有通知行为不变。静默不等于丢失：保留日志，并可经 Agent `diagnostics.logs` 远程调取。
+
+- **来源标志 `--remote-silent`（`libs/base/src/update.rs`）**——✅ 单元测试先红后绿：
+  - `update_is_remote(manually, has_command)` = `has_command || !manually`：只有"本地手动且无后台命令"是本地，其余（含无命令的策略自动更新）都算远程。
+  - `update_launch_args(remote, pending)`：标志紧跟 `--update` 之后、`--update-event` 之前。后者按位置解析且末位 command_id 可为空，追加在末尾会被误读为 command_id。
+  - `is_remote_silent(args)`：只做整参数精确匹配，`--remote-silent-x`、`x--remote-silent` 不算。
+  - 测试：`update_origin_is_remote_unless_started_manually_without_a_command`、`remote_marker_never_shifts_the_positional_update_event`（有/无 command_id 两种，均断言 `PendingUpdateEvent::from_cli_args` 往返不变）、`remote_marker_is_recognised_exactly`。
+- **接线**——代码完成，待 Windows 编译验证：
+  - `src/updater.rs` 仅在远程时把标志写入 `--update` 启动参数；远程 MSI 走 `update_me_msi_remote`（`/qn`、`LAUNCH_TRAY_APP=N`、`/L*v` 写固定日志 `<log_root>\msi-update\msi-update.log`），本地 MSI 仍调原 `update_me_msi`。
+  - `src/core_main.rs` 的 `--update` 与 `--silent-install` 两处 Toast 之前判断 `is_remote_silent`：远程只写日志并返回，本地路径代码零改动。
+  - 进行中（台账 T2.2c/M3）：`--silent-install --remote-silent` 目前没有生成方；已安装时后台 updater 只归服务进程（`process_runs_background_updater`）、远程更新不回落拉起主窗口（`update_main_window_fallback_session`）已有纯函数与单元测试，整体接线与真机验证未完成。
+- **`diagnostics.logs` 只读命令（`src/management_agent/diagnostic_logs.rs`）**——客户端单元测试已完成，真机未验：
+  - 能力声明 `diagnostics.logs@1`；准入与执行两处使用同一参数契约，只接受 `source` 与 `transaction_id` 两个键。
+  - `source` 枚举：`agent`/`server`/`service`/`update`/`silent-install`/`install`/`msi-update`/`recovery-msi`/`transaction`。前六个读对应固定日志目录内最新 `.log`；`msi-update` 读固定文件 `msi-update\msi-update.log`（与 `update` 目录分开，`update` 源不会读到 MSI 日志）；`recovery-msi` 读 agent 日志目录固定文件 `recovery-msi.log`；`transaction` 读 `transactions\<id>\installer.log`，且事务目录须通过工作区校验。后端当前只注册前八个，未含 `recovery-msi`。
+  - `transaction` 必须带 32 位小写十六进制 `transaction_id`；其他源带 `transaction_id` 一律拒绝。任何字段都不能指定路径；符号链接/重解析点整条路径拒绝，不跟随。
+  - 上限：尾部窗口 32KB（`MAX_BYTES`）且最多 400 行（`MAX_LINES`）；JSON 转义后仍按 32KB 预算保留最新行，超出即 `truncated=true`。MSI 的 UTF-16LE 日志按 BOM 识别解码。
+  - 脱敏：含 password/passwd/pwd/secret/token/private/key_pair/signature/enc_id/authorization/cookie/bearer/api_key/access_key/otp（不区分大小写）的整行替换为 `[redacted]`；其余行中长度 ≥32 的 `[A-Za-z0-9+/]` 连续串替换为 `[redacted]`；返回 `redacted_lines` 计数。
+  - 返回：成功 `{schema:1,source,file(仅文件名),modified_at,size,truncated,lines,redacted_lines}`；源不存在仍为 `succeeded`，返回 `{missing:true,lines:[],file:null}`。失败只回固定 `error_code`：`log_parameters_invalid`/`log_unreadable`/`log_path_refused`，不外泄 OS 错误与路径。
+  - 测试：`diagnostic_logs_tests.rs` 19 项（参数、固定映射、尾部边界、UTF-8/UTF-16/ANSI 解码、预算、重定向拒绝、相对根拒绝、准入与执行同契约、`update` 不读 MSI 日志、`recovery-msi` 固定文件等）；`operations.rs` `diagnostics_logs_is_admitted_read_only_with_strict_arguments`；`operations_runtime.rs` `diagnostic_logs_terminal_reports_fixed_codes_without_local_detail`。
+- **救援 MSI 日志**：救援助手的 `msiexec` 追加 `/L*v <agent logs>\recovery-msi.log`；日志目录无法创建时不加参数并记 warn，不阻断救援。
+- 待做：Windows 编译与 clippy；真机远程下发 EXE/MSI 安装、升级、卸载各一次，确认无新增通知/UI；本地手动更新一次确认仍通知；经 Agent 调回日志（台账 T2.5/T10.7）。
 
 ### Phase 6 — 全链机器验收 + 发版门槛
 - win10-gs：新客户端包 干净装 + 升级 + 全能力 + 崩溃自愈 + 失败回滚 全绿。
@@ -94,6 +140,9 @@
 | 远程命令全类型 | ✅ | 真 PHP+SQLite | win10-gs+后端 |
 | SC failure actions | ✅ | — | win10-gs kill 测试 |
 | status 投影真实性 | ✅ | — | win10-gs |
+| 远程静默 `--remote-silent` | ✅ | — | 进行中（T2.5） |
+| `diagnostics.logs` 远程日志 | ✅(客户端+后端) | 后端 HTTP/E2E | 进行中（T10.7） |
+| agent.update 工作区丢失终态 | ✅ | ✅(真 PHP+SQLite) | BLOCKED（需 CI 正式构建） |
 
 ## 6. 验收标准（交付即可验收态）
 
@@ -108,4 +157,6 @@
 - win10-gs 的 rustc/cargo/flutter 位置未定位（MSVC+vcpkg 已确认）——客户端阶段解决；若缺则装 rustup + 克隆仓库，不改既有 `C:\RustDeskBuildTools`。
 - 客户端能否本地出整包 MSI（需 Flutter+WiX）或仅 agent 二进制——定位后决定测试粒度。
 - 生产后端升级有真实风险，每次带回滚快照 + 用户知情。
+- **重装后无法重新登记（真实缺陷，2026-10-22 实测）**：agent 状态目录被清理或重装后生成新 `agent_installation_id`，后端 status 返回 409「agent 实例变化，需要重新登记」、命令轮询 403；拒绝时新实例 ID 不落库、不审计，两个管理页面授权时取的都是旧 ID，管理员无从得知新实例，只能到设备上读 `agent.json` 后经 `/admin/api/agent/binding` 先撤销旧实例再授权新实例（本次 win10-gs 即如此恢复，generation 1→2→3）。建议后端在 409/403 前记录候选实例供管理员授权，属新增状态，待维护者决定。**2026-10-22 后端已实现**（台账 T1）：拒绝时记录候选实例，管理页「接管此新实例」原子接管，见 rustdesk-api `docs/agent-console-plan.zh.md`。
+- **本地测试流水线缺陷（已纠正）**：此前 `D:\tmp\repack_all.bat` 两个 edition 的 MSI 都用 `-d ../../rustdesk` 同一目录打包，SOS MSI 实际可能装入 standard 程序，此前 SOS-MSI 验收结论不可信。现改为按 edition 目录打包，并以 `msiexec /a` 解包核对 agent 哈希与 edition 专属 `librustdesk.dll`。
 - 机器分工（编译+实测 win10-gs / 后端联调 NTServer-SH）以本文为准，可按用户调整。

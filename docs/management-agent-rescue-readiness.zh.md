@@ -106,7 +106,7 @@ Get-ChildItem -Recurse C:\Windows\ServiceProfiles, C:\ProgramData\RustDesk -Filt
 - `src/management_agent/first_install_approval_delivery.rs`：`coordinate_current_installation`/`coordinate_approval`/各硬门与 DeliveryError。
 - `src/management_agent/rescue_assets.rs` / `rescue_recovery.rs` / `rescue_rotation.rs`：救援资产准备、恢复周期、轮换。
 - `package_gate.rs`：签名/目标/尺寸校验。`health_windows.rs`：健康管道探测。
-- 后端对接：`~/github/rustdesk-api` 的 `sqlite/index.php` + `sqlite/agent_operations.php`（resolve/批准/命令/回滚）、Go `stream-broker`（命令/策略 SSE）。
+- 后端对接：`~/github/rd-api` 的 `sqlite/index.php` + `sqlite/agent_operations.php`（resolve/批准/命令/回滚）、Go `stream-broker`（命令/策略 SSE）。
 
 ## 7. 硬约束（AGENTS.md）
 

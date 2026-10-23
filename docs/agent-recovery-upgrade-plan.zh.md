@@ -66,18 +66,18 @@
 | agent 检查 | 每轮等待 30 秒；保底 exe 存在会跳过后续处理 | [management_agent.rs](../src/management_agent.rs)，1179–1185 行 |
 | 恢复触发 | 主目录或保底目录有 exe 即不执行安装恢复 | [management_agent.rs](../src/management_agent.rs)，1070–1072 行 |
 | agent 身份 | 使用客户端 ID、UUID 和设备密钥签名 | [management_agent.rs](../src/management_agent.rs)，830–875 行 |
-| 签名路径 | 客户端与当前后台均明确使用 `/rd/update/v1/agent/policy` | 客户端 849–857 行；[API index.php](../../rustdesk-api/sqlite/index.php)，1935–1943 行 |
-| 后台验签 | Ed25519、时间偏差 300 秒、nonce 去重、登记公钥校验 | [API index.php](../../rustdesk-api/sqlite/index.php)，736–793 行 |
-| 首次公钥绑定 | 无已登记公钥时要求最近 90 秒有设备上报，再绑定本次签名公钥 | [API index.php](../../rustdesk-api/sqlite/index.php)，751–783 行 |
-| 首次绑定测试 | 已有近期心跳登记和陈旧心跳拒绝测试 | [integration_test.py](../../rustdesk-api/tests/integration_test.py)，1868–1911 行 |
-| 策略 | `management_agent_enabled` 和 `policy_revision` 已存在 | [API index.php](../../rustdesk-api/sqlite/index.php)，591–631 行 |
-| 策略回写 | 相同 revision 的 runtime 上报可参与服务端策略同步 | [API index.php](../../rustdesk-api/sqlite/index.php)，633–663 行 |
-| 更新命令 | 当前仅支持 `check/install`，按设备 ID＋UUID 绑定 | [API index.php](../../rustdesk-api/sqlite/index.php)，907–957 行 |
-| 投递 | SSE 仅向认证连接投递 pending 命令 | [API index.php](../../rustdesk-api/sqlite/index.php)，1013–1018、1125–1129 行 |
-| 事件 | 状态白名单；命令号＋状态唯一；状态按 rank 推进 | [API index.php](../../rustdesk-api/sqlite/index.php)，1257–1289 行；[lib.php](../../rustdesk-api/sqlite/lib.php)，256 行 |
-| 主程序在线 | 页面 presence 来自 `last_heartbeat`，不是 hbbs 完整注册表 | [后台契约](../../rustdesk-api/docs/client-management-contract.md)，19–45 行 |
-| agent 能力判断 | 当前根据 Windows 平台及主程序 build_seq 阈值判断支持 | [API index.php](../../rustdesk-api/sqlite/index.php)，16–22 行 |
-| 长连接 | Nginx 将策略流转给 Go broker；PHP 处理短认证和批量快照 | [nginx.conf](../../rustdesk-api/config/nginx.conf)，61–68 行；[broker](../../rustdesk-api/stream-broker/main.go)，77–153 行 |
+| 签名路径 | 客户端与当前后台均明确使用 `/rd/update/v1/agent/policy` | 客户端 849–857 行；[API index.php](../../rd-api/sqlite/index.php)，1935–1943 行 |
+| 后台验签 | Ed25519、时间偏差 300 秒、nonce 去重、登记公钥校验 | [API index.php](../../rd-api/sqlite/index.php)，736–793 行 |
+| 首次公钥绑定 | 无已登记公钥时要求最近 90 秒有设备上报，再绑定本次签名公钥 | [API index.php](../../rd-api/sqlite/index.php)，751–783 行 |
+| 首次绑定测试 | 已有近期心跳登记和陈旧心跳拒绝测试 | [integration_test.py](../../rd-api/tests/integration_test.py)，1868–1911 行 |
+| 策略 | `management_agent_enabled` 和 `policy_revision` 已存在 | [API index.php](../../rd-api/sqlite/index.php)，591–631 行 |
+| 策略回写 | 相同 revision 的 runtime 上报可参与服务端策略同步 | [API index.php](../../rd-api/sqlite/index.php)，633–663 行 |
+| 更新命令 | 当前仅支持 `check/install`，按设备 ID＋UUID 绑定 | [API index.php](../../rd-api/sqlite/index.php)，907–957 行 |
+| 投递 | SSE 仅向认证连接投递 pending 命令 | [API index.php](../../rd-api/sqlite/index.php)，1013–1018、1125–1129 行 |
+| 事件 | 状态白名单；命令号＋状态唯一；状态按 rank 推进 | [API index.php](../../rd-api/sqlite/index.php)，1257–1289 行；[lib.php](../../rd-api/sqlite/lib.php)，256 行 |
+| 主程序在线 | 页面 presence 来自 `last_heartbeat`，不是 hbbs 完整注册表 | [后台契约](../../rd-api/docs/client-management-contract.md)，19–45 行 |
+| agent 能力判断 | 当前根据 Windows 平台及主程序 build_seq 阈值判断支持 | [API index.php](../../rd-api/sqlite/index.php)，16–22 行 |
+| 长连接 | Nginx 将策略流转给 Go broker；PHP 处理短认证和批量快照 | [nginx.conf](../../rd-api/config/nginx.conf)，61–68 行；[broker](../../rd-api/stream-broker/main.go)，77–153 行 |
 | 安装状态 | `InstallingService` 是进程内状态，独立 agent 无法共享 | [platform/mod.rs](../src/platform/mod.rs)，39–44、123–136 行 |
 | MSI helper | 已有复制自身、停止 agent、安装、重启 agent 的 helper | [management_agent.rs](../src/management_agent.rs)，489–629 行 |
 | MSI 永久组件 | agent 位于 ProgramData，永久保留，安装时停止并启动服务 | [ManagementAgent.wxs](../res/msi/Package/Components/ManagementAgent.wxs)，9–33 行 |
@@ -265,6 +265,8 @@ agent 使用显式失败的读取函数区分不存在、权限拒绝、解析�
 
 文件存在但损坏、无法运行或依赖缺失纳入恢复条件。服务已标记删除、句柄尚未释放等情况按 Windows 错误处理，不能固定睡眠后假设删除完成。
 
+上表“Running＋本地 ready”是目标判据；当前 R1/R2 的成功确认只到 SCM `Running`（`windows.rs` `start_existing` 注释即写明“确认 SCM 状态转换，不宣称远端/应用就绪”），R3 例外，会额外做一次健康探测。后果是服务进程起来但注册/ID 未就绪时，R1 记成功并清空 `service_recovery_error`，不会再升级到 R3。而“文件存在但损坏”这条恢复条件尚未实现：R3/R4 只识别缺失，不比对内容，详见 7.4 节后的差距说明。
+
 ### 7.3 建议初始阈值
 
 以下为试点参数，必须用实际包测量后确认；服务端只可在客户端限定范围内调整。
@@ -285,6 +287,8 @@ API 401、403、429、5xx、DNS/TLS 故障使用网络专属退避，与本地�
 
 系统重启和时钟回拨不能重置动作预算。进程内超时使用单调时钟；跨重启日历时间异常时采取保守限速并上报，不能因时间错误跳过包验签或命令有效期检查。
 
+当前实现与本表对账：轻量服务恢复退避（30/120/300 秒，封顶后固定 3600 秒）、安装失败退避（5/15/30/60 分钟）已落地；健康稳定复位的判据是连续 `Running` 且 binpath 可信满 10 分钟，不是“连续 ready”。未落地的三项是“同目标熔断”（没有熔断态，封顶后无限重试）、“24 小时最多 3 次自动安装尝试”（没有次数上限）和“跨重启不重置预算”（只对 R1–R3 成立，自动 R4 worker 的预算在内存里，agent 重启即清零）。后果是后台看不到“已熔断”或“冷却至何时”，只能看到一个 `service_recovery_error` 字符串。补齐需要新增状态与生命周期规则，须维护者批准。
+
 ### 7.4 主程序救活阶梯与 fallback
 
 按故障类别选择恢复层级，每次动作重新检查前置条件、保存真实结果；成功后停止升级动作。网络或远端故障不进入文件重装链。
@@ -298,6 +302,16 @@ API 401、403、429、5xx、DNS/TLS 故障使用网络专属退避，与本地�
 | R4 | 现有安装均不可用，有批准离线包 | 本地包重新提取或修复安装 | 本地包损坏/不适用/失败则评估 R5 |
 | R5 | 需要重新取得包且网络可用 | API 精确解析；失败时使用预先批准的签名目标引用下载修复 | 同目标熔断；只允许另一个批准且兼容的目标 |
 | R6 | 允许路径均失败或被限制 | 保持 agent 管理、轻量观测、告警和条件重评估 | 不无限重装，不擅自重启整机或清空身份 |
+
+上表是目标阶梯。按 2026-10-23 只读核实，当前代码与它的差距只在下述范围，测试判据以差距说明为准：
+
+- R3/R4 与 agent 备份恢复只接受 MSI（`windows-x86_64-msi-*`），EXE 两包没有这些路径；四包矩阵里 EXE 的 R3/R4 用例应记 `NOT_APPLICABLE`。
+- R3 只识别主安装目录或 `RustDesk.exe` 缺失，不识别“文件在但内容被替换”；自动 R4 更进一步，只在整个 `C:\Program Files\RustDesk` 目录缺失时才触发。后果是主程序被换成长度/哈希不同的同名文件时，R1 会反复 `StartService`（30/120/300/3600 秒退避），R3 不切保底、R4 不触发，设备停在启动失败循环且没有降级路径；被替换的程序若能运行还会被当作可信服务拉起。两者口径不同，用例需分别构造。
+- R5 自动路径只取 manifest 的 `target.primary`，不读镜像；主 URL 404 后按 5/15/30/60 分钟退避重试同一 primary。而设备上存在 `rescue\current` 签名 bundle 时（MSI 首装后即存在），自动 R5 整体被跳过，只剩远程命令下载。镜像回退只在远程命令路径（`package_download::download`）生效。另外 R5 失败写的是 `agent.json` 的 `last_error`/`retry_stage`/`next_check_at`，这三项都不在状态上报 payload 里，后台看不到 404 原因，只能查本地文件或日志。
+- R6 没有熔断态、冷却期和告警事件：只有一个退避预算，30/120/300 秒后固定 3600 秒，无次数上限；自动 R4 worker 的预算只在内存，agent 重启即清零（同目标重做仍被 attempt 目录占用阻止）。后果是后台只能看到 `service_recovery_error` 文本和 rescue 快照，看不到“已熔断/冷却至何时/需要人工”。
+- 停滞看门狗与 Task Scheduler degraded 上报均未实现；`rescue.components.recovery_entry` 恒为 `not_assessed`。后果是主循环卡死后 R1–R5、上报和命令领取全部停摆，SCM 与 bootstrap 都看到 `Running` 而不动作，直到人工重启。
+
+以上差距中，“自动 R5 接入镜像回退”可复用现成函数、不新增状态；其余（R4→R5 阶梯跃迁、熔断状态、跨重启预算、篡改识别、EXE 恢复资产、停滞进度戳）都需要新增状态或新生命周期规则，按 AGENTS.md「Corner cases raised in review」须维护者批准后才实施。
 
 R0 是新增能力，通过 Windows 主程序薄 IPC 钩子复用已有注册重连路径，不修改固定服务器、公钥或认证。IPC 不可用时直接按可靠观测选择 R1/R2，不等它恢复。
 
@@ -404,6 +418,8 @@ boot_id 不是可排序时间戳。服务端以认证的启动会话记录当前
 | `POST /rd/update/v1/agent/package/resolve` | 精确解析批准恢复包 | 验证 edition、架构、包类型、命令与策略 |
 
 包解析应复用现有 release 选择纯逻辑，不要求已有安装必须有可比较版本；同版本修复允许返回安装载荷。不能直接套用“当前已是最新版本则无下载载荷”的主程序更新检查行为。
+
+当前本地恢复事件的枚举只有 R1/R3/R4（`local_events.rs` `RecoveryCode`），动作只有 `StartService/RestoreFallback/RepairInstallation`。R2 修复 binpath、R0 重连注册、自动 R5 下载安装、bootstrap 拉起/恢复 agent 都不发事件，只写 `agent.json` 或日志；R6 无独立状态。R2 有 `last_service_recovery_at` 状态投影，但投影不等于事件。扩展事件枚举属于协议与持久化格式变化（outbox 记录、后台枚举、旧后台兼容），每类事件还要引入新的 operation 生命周期，且需后台仓库 rd-api 配合，须维护者批准。
 
 所有响应 `Cache-Control: no-store`；命令响应限制为最多 20 项和 256 KiB。空队列返回 200＋空数组。分页必须能前进，不能让一个 unsupported 或长期运行的命令永久挡住后续诊断命令。
 
@@ -691,6 +707,14 @@ DTF 双服务正常停止是此入口的首要回归项，不能只测试 taskki
 
 建议放在 `C:\ProgramData\RustDesk\RecoveryBootstrap\`，与主 agent 和客户端分别管理。任务 SYSTEM 运行、开机及每 5 分钟触发、单实例、有界时限，无需桌面登录。
 
+上表有三行尚未实现，测试时按现状判：
+
+- “二进制缺失/损坏”只做了缺失：`bootstrap.rs` `run_once` 只在 `symlink_metadata` 返回 `NotFound` 时进入 `restore_missing_agent`；文件存在但哈希不符直接返回 `agent integrity unavailable; no start attempted`，既不启动也不替换。后果是 agent exe 被截断或覆盖后，SCM failure action 反复拉起坏 exe，bootstrap 每 5 分钟只记一行，agent 永久离线、主程序侧 R1–R4 全部停摆，直到人工删掉坏文件或重装。另需 MSI、同 build、门禁打开三个前提。把“哈希不符”并入现有 restore 路径会改变“拒绝启动”这一安全失败语义，须维护者批准。
+- “Running 但核心循环挂起”未实现：主循环是单线程 `recv_timeout(30s)`，没有进度戳、心跳或看门狗。后果同缺失恢复——进程不退出时 R1–R5、上报、命令领取全部停止，SCM 与 bootstrap 都只看到 `Running`。
+- “Task Scheduler 不可用”只实现了 SCM fallback：`rescue.components.recovery_entry` 恒为 `not_assessed`，不产生 degraded。后台无法区分“双入口正常”与“只剩 SCM”。只读探测计划任务并上报 degraded 不改变恢复动作，但要新增上报状态与判定规则，须维护者批准。
+
+这三行的共同点是都需要新状态或新生命周期规则，按 AGENTS.md「Corner cases raised in review」须维护者批准。
+
 - 只读取固定受管记录和可信本地资产，无远程命令接口、任意脚本参数或整机自动重启。
 - 本地彻底卸载和明确禁止 agent 运行优先；远程暂停客户端恢复不停止 agent。
 - 活跃事务期间不抢占 helper，只调用已有可信事务接续入口。
@@ -739,6 +763,8 @@ Authenticode 若使用，应是与既有签名发布能力匹配的额外检查�
 4. 下载域名整体不可达，转本地包/保底客户端；无可用资产则保留 agent 等待恢复。
 
 同域不同路径只能覆盖对象/路径故障，不能覆盖 DNS、证书或 OSS/CDN 整体故障。不为 fallback 私自改变 DOWNLOAD_BASE。真实跨域镜像需另行确认基础设施和允许域名，并完成签名与重定向验收。
+
+当前实现与第 3 步不一致：自动 R5 只请求 manifest 的 `target.primary`，不读 `target.mirrors`，主 URL 失败后按 5/15/30/60 分钟退避重试同一地址；设备上存在 `rescue\current` bundle 时自动 R5 整体不运行。后果是 primary 持续 404 时恢复动作每小时重试一次、永远不会用到同域备用路径或镜像，直到 primary 恢复或运维下发远程命令。补齐自动路径的镜像回退可复用现成下载函数，但“有 bundle 时 R4 失败后进入 R5”需要新的阶梯跃迁规则，须维护者批准。
 
 SSE 回退短轮询只能覆盖 broker/长连接故障，不能覆盖主 API 整体故障。本方案依靠本地自治覆盖控制面不可用。如果还要求主 API 宕机时后台继续远程操作，需要单独建设备用控制入口、数据一致性与命令防重，不能假装现有单入口已经具备。
 
@@ -905,7 +931,7 @@ eligible → package_verified → migration_prepared → client_updated
 
 ### 15.9 灰度门禁
 
-- 先在隔离 Windows VM 验证，再选少量可现场恢复设备。
+- 先在 win10-gs 真机验证（原隔离 VM 已停用、该机无快照，破坏性试验须先做完整备份并空跑恢复），再选少量可现场恢复设备。
 - 第一批每个 edition/包类型至少一台，观测 24 小时。
 - 再扩至约 5%，观测 48 小时；通过后扩至 25%，再全面开放。
 - 首先开启观测，再开启 service.start/repair，再开启安装恢复，最后开放 agent.update 和批量操作。
@@ -918,13 +944,13 @@ eligible → package_verified → migration_prepared → client_updated
 
 ### 16.1 必须先通过的可行性试验
 
-按先后在隔离 VM 用实际包验证下面三个试验，再扩展后台命令和全量页面。任何试验失败，先解决具体包链缺口，不假定能靠协议补救。
+按先后在 win10-gs 用实际包验证下面三个试验，再扩展后台命令和全量页面。任何试验失败，先解决具体包链缺口，不假定能靠协议补救。
 
 | 试验 | 必须证明 | 不通过时 |
 | --- | --- | --- |
 | POC-EXE | 实际旧 EXE 调用新包 `--update`，新入口首次停服前部署 helper/接续任务，运行中的 ProgramData agent 可替换 | 暂停 EXE 全能力迁移承诺，保留原更新行为 |
 | POC-MSI | 实际旧 MSI 升级永久 agent 组件，新旧版本规则及服务停止成功，无 Error 1921，自停止不死锁 | 修复 MSI 最小范围并重新跑旧包矩阵 |
-| POC-RESUME | 停止 agent 后杀 helper、VM 重启，任务恢复到明确终态且原身份不变 | 禁止开放自动安装与 agent.update |
+| POC-RESUME | 停止 agent 后杀 helper、win10-gs 重启，任务恢复到明确终态且原身份不变 | 禁止开放自动安装与 agent.update |
 
 试验代码和注入开关必须有测试构建边界；正式包不得暴露未授权故障注入入口。本方案估算以三个试验可通过为前提，不能用目前纯文档论证替代。
 
@@ -965,7 +991,7 @@ RustDesk 远控协议、固定配置、旧平台更新路径和旧更新命令�
 
 每个新行为先写并实际运行失败测试，再实现最小能力，再执行集成与真实包验收；“记录测试缺口”用于暴露尚未具备的验收资产，不能替代 TDD 红阶段。纯状态机用 Rust 单元测试；HTTP/SQLite 用本地 fixture；桌面与服务流程用实际 Windows 程序。业务分支覆盖率目标不低于 80%，空过滤器不算通过。
 
-能力—行为—测试编号—证据路径必须闭环；环境缺少音频/双屏/远控第二端/VM时是 BLOCKED，不是 NOT_APPLICABLE。代码开发机完成源码和候选构建测试，新机器执行实际包与故障 E2E，控制机保存外部证据。新机器仅安装产物时不重复要求拥有完整 Rust 编译链，但报告不能因此声称源码门禁已执行。
+能力—行为—测试编号—证据路径必须闭环；环境缺少音频/双屏/远控第二端/测试机时是 BLOCKED，不是 NOT_APPLICABLE。代码开发机完成源码和候选构建测试，新机器执行实际包与故障 E2E，控制机保存外部证据。新机器仅安装产物时不重复要求拥有完整 Rust 编译链，但报告不能因此声称源码门禁已执行。
 
 ### 17.2 必测矩阵
 
@@ -998,7 +1024,7 @@ RustDesk 远控协议、固定配置、旧平台更新路径和旧更新命令�
 - 迁移前后分别记录主程序 build、agent build、包类型、edition、ID、UUID、公钥指纹和后台绑定代次；任一身份或组件不一致，迁移失败。
 - 注入“主程序已替换但 agent 尚未替换”“agent 已替换但尚未登记”“bootstrap 已注册但新 agent 未启动”“MSI 3010/1618”“迁移中断后重启”，验证接续或回滚。
 - 服务恢复后发起真实远控连接，验证画面、键鼠、必要提权及断开；不是只调用 IPC。
-- 故障注入使用隔离 VM 和快照，不在生产设备做断电或破坏性试验。
+- 故障注入在 win10-gs 真机执行（原隔离 VM 已停用、该机无快照，须先做完整备份并空跑恢复），不在生产设备做断电或破坏性试验。
 - 老主程序不支持健康 IPC、安装协调时验证降级模式，确认没有误判挂起或抢占安装。
 
 ### 17.4 建议验收指标
@@ -1027,7 +1053,7 @@ RustDesk 远控协议、固定配置、旧平台更新路径和旧更新命令�
 
 ### 17.6 异地恢复组合故障验收
 
-以下必须使用真实构建的主程序、agent、helper 和 bootstrap 在隔离 Windows VM 上运行。每项记录动作顺序、fallback 层级、服务/运行版本、设备身份、最终远控结果和后台投影。
+以下必须使用真实构建的主程序、agent、helper 和 bootstrap 在 win10-gs 真机上运行。每项记录动作顺序、fallback 层级、服务/运行版本、设备身份、最终远控结果和后台投影。
 
 | 注入场景 | 必须走通的路径 | 成功标准 |
 | --- | --- | --- |
@@ -1066,7 +1092,7 @@ RustDesk 远控协议、固定配置、旧平台更新路径和旧更新命令�
 
 ### 18.2 工作量估算
 
-在熟悉两仓库、具备 Windows VM 和可用构建链的前提下，建议预留 25–45 个有效工程日完成开发、多层 fallback、启动器、首次迁移、故障注入与灰度准备；观察时间另计。这是范围估算，不是交付承诺。
+在熟悉两仓库、具备 win10-gs 真机和可用构建链的前提下，建议预留 25–45 个有效工程日完成开发、多层 fallback、启动器、首次迁移、故障注入与灰度准备；观察时间另计。这是范围估算，不是交付承诺。
 
 | 工作包 | 估算 |
 | --- | --- |
@@ -1097,7 +1123,7 @@ RustDesk 远控协议、固定配置、旧平台更新路径和旧更新命令�
 - [原始兜底需求](agent-recovery-design.zh.md)
 - [Windows agent 既有实测步骤](windows-agent-live-test.zh.md)
 - [MSI 历史修复交接](windows-management-agent-repair-handoff.zh.md)
-- [后台管理契约](../../rustdesk-api/docs/client-management-contract.md)
+- [后台管理契约](../../rd-api/docs/client-management-contract.md)
 - [Windows 服务 Pending 状态与进度](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_status_process)
 - [Windows Installer 返回码](https://learn.microsoft.com/en-us/windows/win32/msi/error-codes)
 - [Windows 服务失败恢复](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_failure_actionsa)

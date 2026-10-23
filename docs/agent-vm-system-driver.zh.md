@@ -1,5 +1,7 @@
 # VM SYSTEM 测试驱动
 
+> **2026-10-23 起停用**：原隔离 VM（RDLAB-WIN10/RDLAB-WIN11）已全部撤除，本文描述的 VM 环境不再存在，仅作历史记录。所有 Windows 真机测试改在 win10-gs 执行，现行规则见仓库 `AGENTS.md`「Windows 真机测试统一在 win10-gs」与 `docs/agent-recovery-test-runbook.zh.md`。
+
 ## 最新并行验收检查点（2026-10-14）
 
 ### 后续增量核验
