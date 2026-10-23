@@ -225,7 +225,41 @@ pub fn is_option_fixed(key: &str) -> bool {
 
 #[inline]
 pub fn get_local_option(key: String) -> String {
+    if base::update::is_global_check_on_startup_option(&key) {
+        return check_on_startup_option();
+    }
     crate::get_local_option(&key)
+}
+
+// Migrates a per-user value from older builds into the global Config once this
+// process can write the shared option map without clobbering the service's copy.
+fn check_on_startup_option() -> String {
+    base::update::resolve_check_on_startup_option(
+        &get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+        &LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+        option_synced(),
+        set_global_check_on_startup_option,
+        clear_legacy_check_on_startup_option,
+    )
+}
+
+fn set_global_check_on_startup_option(value: &str) {
+    set_option(
+        keys::OPTION_ENABLE_CHECK_UPDATE.to_owned(),
+        value.to_owned(),
+    );
+}
+
+fn clear_legacy_check_on_startup_option() {
+    LocalConfig::set_option(keys::OPTION_ENABLE_CHECK_UPDATE.to_owned(), String::new());
+}
+
+fn set_check_on_startup_option(value: String) {
+    base::update::store_check_on_startup_option(
+        &value,
+        set_global_check_on_startup_option,
+        clear_legacy_check_on_startup_option,
+    );
 }
 
 #[inline]
@@ -246,6 +280,10 @@ pub fn get_builtin_option(key: &str) -> String {
 
 #[inline]
 pub fn set_local_option(key: String, value: String) {
+    if base::update::is_global_check_on_startup_option(&key) {
+        set_check_on_startup_option(value);
+        return;
+    }
     LocalConfig::set_option(key.clone(), value);
 }
 

@@ -73,6 +73,28 @@ lazy_static::lazy_static! {
 static CONTROLLING_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
 static POLICY_STREAM_STARTED: AtomicBool = AtomicBool::new(false);
 
+// The origin of the update request currently being served, so the event pushed
+// to the local UI can say whether the person at the desk asked for it. Checks
+// run one at a time on the update loop, so a single slot is enough; the value is
+// only read while building the event for that same check.
+lazy_static::lazy_static! {
+    static ref CURRENT_UPDATE_ORIGIN: Mutex<String> = Mutex::new(String::new());
+}
+
+fn set_update_request_origin(origin: &str) {
+    if let Ok(mut slot) = CURRENT_UPDATE_ORIGIN.lock() {
+        slot.clear();
+        slot.push_str(origin);
+    }
+}
+
+fn update_request_origin() -> String {
+    CURRENT_UPDATE_ORIGIN
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_default()
+}
+
 /// Initial wait after startup before the first update check (30 seconds).
 pub const INITIAL_CHECK_DELAY: Duration = Duration::from_secs(30);
 
@@ -134,6 +156,9 @@ pub fn update_controlling_session_count(count: usize) {
 
 #[allow(dead_code)]
 pub fn start_auto_update() {
+    if !background_updater_runs_here() {
+        return;
+    }
     #[cfg(target_os = "windows")]
     ordinary_update_receipts::runtime::start();
     start_update_policy_stream();
@@ -198,7 +223,7 @@ fn apply_update_policy(policy: UpdatePolicy) {
     let scheduled_value = if policy.scheduled_update { "Y" } else { "N" };
     let scheduled_hours =
         normalize_scheduled_update_interval_hours(policy.scheduled_update_interval_hours);
-    config::LocalConfig::set_option(
+    config::Config::set_option(
         keys::OPTION_ENABLE_CHECK_UPDATE.to_owned(),
         check_value.to_owned(),
     );
@@ -372,6 +397,7 @@ enum UpdateCommandRunOutcome {
     Deferred,
     AwaitingInstallResult,
     Installed,
+    Refused,
 }
 
 fn load_pending_update_commands() -> Vec<UpdateCommandState> {
@@ -801,6 +827,72 @@ mod policy_stream_tests {
             UpdateCommandRunOutcome::AwaitingInstallResult,
             UpdateCommandRunOutcome::Installed
         );
+        assert_ne!(
+            UpdateCommandRunOutcome::Refused,
+            UpdateCommandRunOutcome::AwaitingInstallResult
+        );
+    }
+
+    // The local UI must be able to tell a desk-started update from a command or
+    // policy one; a time window cannot, because both can be in flight at once.
+    #[test]
+    fn local_update_event_payload_carries_the_request_origin() {
+        let event = super::local_update_event_payload(
+            "failed",
+            "1.5.4",
+            2026102401,
+            "primary",
+            "manual",
+            "https://download.yan.life/x".to_owned(),
+        );
+        assert_eq!(event["name"], "software_update_event");
+        assert_eq!(event["status"], "failed");
+        assert_eq!(event["request_origin"], "manual");
+        assert_eq!(event["url"], "https://download.yan.life/x");
+
+        let remote = super::local_update_event_payload(
+            "failed",
+            "1.5.4",
+            2026102401,
+            "primary",
+            "command_install",
+            String::new(),
+        );
+        assert_eq!(remote["request_origin"], "command_install");
+        assert_ne!(remote["request_origin"], "manual");
+    }
+
+    // Every event pushed during a check must carry that check's origin, so the
+    // reader can decide without a time window.
+    #[test]
+    fn the_request_origin_is_stored_and_read_back() {
+        super::set_update_request_origin("command_install");
+        assert_eq!(super::update_request_origin(), "command_install");
+        super::set_update_request_origin("manual");
+        assert_eq!(super::update_request_origin(), "manual");
+    }
+
+    // A manual check that fails after the update URL is known must still end the
+    // pending local request; background checks keep failing silently.
+    #[test]
+    fn only_manual_check_failures_emit_a_failed_update_event() {
+        let mut statuses = Vec::new();
+        report_manual_update_check_failure(true, true, |status| statuses.push(status));
+        assert_eq!(statuses, vec!["failed"]);
+        for (manually, url_known) in [(false, true), (false, false)] {
+            let mut statuses = Vec::new();
+            report_manual_update_check_failure(manually, url_known, |status| statuses.push(status));
+            assert!(statuses.is_empty());
+        }
+    }
+
+    // Before the URL is known the check itself failed and its finish event already
+    // carries the error text; a failed status on top would overwrite it.
+    #[test]
+    fn manual_check_failure_before_the_url_keeps_the_check_error() {
+        let mut statuses = Vec::new();
+        report_manual_update_check_failure(true, false, |status| statuses.push(status));
+        assert!(statuses.is_empty());
     }
 
     #[test]
@@ -991,7 +1083,97 @@ fn has_no_controlling_conns() -> bool {
     true
 }
 
+// Without an owning service, a remote, policy or startup install from this process
+// would raise UAC (Windows `runas`) or the macOS administrator password prompt.
+// Such installs fail with a fixed error code and only leave a log line. The command
+// terminal is persisted here, so the caller reports nothing further for it.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn remote_install_needs_refused_elevation(
+    manually: bool,
+    command: Option<&UpdateCommand>,
+    version: &str,
+    build_seq: u64,
+) -> bool {
+    #[cfg(target_os = "windows")]
+    let elevated =
+        crate::platform::is_root() || crate::platform::is_elevated(None).unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    let elevated = crate::platform::is_root();
+    let manual = !base::update::update_is_remote(manually, command.is_some());
+    if base::update::remote_install_may_request_elevation(manual, elevated) {
+        return false;
+    }
+    let code = base::update::ELEVATION_REQUIRED_REMOTE;
+    log::warn!("Remote update install to {version} refused: {code}");
+    static REFUSAL_REPORTED: AtomicBool = AtomicBool::new(false);
+    if base::update::should_report_refused_elevation(
+        command.is_some(),
+        command.is_none() && REFUSAL_REPORTED.swap(true, Ordering::SeqCst),
+    ) {
+        report_update_event_with_origin_and_error(
+            "failed",
+            crate::VERSION,
+            crate::BUILD_SEQ,
+            version,
+            build_seq,
+            "none",
+            code,
+        );
+    }
+    if let Some(command) = command {
+        persist_and_report_update_command_terminal(command, "failed", code);
+    }
+    true
+}
+
+fn background_updater_runs_here() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        base::update::process_runs_background_updater(
+            crate::platform::is_installed(),
+            crate::is_server(),
+            crate::platform::is_self_service_installed(),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let daemon = crate::platform::is_installed_daemon(false);
+        base::update::process_runs_background_updater(daemon, crate::platform::is_root(), daemon)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        true
+    }
+}
+
+// User-session process of an installed client: only the person at the desk can
+// start an update here; pending remote commands and timed checks belong to the
+// service and are neither replayed nor scheduled.
+fn start_manual_update_check() -> Sender<UpdateMsg> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut last_check_time = None;
+        let mut next_scheduled_check = None;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                UpdateMsg::CheckUpdate => run_update_check(
+                    true,
+                    "manual",
+                    &mut last_check_time,
+                    &mut next_scheduled_check,
+                ),
+                UpdateMsg::Exit => break,
+                _ => {}
+            }
+        }
+    });
+    tx
+}
+
 fn start_auto_update_check() -> Sender<UpdateMsg> {
+    if !background_updater_runs_here() {
+        return start_manual_update_check();
+    }
     let (tx, rx) = channel();
     let pending = load_pending_update_commands();
     let startup_tx = tx.clone();
@@ -1086,6 +1268,7 @@ fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
                                 schedule_update_command_retry(command.clone());
                             }
                             Ok(UpdateCommandRunOutcome::AwaitingInstallResult) => {}
+                            Ok(UpdateCommandRunOutcome::Refused) => {}
                             Ok(UpdateCommandRunOutcome::Installed) => {
                                 persist_and_report_update_command_terminal(
                                     &command,
@@ -1138,9 +1321,10 @@ fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
 }
 
 fn startup_update_enabled() -> bool {
-    should_run_startup_update(update_option_enabled(&config::LocalConfig::get_option(
-        keys::OPTION_ENABLE_CHECK_UPDATE,
-    )))
+    should_run_startup_update(base::update::check_on_startup_enabled(
+        &config::Config::get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+        &config::LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+    ))
 }
 
 fn should_check_on_connectivity_restored(check_on_startup: bool, scheduled_update: bool) -> bool {
@@ -1193,9 +1377,78 @@ fn run_update_check(
         }
         Err(err) => {
             log::error!("Error checking for updates: {err}");
+            report_manual_update_check_failure(
+                manually,
+                !crate::common::SOFTWARE_UPDATE_URL
+                    .lock()
+                    .unwrap()
+                    .is_empty(),
+                push_local_update_failed_event,
+            );
             *next_scheduled_check = Some(Instant::now() + RETRY_INTERVAL);
         }
     }
+}
+
+// A manual check that fails after the URL is known (contract, target or manifest
+// errors) has no failed event of its own, which would leave the local request
+// pending. Before the URL is known the check's finish event already carries the
+// error. Only the local UI is told: the backend keeps its existing events, and
+// paths that already reported `failed` would otherwise get a second copy there.
+fn report_manual_update_check_failure(
+    manually: bool,
+    url_known: bool,
+    emit: impl FnOnce(&'static str),
+) {
+    if manually && url_known {
+        emit("failed");
+    }
+}
+
+fn push_local_update_failed_event(status: &str) {
+    #[cfg(feature = "flutter")]
+    {
+        let (version, build_seq) = crate::common::SOFTWARE_UPDATE_RESPONSE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|response| (response.target_version.clone(), response.target_build_seq))
+            .unwrap_or_default();
+        let event = local_update_event_payload(
+            status,
+            &version,
+            build_seq,
+            "none",
+            "manual",
+            crate::common::SOFTWARE_UPDATE_URL.lock().unwrap().clone(),
+        );
+        let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, event.to_string());
+    }
+    #[cfg(not(feature = "flutter"))]
+    let _ = status;
+}
+
+// The local UI must be able to tell an update the person at the desk started
+// from one a command or policy started; only the former may fall back to the
+// browser. A time window cannot make that distinction, because both can be in
+// flight at once in the same process.
+fn local_update_event_payload(
+    status: &str,
+    version: &str,
+    build_seq: u64,
+    source: &str,
+    request_origin: &str,
+    url: String,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": "software_update_event",
+        "status": status,
+        "version": version,
+        "build_seq": build_seq,
+        "source": source,
+        "request_origin": request_origin,
+        "url": url,
+    })
 }
 
 fn schedule_update_command_retry(command: UpdateCommand) {
@@ -1227,11 +1480,13 @@ fn check_update_request(
         } else {
             "command"
         };
+        set_update_request_origin(request_origin);
         Some(do_check_software_update_with_context_result(
             request_origin,
             &command.command_id,
         )?)
     } else {
+        set_update_request_origin(request_origin);
         do_check_software_update_with_context(request_origin, "")?;
         None
     };
@@ -1327,6 +1582,12 @@ fn check_update_request(
         report_command_update_event(command, "deferred", "active_session");
         return Ok(UpdateCommandRunOutcome::Deferred);
     }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if should_install
+        && remote_install_needs_refused_elevation(manually, command, version, target_build_seq)
+    {
+        return Ok(UpdateCommandRunOutcome::Refused);
+    }
     report_update_event("started", version, target_build_seq, "none");
     let (file_path, source) = match download_verified_target(manifest, &target_key, &target) {
         Ok(downloaded) => downloaded,
@@ -1364,6 +1625,7 @@ fn check_update_request(
                 source,
                 &file_path,
                 command.map(|value| value.command_id.as_str()),
+                base::update::update_is_remote(manually, command.is_some()),
             )?;
             #[cfg(target_os = "windows")]
             if update_msi {
@@ -1971,15 +2233,15 @@ fn report_update_event_with_origin_and_error(
     error_code: &str,
 ) -> bool {
     #[cfg(feature = "flutter")]
-    {
-        let event = serde_json::json!({
-            "name": "software_update_event",
-            "status": status,
-            "version": version,
-            "build_seq": build_seq,
-            "source": source,
-            "url": crate::common::SOFTWARE_UPDATE_URL.lock().unwrap().clone(),
-        });
+    if base::update::update_event_reaches_local_ui(error_code) {
+        let event = local_update_event_payload(
+            status,
+            version,
+            build_seq,
+            source,
+            &update_request_origin(),
+            crate::common::SOFTWARE_UPDATE_URL.lock().unwrap().clone(),
+        );
         let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, event.to_string());
     }
     const EVENTS_URL: &str = "https://rdapi.yan.life/rd/update/v1/events";
@@ -2136,6 +2398,7 @@ fn update_new_version(
     source: &str,
     file_path: &PathBuf,
     command_id: Option<&str>,
+    remote: bool,
 ) -> ResultType<()> {
     log::debug!(
         "New version is downloaded, update begin, update msi: {update_msi}, version: {version}, file: {:?}",
@@ -2144,7 +2407,12 @@ fn update_new_version(
     if let Some(p) = file_path.to_str() {
         if let Some(session_id) = crate::platform::get_current_process_session_id() {
             if update_msi {
-                match crate::platform::update_me_msi(p, true) {
+                let installed = if remote {
+                    crate::platform::update_me_msi_remote(p)
+                } else {
+                    crate::platform::update_me_msi(p, true)
+                };
+                match installed {
                     Ok(_) => {
                         log::debug!("New version \"{}\" updated.", version);
                         report_update_event("installed", version, build_seq, source);
@@ -2175,7 +2443,8 @@ fn update_new_version(
                     },
                     command_id: command_id.map(str::to_owned),
                 };
-                let pending_args = pending_event.cli_args().join(" ");
+                let pending_args =
+                    base::update::update_launch_args(remote, &pending_event).join(" ");
                 let custom_client_staging_dir = if crate::is_custom_client() {
                     let custom_client_staging_dir =
                         crate::platform::get_custom_client_staging_dir();
@@ -2200,7 +2469,7 @@ fn update_new_version(
                 };
                 let update_launched = match crate::platform::launch_privileged_process(
                     session_id,
-                    &format!("{} --update {}", p, pending_args),
+                    &format!("{} {}", p, pending_args),
                 ) {
                     Ok(h) => {
                         if h.is_null() {

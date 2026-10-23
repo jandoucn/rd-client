@@ -392,6 +392,27 @@ mod tests {
             Some(PathBuf::from(r"C:\tmp\rustdesk"))
         );
     }
+
+    // A remote caller marks a silent install with `--remote-silent`; the packer must
+    // hand it to the extracted program untouched or the program would show its Toast.
+    #[test]
+    fn remote_silent_marker_reaches_the_extracted_program() {
+        let outer = std::path::Path::new(r"C:\lab\package.exe");
+        for args in [
+            vec!["--silent-install", "--remote-silent"],
+            vec!["--silent-install", "defender=1", "--remote-silent"],
+            vec!["--silent-install"],
+        ] {
+            let strings = args.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+            assert!(!super::update_args::is_transaction(&strings));
+            assert_eq!(
+                super::update_args::forwarded(&strings, outer),
+                args.iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }
 
 #[cfg(windows)]

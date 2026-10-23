@@ -28,3 +28,20 @@ fn silent_argument_parser_only_forwards_explicit_valid_values() {
     assert!(policy::silent_option(["--silent-install", "defender=2"]).is_err());
     assert!(policy::silent_option(["--silent-install", "defender=0", "defender=1"]).is_err());
 }
+
+#[test]
+fn remote_silent_marker_does_not_change_defender_choice() {
+    for (args, expected) in [
+        (vec!["--silent-install", "--remote-silent"], ""),
+        (
+            vec!["--silent-install", "defender=1", "--remote-silent"],
+            " defender=1",
+        ),
+        (
+            vec!["--silent-install", "--remote-silent", "defender=0"],
+            " defender=0",
+        ),
+    ] {
+        assert_eq!(policy::silent_option(args).unwrap(), expected);
+    }
+}

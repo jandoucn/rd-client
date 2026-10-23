@@ -323,6 +323,46 @@ pub fn should_run_scheduled_update(scheduled_update: bool) -> bool {
     scheduled_update
 }
 
+// The startup-check switch lives in the machine-wide Config so the service that
+// runs the background updater sees what the UI stored. Older builds kept it in
+// the per-user LocalConfig; that copy only fills in while the global one is unset.
+pub fn is_global_check_on_startup_option(key: &str) -> bool {
+    key == crate::config::keys::OPTION_ENABLE_CHECK_UPDATE
+}
+
+pub fn check_on_startup_enabled(global: &str, legacy: &str) -> bool {
+    update_option_enabled(if global.is_empty() { legacy } else { global })
+}
+
+pub fn resolve_check_on_startup_option(
+    global: &str,
+    legacy: &str,
+    writable: bool,
+    write_global: impl FnOnce(&str),
+    clear_legacy: impl FnOnce(),
+) -> String {
+    if !global.is_empty() {
+        if writable && !legacy.is_empty() {
+            clear_legacy();
+        }
+        return global.to_owned();
+    }
+    if writable && !legacy.is_empty() {
+        write_global(legacy);
+        clear_legacy();
+    }
+    legacy.to_owned()
+}
+
+pub fn store_check_on_startup_option(
+    value: &str,
+    write_global: impl FnOnce(&str),
+    clear_legacy: impl FnOnce(),
+) {
+    write_global(value);
+    clear_legacy();
+}
+
 pub fn parse_update_policy_sse_event(event: &str) -> anyhow::Result<Option<UpdatePolicy>> {
     match parse_update_stream_sse_event(event)? {
         Some(UpdateStreamEvent::Policy(policy)) => Ok(Some(policy)),
@@ -963,6 +1003,88 @@ impl PendingUpdateEvent {
     }
 }
 
+// Marks an install or update started by the backend or by policy rather than by the
+// person at the desk. Such runs must stay completely silent; only their logs remain.
+pub const REMOTE_SILENT_ARG: &str = "--remote-silent";
+
+pub fn update_is_remote(manually: bool, has_command: bool) -> bool {
+    has_command || !manually
+}
+
+// The marker goes right after `--update`: the pending event that follows is parsed
+// by position and may end with an empty command id, so anything appended after it
+// would be read as that id.
+pub fn update_launch_args(remote: bool, pending: &PendingUpdateEvent) -> Vec<String> {
+    let mut args = vec!["--update".to_owned()];
+    if remote {
+        args.push(REMOTE_SILENT_ARG.to_owned());
+    }
+    args.extend(pending.cli_args());
+    args
+}
+
+pub fn is_remote_silent(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == REMOTE_SILENT_ARG)
+}
+
+// Where the installed system service runs the updater, it alone owns the policy
+// stream, remote commands and automatic checks. A user-session process repeating
+// them would run the same remote command a second time, with UAC and windows.
+// An installed client whose service was removed (stop-service) has no such owner,
+// so its user process keeps the full loop.
+pub fn process_runs_background_updater(
+    installed: bool,
+    is_service_process: bool,
+    service_present: bool,
+) -> bool {
+    is_service_process || !(installed && service_present)
+}
+
+// The UI sends the whole option map over IPC, so a schedule change is a change of
+// either schedule key between the old and the new map, not mere presence.
+pub fn update_schedule_options_changed(
+    old: &std::collections::HashMap<String, String>,
+    new: &std::collections::HashMap<String, String>,
+) -> bool {
+    use crate::config::keys::{
+        OPTION_ENABLE_SCHEDULED_UPDATE, OPTION_SCHEDULED_UPDATE_INTERVAL_HOURS,
+    };
+    [
+        OPTION_ENABLE_SCHEDULED_UPDATE,
+        OPTION_SCHEDULED_UPDATE_INTERVAL_HOURS,
+    ]
+    .iter()
+    .any(|key| old.get(*key) != new.get(*key))
+}
+
+pub fn update_main_window_fallback_session(current: Option<u32>, remote: bool) -> Option<u32> {
+    if remote {
+        None
+    } else {
+        current
+    }
+}
+
+// Reported when a remote, policy or startup install is refused because it would
+// have to raise UAC or an administrator password prompt to proceed.
+pub const ELEVATION_REQUIRED_REMOTE: &str = "elevation_required_remote";
+
+pub fn remote_install_may_request_elevation(manually: bool, already_elevated: bool) -> bool {
+    manually || already_elevated
+}
+
+// A remote refusal must stay silent at the desk: the backend and the log hear about
+// it, the local UI never sees a failure it did not start.
+pub fn update_event_reaches_local_ui(error_code: &str) -> bool {
+    error_code != ELEVATION_REQUIRED_REMOTE
+}
+
+// Non-command refusals recur every policy/startup/scheduled cycle with the same
+// cause; only the first one in this process is reported. A command always gets one.
+pub fn should_report_refused_elevation(has_command: bool, already_reported: bool) -> bool {
+    has_command || !already_reported
+}
+
 impl UpdateSource {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1198,6 +1320,69 @@ mod tests {
     use super::*;
     use hbb_common::{UpdateTarget, VersionCheckResponse};
     use std::{collections::HashMap, fs, io, path::PathBuf};
+
+    fn pending(command_id: Option<&str>) -> PendingUpdateEvent {
+        PendingUpdateEvent {
+            transaction_id: "a".repeat(32),
+            from_version: "1.5.3".to_owned(),
+            from_build_seq: 2026101805,
+            version: "1.5.4".to_owned(),
+            build_seq: 2026102201,
+            source: UpdateSource::Primary,
+            command_id: command_id.map(str::to_owned),
+        }
+    }
+
+    // Only the person at the desk starts a manual update; a backend command or a
+    // policy-driven check is remote even when it reuses the same code path.
+    #[test]
+    fn update_origin_is_remote_unless_started_manually_without_a_command() {
+        assert!(!update_is_remote(true, false));
+        assert!(update_is_remote(false, false));
+        assert!(update_is_remote(false, true));
+        assert!(update_is_remote(true, true));
+    }
+
+    // The pending event is parsed by position, and an empty command id is the last
+    // field, so the marker must never land where it could be read as the command id.
+    #[test]
+    fn remote_marker_never_shifts_the_positional_update_event() {
+        for command in [None, Some("c".repeat(32))] {
+            let event = pending(command.as_deref());
+            let remote = update_launch_args(true, &event);
+            assert_eq!(remote[0], "--update");
+            assert!(is_remote_silent(&remote));
+            assert_eq!(
+                PendingUpdateEvent::from_cli_args(&remote),
+                Some(event.clone())
+            );
+            let marker = remote
+                .iter()
+                .position(|arg| arg == REMOTE_SILENT_ARG)
+                .unwrap();
+            let start = remote
+                .iter()
+                .position(|arg| arg == "--update-event")
+                .unwrap();
+            assert!(marker < start, "{:?}", remote);
+            let local = update_launch_args(false, &event);
+            assert_eq!(local[0], "--update");
+            assert!(!is_remote_silent(&local));
+            assert_eq!(PendingUpdateEvent::from_cli_args(&local), Some(event));
+        }
+    }
+
+    #[test]
+    fn remote_marker_is_recognised_exactly() {
+        let args = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(is_remote_silent(&args(&[
+            "--silent-install",
+            "--remote-silent"
+        ])));
+        assert!(!is_remote_silent(&args(&["--silent-install"])));
+        assert!(!is_remote_silent(&args(&["--update", "--remote-silent-x"])));
+        assert!(!is_remote_silent(&args(&["--update", "x--remote-silent"])));
+    }
 
     fn temp_test_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1669,5 +1854,282 @@ mod tests {
         assert!(!downloaded.exists());
         assert!(!current.with_extension("old").exists());
         fs::remove_dir_all(dir).expect("test directory should be removed");
+    }
+
+    // Installed Windows/macOS with its service in place: the service owns every
+    // background update path, so user-session processes (main window, --cm,
+    // --install) stay out.
+    #[test]
+    fn background_updater_runs_only_in_the_service_when_the_service_is_enabled() {
+        assert!(process_runs_background_updater(true, true, true));
+        assert!(!process_runs_background_updater(true, false, true));
+    }
+
+    // Portable or not-yet-installed builds have no service; an installed client
+    // whose service was stopped (stop-service, service deleted) has nobody else
+    // to run policy, remote commands or timed checks, so the user process keeps them.
+    #[test]
+    fn background_updater_keeps_running_in_process_without_an_enabled_service() {
+        assert!(process_runs_background_updater(false, false, true));
+        assert!(process_runs_background_updater(false, false, false));
+        assert!(process_runs_background_updater(true, false, false));
+        assert!(process_runs_background_updater(false, true, true));
+    }
+
+    fn options(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    // The service must recompute its timer when the user edits the schedule in the
+    // UI; the options map arrives whole over IPC, so only a real value change counts.
+    #[test]
+    fn update_schedule_change_is_detected_for_either_schedule_key() {
+        use crate::config::keys::{
+            OPTION_ENABLE_SCHEDULED_UPDATE as ENABLE,
+            OPTION_SCHEDULED_UPDATE_INTERVAL_HOURS as HOURS,
+        };
+        let old = options(&[(ENABLE, "Y"), (HOURS, "5"), ("other", "a")]);
+        assert!(update_schedule_options_changed(
+            &old,
+            &options(&[(ENABLE, "N"), (HOURS, "5"), ("other", "a")])
+        ));
+        assert!(update_schedule_options_changed(
+            &old,
+            &options(&[(ENABLE, "Y"), (HOURS, "8"), ("other", "a")])
+        ));
+        assert!(update_schedule_options_changed(
+            &old,
+            &options(&[(HOURS, "5"), ("other", "a")])
+        ));
+        assert!(update_schedule_options_changed(
+            &options(&[]),
+            &options(&[(ENABLE, "Y")])
+        ));
+    }
+
+    #[test]
+    fn unrelated_option_changes_do_not_touch_the_update_schedule() {
+        use crate::config::keys::{
+            OPTION_ENABLE_SCHEDULED_UPDATE as ENABLE,
+            OPTION_SCHEDULED_UPDATE_INTERVAL_HOURS as HOURS,
+        };
+        let old = options(&[(ENABLE, "Y"), (HOURS, "5"), ("other", "a")]);
+        assert!(!update_schedule_options_changed(&old, &old.clone()));
+        assert!(!update_schedule_options_changed(
+            &old,
+            &options(&[(ENABLE, "Y"), (HOURS, "5"), ("other", "b")])
+        ));
+        assert!(!update_schedule_options_changed(
+            &options(&[]),
+            &options(&[])
+        ));
+    }
+
+    // A remote update must not bring up a main window that was not running; a
+    // local update keeps restoring into the updater's own session as before.
+    #[test]
+    fn remote_update_never_falls_back_to_restoring_the_main_window() {
+        assert_eq!(update_main_window_fallback_session(Some(3), false), Some(3));
+        assert_eq!(update_main_window_fallback_session(None, false), None);
+        assert_eq!(update_main_window_fallback_session(Some(3), true), None);
+        assert_eq!(update_main_window_fallback_session(None, true), None);
+    }
+
+    // Remote commands, policy and startup installs must never raise UAC or an
+    // administrator password prompt; only an already privileged process may proceed.
+    #[test]
+    fn remote_install_never_requests_elevation_from_an_unprivileged_process() {
+        assert!(!remote_install_may_request_elevation(false, false));
+        assert!(remote_install_may_request_elevation(false, true));
+    }
+
+    // The person at the desk keeps the existing UAC / password prompt.
+    #[test]
+    fn manual_install_keeps_requesting_elevation() {
+        assert!(remote_install_may_request_elevation(true, false));
+        assert!(remote_install_may_request_elevation(true, true));
+    }
+
+    // A refused remote install stays completely silent at the desk: the backend
+    // and the log hear about it, the local UI does not.
+    #[test]
+    fn refused_remote_elevation_never_reaches_the_local_ui() {
+        assert!(!update_event_reaches_local_ui(ELEVATION_REQUIRED_REMOTE));
+        for code in ["", "all_sources_failed", "install_failed", "active_session"] {
+            assert!(update_event_reaches_local_ui(code), "{}", code);
+        }
+    }
+
+    // A backend command gets its own terminal every time; a policy, startup or
+    // scheduled refusal repeats each cycle with the same cause and is sent once.
+    #[test]
+    fn refused_elevation_is_reported_once_unless_a_command_asked() {
+        assert!(should_report_refused_elevation(false, false));
+        assert!(!should_report_refused_elevation(false, true));
+        assert!(should_report_refused_elevation(true, false));
+        assert!(should_report_refused_elevation(true, true));
+    }
+
+    // The backend stores error_code in a bounded column and only accepts [a-z_].
+    #[test]
+    fn remote_elevation_refusal_code_fits_the_backend_error_code_contract() {
+        assert!(ELEVATION_REQUIRED_REMOTE.len() <= 128);
+        assert!(ELEVATION_REQUIRED_REMOTE
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b == b'_'));
+    }
+
+    fn resolve_recorded(global: &str, legacy: &str, writable: bool) -> (String, Vec<String>) {
+        let mut writes = Vec::new();
+        let value = {
+            let writes = std::cell::RefCell::new(&mut writes);
+            resolve_check_on_startup_option(
+                global,
+                legacy,
+                writable,
+                |v| writes.borrow_mut().push(format!("global={}", v)),
+                || writes.borrow_mut().push("legacy=cleared".to_owned()),
+            )
+        };
+        (value, writes)
+    }
+
+    #[test]
+    fn check_on_startup_reads_the_global_value_first() {
+        assert_eq!(resolve_recorded("Y", "", true), ("Y".to_owned(), vec![]));
+        assert_eq!(resolve_recorded("N", "", false), ("N".to_owned(), vec![]));
+    }
+
+    // The global value is the only source of truth; a stale per-user copy left
+    // next to it is retired so it can never come back once the global is cleared.
+    #[test]
+    fn check_on_startup_global_value_retires_a_stale_legacy_copy() {
+        assert_eq!(
+            resolve_recorded("N", "Y", true),
+            ("N".to_owned(), vec!["legacy=cleared".to_owned()])
+        );
+        assert_eq!(resolve_recorded("N", "Y", false), ("N".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn check_on_startup_migrates_the_legacy_user_value_once() {
+        assert_eq!(
+            resolve_recorded("", "Y", true),
+            (
+                "Y".to_owned(),
+                vec!["global=Y".to_owned(), "legacy=cleared".to_owned()]
+            )
+        );
+        assert_eq!(
+            resolve_recorded("", "N", true),
+            (
+                "N".to_owned(),
+                vec!["global=N".to_owned(), "legacy=cleared".to_owned()]
+            )
+        );
+    }
+
+    // A process that cannot write the global config yet (for example a UI whose
+    // option cache has not synced with the service) keeps the old value and
+    // leaves the legacy copy for a later migration.
+    #[test]
+    fn check_on_startup_keeps_the_legacy_value_without_writing_when_not_writable() {
+        assert_eq!(resolve_recorded("", "Y", false), ("Y".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn check_on_startup_stays_disabled_by_default() {
+        let (value, writes) = resolve_recorded("", "", true);
+        assert_eq!(value, "");
+        assert!(writes.is_empty());
+        assert!(!update_option_enabled(&value));
+    }
+
+    #[test]
+    fn storing_check_on_startup_writes_global_and_drops_the_legacy_copy() {
+        for value in ["Y", "N", ""] {
+            let mut writes = Vec::new();
+            {
+                let writes = std::cell::RefCell::new(&mut writes);
+                store_check_on_startup_option(
+                    value,
+                    |v| writes.borrow_mut().push(format!("global={}", v)),
+                    || writes.borrow_mut().push("legacy=cleared".to_owned()),
+                );
+            }
+            assert_eq!(
+                writes,
+                vec![format!("global={}", value), "legacy=cleared".to_owned()]
+            );
+        }
+    }
+
+    // The service decides the startup check from what the UI stored globally,
+    // whatever its own per-user copy says; the legacy copy only fills a gap.
+    #[test]
+    fn service_startup_check_follows_the_value_the_ui_stored() {
+        for (global, legacy, enabled) in [
+            ("Y", "", true),
+            ("Y", "N", true),
+            ("N", "Y", false),
+            ("", "Y", true),
+            ("", "N", false),
+            ("", "", false),
+        ] {
+            assert_eq!(
+                check_on_startup_enabled(global, legacy),
+                enabled,
+                "global={:?} legacy={:?}",
+                global,
+                legacy
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_check_on_startup_key_is_routed_to_the_global_config() {
+        use crate::config::keys::{KEYS_LOCAL_SETTINGS, OPTION_ENABLE_CHECK_UPDATE};
+        assert!(is_global_check_on_startup_option(
+            OPTION_ENABLE_CHECK_UPDATE
+        ));
+        for key in KEYS_LOCAL_SETTINGS
+            .iter()
+            .filter(|k| **k != OPTION_ENABLE_CHECK_UPDATE)
+        {
+            assert!(!is_global_check_on_startup_option(key), "{}", key);
+        }
+        assert!(!is_global_check_on_startup_option(""));
+    }
+
+    // Portable or service-less: the global Config is in this very process, so the
+    // migrated value is read straight back and nothing is migrated twice.
+    #[test]
+    fn portable_process_migrates_once_and_reads_its_own_global_value_back() {
+        let mut global = String::new();
+        let mut legacy = "Y".to_owned();
+        for _ in 0..2 {
+            let (g, l) = (global.clone(), legacy.clone());
+            let mut new_global = None;
+            let mut cleared = false;
+            let value = resolve_check_on_startup_option(
+                &g,
+                &l,
+                true,
+                |v| new_global = Some(v.to_owned()),
+                || cleared = true,
+            );
+            assert_eq!(value, "Y");
+            if let Some(v) = new_global {
+                global = v;
+            }
+            if cleared {
+                legacy.clear();
+            }
+        }
+        assert_eq!((global.as_str(), legacy.as_str()), ("Y", ""));
+        assert!(check_on_startup_enabled(&global, &legacy));
     }
 }

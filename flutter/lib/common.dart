@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
@@ -4273,10 +4274,16 @@ Future<void> startAndroidVerifiedUpdate(Map<String, dynamic> event) async {
       key: kAndroidUpdateInstallResult,
       value: jsonEncode(result),
     );
-    await openUpdateFailureFallback(
-      result,
-      fallbackUrl: stateGlobal.updateUrl.value,
-    );
+    // An Android install can be started from the desk or by a remote command or
+    // policy. Only the former may fall back to the browser; the response is the
+    // same either way, so the origin has to come from the request that is still
+    // in flight rather than from the event.
+    if (applyLocalUpdateEvent(result)) {
+      await openUpdateFailureFallback(
+        result,
+        fallbackUrl: stateGlobal.updateUrl.value,
+      );
+    }
   }
 }
 
@@ -4295,27 +4302,43 @@ Future<void> consumePendingAndroidUpdateReady() async {
   }
 }
 
+// Extracted so the wiring can be driven directly by a test: what matters here
+// is that a remote failure is dropped before anything opens a browser.
+void handleCheckSoftwareUpdateFinish(Map<String, dynamic> evt) {
+  updateUiState.applyCheckResult(evt);
+  applyLocalUpdateCheckEvent(evt);
+  stateGlobal.updateUrl.value = updateUiState.updateUrl.value;
+  stateGlobal.updateStatus.value = softwareUpdateCheckStatus(
+    error: updateUiState.error.value,
+    updateUrl: stateGlobal.updateUrl.value,
+  );
+}
+
+Future<void> handleSoftwareUpdateEvent(
+  Map<String, dynamic> evt, {
+  Future<void> Function(Map<String, dynamic>, {String fallbackUrl}) openFallback =
+      openUpdateFailureFallback,
+}) async {
+  if (evt['status'] is String) {
+    stateGlobal.updateStatus.value = evt['status'];
+  }
+  if (!applyLocalUpdateEvent(evt)) return;
+  await openFallback(
+    evt,
+    fallbackUrl: stateGlobal.updateUrl.value,
+  );
+}
+
 void checkUpdate() {
   if (!isWeb) {
     platformFFI.registerEventHandler(
         kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,
         (Map<String, dynamic> evt) async {
-      updateUiState.applyCheckResult(evt);
-      stateGlobal.updateUrl.value = updateUiState.updateUrl.value;
-      stateGlobal.updateStatus.value = softwareUpdateCheckStatus(
-        error: updateUiState.error.value,
-        updateUrl: stateGlobal.updateUrl.value,
-      );
+      handleCheckSoftwareUpdateFinish(evt);
     });
     platformFFI.registerEventHandler(kSoftwareUpdateEvent, kSoftwareUpdateEvent,
         (Map<String, dynamic> evt) async {
-      if (evt['status'] is String) {
-        stateGlobal.updateStatus.value = evt['status'];
-      }
-      await openUpdateFailureFallback(
-        evt,
-        fallbackUrl: stateGlobal.updateUrl.value,
-      );
+      await handleSoftwareUpdateEvent(evt);
     });
     if (isAndroid) {
       platformFFI.registerEventHandler(

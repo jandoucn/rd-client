@@ -261,12 +261,19 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
             self.assertIn(f'report_command_update_event(command, "{status}", "")', updater)
         self.assertIn("fn report_pending_update_terminal_with_error(", updater)
         self.assertIn("persist_and_report_update_command_terminal(", updater)
+        # The refusal reports the command terminal itself; the loop adds none.
+        self.assertIn("Ok(UpdateCommandRunOutcome::Refused) => {}", updater)
+        self.assertIn("return Ok(UpdateCommandRunOutcome::Refused);", updater)
 
     def test_installed_updates_relaunch_windows_and_macos_clients(self):
         windows = (ROOT / "src/updater.rs").read_text()
         macos = (ROOT / "src/platform/macos.rs").read_text()
         self.assertIn('launch_privileged_process(', windows)
-        self.assertIn('"{} --update {}"', windows)
+        self.assertIn("base::update::update_launch_args(remote, &pending_event)", windows)
+        self.assertIn('"{} {}", p, pending_args', windows)
+        self.assertNotIn('"{} --update {}", p, pending_args', windows)
+        update = (ROOT / "libs/base/src/update.rs").read_text()
+        self.assertIn('let mut args = vec!["--update".to_owned()];', update)
         self.assertIn(
             'launchctl asuser "$gui_uid" /usr/bin/open -a "{app_bundle}"', macos
         )

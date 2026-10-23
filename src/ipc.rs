@@ -1037,7 +1037,19 @@ async fn handle(data: Data, stream: &mut Connection) {
                 if let Some(v) = value.get("privacy-mode-impl-key") {
                     crate::privacy_mode::switch(v);
                 }
+                #[cfg(target_os = "windows")]
+                let schedule_before = (crate::platform::is_installed() && crate::is_server())
+                    .then(Config::get_options);
                 Config::set_options(value);
+                #[cfg(target_os = "windows")]
+                if let Some(before) = schedule_before {
+                    if base::update::update_schedule_options_changed(
+                        &before,
+                        &Config::get_options(),
+                    ) {
+                        crate::updater::update_schedule_changed();
+                    }
+                }
                 allow_err!(stream.send(&Data::Options(None)).await);
             }
         },

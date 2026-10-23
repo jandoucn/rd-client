@@ -347,6 +347,11 @@ pub fn core_main() -> Option<Vec<String>> {
                         "Update failed!".to_string()
                     }
                 };
+                // Started by the backend or by policy: stay silent, the log is the record.
+                if base::update::is_remote_silent(&args) {
+                    log::info!("Remote update finished: {text}");
+                    return None;
+                }
                 Toast::new(Toast::POWERSHELL_APP_ID)
                     .title(&config::APP_NAME.read().unwrap())
                     .text1(&translate(text))
@@ -380,6 +385,13 @@ pub fn core_main() -> Option<Vec<String>> {
                 };
                 let options = format!("{options}{defender}");
                 let res = platform::install_me(&options, "".to_owned(), true, debug);
+                if base::update::is_remote_silent(&args) {
+                    match &res {
+                        Ok(_) => log::info!("Remote silent installation succeeded"),
+                        Err(err) => log::error!("Remote silent installation failed: {err}"),
+                    }
+                    return None;
+                }
                 let text = match res {
                     Ok(_) => translate("Installation Successful!".to_string()),
                     Err(err) => {

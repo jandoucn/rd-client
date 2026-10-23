@@ -3646,6 +3646,7 @@ pub fn update_me(debug: bool) -> ResultType<()> {
     // session as a fallback so the restore guard still brings back the tray and
     // main window after a successful replacement.
     let current_update_session = get_current_process_session_id();
+    let remote_update = base::update::is_remote_silent(&std::env::args().collect::<Vec<_>>());
     let main_window_pids =
         crate::platform::get_pids_of_process_with_args::<_, &str>(&app_exe_name, &[]);
     let main_window_sessions = update_restore_sessions(
@@ -3653,7 +3654,7 @@ pub fn update_me(debug: bool) -> ResultType<()> {
             .iter()
             .filter_map(|pid| get_session_id_of_process(pid.as_u32()))
             .collect(),
-        current_update_session,
+        base::update::update_main_window_fallback_session(current_update_session, remote_update),
     );
     kill_process_by_pids(&app_exe_name, main_window_pids)?;
     let tray_pids = crate::platform::get_pids_of_process_with_args(&app_exe_name, &["--tray"]);
@@ -4162,6 +4163,61 @@ pub fn update_me_msi(msi: &str, quiet: bool) -> ResultType<()> {
     Ok(())
 }
 
+// Remote/policy-initiated silent MSI update. It shows nothing, so its only trace
+// is a fixed verbose log, overwritten on each run and readable remotely by the
+// management agent. Local updates keep using `update_me_msi` unchanged.
+pub fn update_me_msi_remote(msi: &str) -> ResultType<()> {
+    let log = prepare_msi_update_log();
+    run_cmds(
+        remote_msi_update_cmds(msi, log.as_deref()),
+        false,
+        "update-msi",
+    )?;
+    Ok(())
+}
+
+fn remote_msi_update_cmds(msi: &str, log: Option<&Path>) -> String {
+    let log_args = log
+        .map(|log| format!(" /L*v \"{}\"", log.display()))
+        .unwrap_or_default();
+    format!("chcp 65001 && msiexec /i \"{msi}\" /qn LAUNCH_TRAY_APP=N{log_args} REBOOT=ReallySuppress /norestart\r\nset \"RD_MSI_EXIT=%errorlevel%\"\r\nif \"%RD_MSI_EXIT%\"==\"3010\" exit /b 0\r\nexit /b %RD_MSI_EXIT%")
+}
+
+fn msi_update_log_file(log_root: &Path) -> PathBuf {
+    log_root.join("msi-update").join("msi-update.log")
+}
+
+// msiexec aborts with 1622 when the log cannot be opened, so the log is only
+// requested once its directory exists and the file is writable. A missing
+// diagnostic must never fail the update itself.
+fn prepare_msi_update_log() -> Option<PathBuf> {
+    prepare_msi_update_log_in(&Config::log_path())
+}
+
+fn prepare_msi_update_log_in(log_root: &Path) -> Option<PathBuf> {
+    let log = msi_update_log_file(log_root);
+    if log.to_string_lossy().contains(['"', '%']) {
+        log::warn!("MSI update log path is not usable in a command line");
+        return None;
+    }
+    let directory = log.parent()?;
+    if let Err(error) = std::fs::create_dir_all(directory) {
+        log::warn!("MSI update log directory unavailable: {error}");
+        return None;
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        Ok(_) => Some(log),
+        Err(error) => {
+            log::warn!("MSI update log is not writable: {error}");
+            None
+        }
+    }
+}
+
 pub(crate) fn update_me_msi_receipt(transaction_id: &str, intent_sha256: &str) -> ResultType<()> {
     let commands = crate::updater::ordinary_update_receipts::runtime::runner_commands(transaction_id, intent_sha256)
         .map_err(|error| anyhow!(error))?;
@@ -4412,6 +4468,32 @@ fn get_uninstall_amyuni_idd() -> String {
 #[inline]
 pub fn is_self_service_running() -> bool {
     is_service_running(&crate::get_app_name())
+}
+
+// The service owns background updates whenever it is registered with the SCM, even
+// while it is briefly stopped and waiting for its failure-action restart. Only a
+// removed service (stop-service) hands them back to the user process. When the SCM
+// cannot be queried, fall back to whether the service is running right now.
+pub fn is_self_service_installed() -> bool {
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+    let name = crate::get_app_name();
+    let opened = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .and_then(|manager| {
+            manager.open_service(&name, windows_service::service::ServiceAccess::QUERY_STATUS)
+        });
+    match opened {
+        Ok(_) => true,
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
+        {
+            false
+        }
+        Err(error) => {
+            log::warn!("Failed to query service {name}: {error}");
+            is_self_service_running()
+        }
+    }
 }
 
 pub fn is_service_running(service_name: &str) -> bool {
@@ -5238,6 +5320,49 @@ ProcessId=10136
             arg,
         );
         assert_eq!(pids.len(), 0);
+    }
+
+    // Byte-for-byte the command `update_me_msi(msi, true)` builds at HEAD.
+    const LOCAL_QUIET_MSI: &str = "chcp 65001 && msiexec /i \"C:\\x\\a.msi\" /qn LAUNCH_TRAY_APP=N REBOOT=ReallySuppress /norestart\r\nset \"RD_MSI_EXIT=%errorlevel%\"\r\nif \"%RD_MSI_EXIT%\"==\"3010\" exit /b 0\r\nexit /b %RD_MSI_EXIT%";
+
+    #[test]
+    fn remote_msi_update_differs_from_local_only_by_the_fixed_log() {
+        assert_eq!(
+            super::remote_msi_update_cmds(r"C:\x\a.msi", None),
+            LOCAL_QUIET_MSI
+        );
+        let log = super::msi_update_log_file(Path::new(r"C:\logs"));
+        assert_eq!(log, Path::new(r"C:\logs\msi-update\msi-update.log"));
+        let remote = super::remote_msi_update_cmds(r"C:\x\a.msi", Some(&log));
+        assert_eq!(
+            remote,
+            LOCAL_QUIET_MSI.replace(
+                "LAUNCH_TRAY_APP=N ",
+                "LAUNCH_TRAY_APP=N /L*v \"C:\\logs\\msi-update\\msi-update.log\" "
+            )
+        );
+        assert!(!remote.contains("/L*v+"), "each run overwrites the log");
+        assert!(!LOCAL_QUIET_MSI.contains("/L"));
+    }
+
+    #[test]
+    fn msi_update_log_is_prepared_only_when_it_is_writable() {
+        let root = std::env::temp_dir().join(format!("msi-update-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let log =
+            super::prepare_msi_update_log_in(&root).expect("fresh log directory should be usable");
+        assert_eq!(log, root.join("msi-update").join("msi-update.log"));
+        assert!(log.is_file());
+        assert!(
+            !root.join("update").exists(),
+            "must not share the --update log directory"
+        );
+
+        let blocked = root.join("blocked");
+        std::fs::create_dir_all(blocked.join("msi-update").join("msi-update.log")).unwrap();
+        assert_eq!(super::prepare_msi_update_log_in(&blocked), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     const MANAGEMENT_AGENT_INSTALL_EXE: &str = r"C:\Program Files\RustDesk\RustDesk.exe";

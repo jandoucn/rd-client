@@ -1039,9 +1039,10 @@ fn add_runtime_inventory_fields(out: &mut serde_json::Value) {
     out["build_seq"] = json!(crate::BUILD_SEQ);
     out["source_commit"] = json!(crate::SOURCE_COMMIT);
     out["channel"] = json!(crate::CHANNEL);
-    out["enable_check_update"] = json!(update_option_enabled(&LocalConfig::get_option(
-        keys::OPTION_ENABLE_CHECK_UPDATE,
-    )));
+    out["enable_check_update"] = json!(base::update::check_on_startup_enabled(
+        &Config::get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+        &LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE),
+    ));
     out["allow_auto_update"] = json!(update_option_enabled(&Config::get_option(
         keys::OPTION_ALLOW_AUTO_UPDATE,
     )));
@@ -1181,7 +1182,7 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
+    let opt = crate::ui_interface::get_local_option(keys::OPTION_ENABLE_CHECK_UPDATE.to_owned());
     if update_option_enabled(&opt) {
         std::thread::spawn(move || allow_err!(do_check_software_update()));
     }
