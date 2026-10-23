@@ -1664,6 +1664,89 @@ fn get_after_install(
     )
 }
 
+const MANAGEMENT_AGENT_COPY_FAILED_EXIT_CODE: u32 = 0x5253_000C;
+const MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE: u32 = 0x5253_000D;
+
+// The bootstrap is a second copy of the agent binary, and `bootstrap.json` binds
+// that copy to the agent by SHA-256. `bootstrap::run_once` refuses to start the
+// agent when either hash differs, so an EXE overwrite that replaces only the
+// agent leaves the recovery chain silently dead: the scheduled task fails every
+// run and nothing restarts a crashed agent. MSI keeps the three in step through
+// its own preflight; `install_me` must do the same here.
+//
+// The manifest is edited rather than regenerated so the fields owned by the
+// bootstrap (schema, edition, package kind, install path) stay authoritative.
+// Re-registering the task is unnecessary: it points at the same path.
+const BOOTSTRAP_SYNC_SCRIPT: &str = r#"$ErrorActionPreference='Stop'
+try {
+  $root = Join-Path $env:PROGRAMDATA 'RustDesk\RecoveryBootstrap'
+  $manifest = Join-Path $root 'bootstrap.json'
+  $boot = Join-Path $root 'rustdesk-recovery-bootstrap.exe'
+  # The directory alone is not the signal: the agent creates it before it writes
+  # the manifest, so a first install can catch that window. Only a manifest that
+  # is already there means an older bootstrap needs to be carried forward.
+  if (Test-Path -LiteralPath $manifest) {
+    $agent = Join-Path $env:PROGRAMDATA 'RustDesk\ManagementAgent\rustdesk-management-agent.exe'
+    $hash = (Get-FileHash -LiteralPath $agent -Algorithm SHA256).Hash.ToLowerInvariant()
+    $copied = $false
+    for ($i = 0; $i -lt 30 -and -not $copied; $i++) {
+      try { [IO.File]::Copy($agent, $boot, $true); $copied = $true } catch { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $copied) { throw 'bootstrap copy failed; the recovery task may be running' }
+    try {
+      $data = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($manifest))
+    } catch {
+      # A manifest that cannot be parsed can never be repaired by the agent
+      # (`install` only verifies an existing directory), so replacing it is the
+      # only way back. The corrupt original is kept for diagnosis.
+      Move-Item -LiteralPath $manifest -Destination ($manifest + '.corrupt') -Force
+      throw ('bootstrap manifest unreadable, moved aside: ' + $_.Exception.Message)
+    }
+    $data.agent_sha256 = $hash
+    $staged = $manifest + '.new'
+    [IO.File]::WriteAllText($staged, (ConvertTo-Json -InputObject $data -Depth 5))
+    Move-Item -LiteralPath $staged -Destination $manifest -Force
+    if ((Get-FileHash -LiteralPath $boot -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw 'bootstrap copy hash mismatch' }
+  }
+  exit 0
+} catch {
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
+}"#;
+
+// `certutil` staging keeps the script out of cmd's 8191-character limit and out
+// of any quoting context, the same way the Defender configuration is staged.
+fn bootstrap_sync_commands() -> String {
+    use hbb_common::base64::{engine::general_purpose::STANDARD, Engine as _};
+    let encoded =
+        STANDARD.encode([&[0xef, 0xbb, 0xbf][..], BOOTSTRAP_SYNC_SCRIPT.as_bytes()].concat());
+    let mut commands = String::new();
+    for (index, chunk) in encoded.as_bytes().chunks(120).enumerate() {
+        let redirect = if index == 0 { ">" } else { ">>" };
+        commands.push_str(&format!(
+            "{redirect} \"%~f0.bootstrap.b64\" echo {}\r\n",
+            String::from_utf8_lossy(chunk)
+        ));
+    }
+    commands.push_str(concat!(
+        "certutil -f -decode \"%~f0.bootstrap.b64\" \"%~f0.bootstrap.ps1\" >nul\r\n",
+        "if errorlevel 1 (\r\n",
+        "    echo Failed to decode the bootstrap synchronization script. 1>&2\r\n",
+    ));
+    commands.push_str(&format!(
+        "    exit /b {MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE}\r\n)\r\n"
+    ));
+    commands.push_str(concat!(
+        "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass ",
+        "-File \"%~f0.bootstrap.ps1\"\r\n",
+    ));
+    commands.push_str(&format!(
+        "if errorlevel 1 (\r\n    echo Failed to keep the recovery bootstrap in step with the new agent. 1>&2\r\n    exit /b {MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE}\r\n)\r\n"
+    ));
+    commands
+}
+
 fn get_management_agent_install_commands(exe: &str) -> String {
     let Some(install_dir) = Path::new(exe).parent() else {
         return String::new();
@@ -1680,22 +1763,33 @@ fn get_management_agent_install_commands(exe: &str) -> String {
         r#"
 if exist "{source}" (
     md "%PROGRAMDATA%\RustDesk\ManagementAgent" 2>nul
-    copy /Y "{source}" "{destination}" >nul
     sc query RustDeskManagementAgent >nul 2>&1
     if not errorlevel 1 (
         sc stop RustDeskManagementAgent >nul 2>&1
-        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$s=Get-Service -Name 'RustDeskManagementAgent' -ErrorAction SilentlyContinue; if($s){{try{{$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}"
+        "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$s=Get-Service -Name 'RustDeskManagementAgent' -ErrorAction SilentlyContinue; if($s){{try{{$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(90))}}catch{{}}}}"
+    )
+    copy /Y "{source}" "{destination}" >nul
+    if errorlevel 1 (
+        echo Failed to replace the management agent binary, the old file is still in use. 1>&2
+        sc start RustDeskManagementAgent >nul 2>&1
+        exit /b {copy_failed}
+    )
+    sc query RustDeskManagementAgent >nul 2>&1
+    if not errorlevel 1 (
         sc config RustDeskManagementAgent binpath= "\"{destination}\" --service --edition {edition} --package-kind exe --normal-install-path \"{install_dir}\"" start= auto DisplayName= "RustDesk Management Agent"
     ) else (
         sc create RustDeskManagementAgent binpath= "\"{destination}\" --service --edition {edition} --package-kind exe --normal-install-path \"{install_dir}\"" start= auto DisplayName= "RustDesk Management Agent"
     )
     sc start RustDeskManagementAgent
 )
+{bootstrap_sync}
 "#,
         source = source,
         destination = destination,
         edition = edition,
         install_dir = install_dir,
+        copy_failed = MANAGEMENT_AGENT_COPY_FAILED_EXIT_CODE,
+        bootstrap_sync = bootstrap_sync_commands(),
     )
 }
 
@@ -5144,5 +5238,188 @@ ProcessId=10136
             arg,
         );
         assert_eq!(pids.len(), 0);
+    }
+
+    const MANAGEMENT_AGENT_INSTALL_EXE: &str = r"C:\Program Files\RustDesk\RustDesk.exe";
+
+    fn management_agent_install_script() -> String {
+        let commands = super::get_management_agent_install_commands(MANAGEMENT_AGENT_INSTALL_EXE);
+        assert!(
+            !commands.trim().is_empty(),
+            "an absolute install path must produce management agent install commands"
+        );
+        commands
+    }
+
+    fn offset_of(commands: &str, needle: &str) -> usize {
+        commands.find(needle).unwrap_or_else(|| {
+            panic!("`{needle}` is missing from the management agent install commands:\n{commands}")
+        })
+    }
+
+    #[test]
+    fn management_agent_service_is_stopped_before_its_binary_is_overwritten() {
+        let commands = management_agent_install_script();
+        let query = offset_of(&commands, "sc query RustDeskManagementAgent");
+        let stop = offset_of(&commands, "sc stop RustDeskManagementAgent");
+        let copy = offset_of(&commands, "copy /Y");
+        assert!(
+            query < stop,
+            "the service must be queried before it is stopped:\n{commands}"
+        );
+        assert!(
+            stop < copy,
+            "the running service holds the target binary, so it must be stopped before the copy:\n{commands}"
+        );
+    }
+
+    #[test]
+    fn management_agent_copy_failure_is_reported_and_aborts_the_install() {
+        let commands = management_agent_install_script();
+        let copy = offset_of(&commands, "copy /Y");
+        let failure_check = copy
+            + commands[copy..]
+                .find("if errorlevel 1")
+                .unwrap_or_else(|| panic!("the copy failure is swallowed:\n{commands}"));
+        let config = offset_of(&commands, "sc config RustDeskManagementAgent");
+        assert!(
+            failure_check < config,
+            "the copy errorlevel must be checked before the service is reconfigured:\n{commands}"
+        );
+
+        let exit_code = super::MANAGEMENT_AGENT_COPY_FAILED_EXIT_CODE;
+        assert_ne!(exit_code, 0, "a failed copy must not report success");
+        let exit_line = format!("exit /b {exit_code}");
+        let exit = offset_of(&commands, &exit_line);
+        assert!(
+            failure_check < exit && exit < config,
+            "the copy failure must exit with {exit_code} from inside its errorlevel branch:\n{commands}"
+        );
+        let failure_branch = &commands[failure_check..exit];
+        for forbidden in [
+            "sc stop RustDeskManagementAgent",
+            "sc config RustDeskManagementAgent",
+            "sc create RustDeskManagementAgent",
+        ] {
+            assert!(
+                !failure_branch.contains(forbidden),
+                "`{forbidden}` must not run after a failed copy:\n{commands}"
+            );
+        }
+        assert!(
+            failure_branch.contains("sc start RustDeskManagementAgent"),
+            "a failed copy must bring the stopped agent back, or the remote channel is lost:\n{commands}"
+        );
+    }
+
+    #[test]
+    fn management_agent_service_is_configured_or_created_after_the_copy() {
+        let commands = management_agent_install_script();
+        let copy = offset_of(&commands, "copy /Y");
+        let config = offset_of(&commands, "sc config RustDeskManagementAgent");
+        let create = offset_of(&commands, "sc create RustDeskManagementAgent");
+        let start = config
+            + commands[config..]
+                .find("sc start RustDeskManagementAgent")
+                .unwrap_or_else(|| {
+                    panic!("the service is never started after being reconfigured:\n{commands}")
+                });
+        assert!(
+            copy < config,
+            "an existing service must be reconfigured after its binary is replaced:\n{commands}"
+        );
+        assert!(
+            copy < create,
+            "a fresh install must create the service after its binary is copied:\n{commands}"
+        );
+        assert!(
+            config < start && create < start,
+            "the service must only be started once its binary is in place:\n{commands}"
+        );
+        let fresh_install_branch = offset_of(&commands, ") else (");
+        assert!(
+            fresh_install_branch < create && create < start,
+            "a fresh install must still create the service from the else branch:\n{commands}"
+        );
+    }
+
+    // The bootstrap is a copy of the agent binary and `bootstrap.json` pins it by
+    // hash. Replacing only the agent leaves `bootstrap::run_once` refusing to
+    // start anything, so the install must carry the bootstrap along.
+    #[test]
+    fn management_agent_install_keeps_the_recovery_bootstrap_in_step() {
+        let commands = management_agent_install_script();
+        let start = offset_of(&commands, "sc start RustDeskManagementAgent");
+        let decode = offset_of(&commands, "%~f0.bootstrap.b64");
+        let run = offset_of(&commands, "%~f0.bootstrap.ps1");
+        assert!(
+            start < decode,
+            "the bootstrap must be synchronized after the agent is in place:\n{commands}"
+        );
+        assert!(
+            decode < run,
+            "the staged bootstrap script must be decoded before it runs:\n{commands}"
+        );
+
+        let script = super::BOOTSTRAP_SYNC_SCRIPT;
+        for needle in [
+            "RecoveryBootstrap",
+            "rustdesk-recovery-bootstrap.exe",
+            "bootstrap.json",
+            "Get-FileHash",
+            "agent_sha256",
+        ] {
+            assert!(
+                script.contains(needle),
+                "the bootstrap synchronization must touch `{needle}`:\n{script}"
+            );
+        }
+        assert!(
+            script.contains("Copy($agent, $boot, $true)"),
+            "the new agent must overwrite the bootstrap copy:\n{script}"
+        );
+        // A manifest that cannot be trusted must stop the install rather than
+        // leave the recovery chain dead without anyone noticing.
+        assert!(
+            commands.contains(&format!(
+                "exit /b {}",
+                super::MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE
+            )),
+            "a failed bootstrap synchronization must fail the install:\n{commands}"
+        );
+        assert_ne!(
+            super::MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE,
+            0,
+            "a failed bootstrap synchronization must not report success"
+        );
+    }
+
+    // WIN10-GS EVIDENCE (2026-10-23): the upgrade stopped the agent, copied
+    // nothing, restarted the old agent and still reported success. The install
+    // script runs with a PATH narrowed to System32, where `powershell.exe` does
+    // not resolve, so the wait for the service to stop exited 9009 and the copy
+    // ran against a service that was still holding the binary. Every other
+    // PowerShell invocation in this file already uses the absolute path.
+    #[test]
+    fn management_agent_stop_wait_uses_an_absolute_powershell_path() {
+        let commands = management_agent_install_script();
+        let stop = offset_of(&commands, "sc stop RustDeskManagementAgent");
+        let copy = offset_of(&commands, "copy /Y");
+        let wait = commands[stop..copy]
+            .find("WaitForStatus")
+            .map(|index| index + stop)
+            .unwrap_or_else(|| {
+                panic!("the stop must be followed by a wait, or the copy races the service:\n{commands}")
+            });
+        let invocation = &commands[stop..wait];
+        assert!(
+            invocation.contains("\\WindowsPowerShell\\v1.0\\powershell.exe\""),
+            "the wait must invoke PowerShell by absolute path; the installer PATH is \
+             System32 only, so a bare `powershell.exe` exits 9009 and never waits:\n{commands}"
+        );
+        assert!(
+            !invocation.contains("\npowershell.exe") && !invocation.contains(" powershell.exe"),
+            "a bare `powershell.exe` cannot resolve under the narrowed installer PATH:\n{commands}"
+        );
     }
 }

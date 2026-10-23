@@ -168,6 +168,9 @@ fn elevated_install_failure_reason(exit_code: u32) -> &'static str {
             "failed to create the installer output directory"
         }
         BATCH_SHORTCUT_DECODE_FAILURE_EXIT_CODE => "failed to decode an embedded shortcut",
+        super::MANAGEMENT_AGENT_BOOTSTRAP_SYNC_FAILED_EXIT_CODE => {
+            "failed to keep the recovery bootstrap in step with the new agent"
+        }
         _ => "installer command failed",
     }
 }
