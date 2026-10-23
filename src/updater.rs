@@ -88,6 +88,8 @@ fn set_update_request_origin(origin: &str) {
     }
 }
 
+// Only the local UI event reads this, and that path is built with `flutter` alone.
+#[cfg_attr(not(feature = "flutter"), allow(dead_code))]
 fn update_request_origin() -> String {
     CURRENT_UPDATE_ORIGIN
         .lock()
@@ -1432,6 +1434,7 @@ fn push_local_update_failed_event(status: &str) {
 // from one a command or policy started; only the former may fall back to the
 // browser. A time window cannot make that distinction, because both can be in
 // flight at once in the same process.
+#[cfg_attr(not(feature = "flutter"), allow(dead_code))]
 fn local_update_event_payload(
     status: &str,
     version: &str,
