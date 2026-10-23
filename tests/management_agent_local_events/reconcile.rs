@@ -9,7 +9,7 @@ impl Fixture {
             std::env::var("RUSTDESK_R1_RECONCILE_TEST").as_deref(),
             Ok("scheduled")
         );
-        assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+        base::lab_guard::require_lab_os("win11");
         let base = PathBuf::from(std::env::var_os("RUSTDESK_LOCAL_EVENTS_ROOT").unwrap());
         assert!(base.is_absolute());
         let root = base.join(format!("r1-reconcile-{}", uuid::Uuid::new_v4()));

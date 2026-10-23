@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -notin @('RDLAB-WIN10','RDLAB-WIN11') -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'SYSTEM lab VM required'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'SYSTEM lab host required: set RUSTDESK_LAB_HOST to this COMPUTERNAME'}
 . $Source
 $root=Join-Path $env:TEMP ('msi-bootstrap-preflight-'+[guid]::NewGuid().ToString('N'))
 $count=0

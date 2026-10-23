@@ -304,7 +304,7 @@ fn full_loss_success_poll_php_persists_once() {
 
 #[test]
 fn full_loss_actual_worker_terminal_php_ack() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let event_root = PathBuf::from(r"C:\RustDeskAgentLab\total-loss-worker-events");
     let context: local_recovery_events::EventContext =
         serde_json::from_slice(&std::fs::read(event_root.join("context.json")).unwrap()).unwrap();
@@ -441,7 +441,7 @@ fn full_loss_actual_worker_terminal_php_ack() {
 
 #[test]
 fn full_loss_actual_pending_upload_only() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let fixture = PathBuf::from(r"C:\RustDeskAgentLab\event-upload-only");
     let source = fixture.join("evidence/event-evidence/poll-state-2340/local-events/events.json");
     let original = std::fs::read(&source).unwrap();

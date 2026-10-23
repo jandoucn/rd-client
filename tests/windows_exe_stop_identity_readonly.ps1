@@ -1,6 +1,6 @@
 param([string]$Output = "$PSScriptRoot\windows_exe_stop_identity_readonly.result.json")
 $ErrorActionPreference = 'Stop'
-if ($env:COMPUTERNAME -ne 'RDLAB-WIN10') { throw 'guest only' }
+if ((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10'))) { throw 'guest only' }
 $installed = 'C:\Program Files\RustDesk\RustDesk.exe'
 $rows = @(foreach ($candidate in Get-CimInstance Win32_Process -Filter "Name='RustDesk.exe'" -ErrorAction Stop) {
     $row = [ordered]@{ pid=$candidate.ProcessId; cimPath=$candidate.ExecutablePath; creationRaw=[string]$candidate.CreationDate; creationKind=$null; creationUtc=$null; creationTicks=$null; startRaw=$null; startKind=$null; startUtc=$null; startTicks=$null; mainModule=$null; missingCreation=(!$candidate.CreationDate); timeMismatch=$null; pathMismatch=$null; hasExited=$null; error=$null }

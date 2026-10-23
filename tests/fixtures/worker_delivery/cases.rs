@@ -9,7 +9,7 @@ mod state_store;
 #[test]
 #[ignore = "Win10 owner; real production worker scheduling, isolated prepare/layout boundaries"]
 fn t01_real_worker_must_deliver_available_exact_approval_before_prepare() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN10"));
+    base::lab_guard::require_lab_os("win10");
     assert_eq!(std::env::var("RUSTDESK_T01_PRODUCER").as_deref(), Ok("red-formal-sos-1501"));
     let root = std::path::Path::new(r"C:\RustDeskAgentLab")
         .join(format!("t01-worker-delivery-{}", uuid::Uuid::new_v4().simple()));

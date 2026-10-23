@@ -149,7 +149,7 @@ mod full_loss {
 }
 impl Case {
     fn new(phase: Phase) -> Self {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        base::lab_guard::require_lab_os("win11");
         let mut f = Fixture::new();
         hbb_common::sodiumoxide::init().unwrap();
         let (public, secret) = sign::gen_keypair();

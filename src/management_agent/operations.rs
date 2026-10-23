@@ -136,7 +136,16 @@ pub fn delivery(
 
 pub fn may_repeat_running(wire: &serde_json::Value) -> bool {
     execution_rejection(wire).is_none()
-        && matches!(wire["type"].as_str(), Some("service.inspect" | "package.verify" | "diagnostics.collect" | "network.probe"))
+        && matches!(
+            wire["type"].as_str(),
+            Some(
+                "service.inspect"
+                    | "package.verify"
+                    | "diagnostics.collect"
+                    | "network.probe"
+                    | "diagnostics.logs"
+            )
+        )
 }
 
 pub fn require_service_started(started: bool) -> Result<(), &'static str> {
@@ -170,6 +179,7 @@ pub fn execution_rejection(wire: &serde_json::Value) -> Option<&'static str> {
         "package.reinstall",
         "package.update",
         "agent.update",
+        "diagnostics.logs",
     ];
     if !wire["type"].as_str().is_some_and(|value| supported.contains(&value)) {
         return Some("unsupported");
@@ -217,6 +227,81 @@ mod execution_tests {
             execution_rejection(&serde_json::json!({"schema":1,"type_version":1,"type":"cmd.execute"})),
             Some("unsupported")
         );
+    }
+
+    fn signed(command_type: &str, args: serde_json::Value) -> serde_json::Value {
+        let payload = serde_json::json!({
+            "schema": 1, "id": "0123456789abcdef0123456789abcdef", "type": command_type,
+            "type_version": 1, "client_id": "device", "client_uuid": "uuid",
+            "agent_installation_id": "installation", "enrollment_generation": 3,
+            "created_at": 1000, "expires_at": 2000, "timeout_seconds": 60,
+            "preconditions": {"active_sessions": "defer"}, "args": args,
+        });
+        let digest = hex::encode(Sha256::digest(serde_json::to_vec(&payload).unwrap()));
+        let mut wire = payload;
+        wire["digest"] = digest.into();
+        wire["status"] = "pending".into();
+        wire["receipt_persisted"] = false.into();
+        wire
+    }
+
+    #[test]
+    fn diagnostics_logs_is_admitted_read_only_with_strict_arguments() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for args in [
+            serde_json::json!({"source":"agent"}),
+            serde_json::json!({"source":"msi-update"}),
+            serde_json::json!({"source":"transaction","transaction_id":id}),
+        ] {
+            let wire = signed("diagnostics.logs", args.clone());
+            assert_eq!(execution_rejection(&wire), None, "{args}");
+            assert!(command_envelope(&wire, "device", "uuid", "installation", 3).is_ok());
+            assert!(may_repeat_running(&wire), "{args}");
+        }
+        assert_eq!(activity_deferral("diagnostics.logs", Some(false)), None);
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!({"source":"agent","path":"C:\\Windows"}),
+            serde_json::json!({"source":"transaction"}),
+            serde_json::json!({"source":"agent","transaction_id":id}),
+            serde_json::json!({"source":"C:\\Windows\\System32\\config\\SAM"}),
+            serde_json::json!({"source":"transaction","transaction_id":"..\\..\\x"}),
+        ] {
+            let wire = signed("diagnostics.logs", args.clone());
+            assert_eq!(execution_rejection(&wire), Some("rejected"), "{args}");
+            assert!(!may_repeat_running(&wire), "{args}");
+        }
+    }
+}
+
+// Kept local because this file is also compiled standalone by integration tests;
+// diagnostic_logs::parse_args applies the same contract before any path is built.
+pub fn diagnostics_logs_args_valid(args: &serde_json::Value) -> bool {
+    let Some(object) = args.as_object() else {
+        return false;
+    };
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "source" | "transaction_id"))
+    {
+        return false;
+    }
+    let transaction = object.get("transaction_id");
+    match object.get("source").and_then(serde_json::Value::as_str) {
+        Some("transaction") => transaction
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }),
+        Some(
+            "agent" | "server" | "service" | "update" | "silent-install" | "install" | "msi-update"
+            | "recovery-msi",
+        ) => transaction.is_none(),
+        _ => false,
     }
 }
 
@@ -336,6 +421,10 @@ pub fn command_envelope(
             || !args.get("target_build_seq").and_then(serde_json::Value::as_u64).is_some_and(|build| build > 0)
             || args.get("allow_downgrade") != Some(&serde_json::Value::Bool(false)) {
             return Err("package command execution parameters invalid".into());
+        }
+    } else if envelope.command_type == "diagnostics.logs" {
+        if !diagnostics_logs_args_valid(&envelope.args) {
+            return Err("diagnostics.logs execution parameters invalid".into());
         }
     } else {
         return Err("command type unsupported by executor".into());

@@ -1,6 +1,6 @@
 # 真实 MSI 同域镜像回退 E2E
 
-仅在 Win10 `RDLAB-WIN10` / UUID `a6c9edff-6159-468f-bdba-08720a153424` 的 SYSTEM 任务中运行 `guest-agent-acceptance-mirror-e2e.ps1`。脚本在任何写入和执行之前校验名单与 SID；宿主只构建、传输、读取证据。
+仅在 `win10-gs` 的 SYSTEM 任务中运行 `guest-agent-acceptance-mirror-e2e.ps1`，运行前设置 `RUSTDESK_LAB_HOST` 为本机 `COMPUTERNAME`（`RUSTDESK_LAB_OS` 可选，设置时必须为 `win10`）。脚本在任何写入和执行之前校验 `RUSTDESK_LAB_HOST` 与 SID；宿主只构建、传输、读取证据。
 
 ## 固定测试前提
 

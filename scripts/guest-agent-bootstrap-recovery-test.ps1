@@ -11,8 +11,8 @@
 $ErrorActionPreference='Stop'
 $root='C:\RustDeskAgentLab'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if($env:COMPUTERNAME -notin @('RDLAB-WIN10','RDLAB-WIN11') -or $sid -ne 'S-1-5-18'){
-    throw '仅允许在指定隔离 VM 的 SYSTEM 环境执行'
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or $sid -ne 'S-1-5-18'){
+    throw '仅允许在 RUSTDESK_LAB_HOST 声明为本机 COMPUTERNAME 的 SYSTEM 环境执行'
 }
 if(!(Test-Path -LiteralPath $root -PathType Container)){throw '测试证据目录不存在'}
 $prefix=Join-Path $root $RunId

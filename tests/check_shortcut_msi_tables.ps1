@@ -1,6 +1,6 @@
 param([string]$PackageDirectory)
 $ErrorActionPreference='Stop'
-if ($env:COMPUTERNAME -ne 'RDLAB-WIN11') { throw 'Win11 only' }
+if ((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11'))) { throw 'Win11 only' }
 $installer=New-Object -ComObject WindowsInstaller.Installer
 $db=$installer.OpenDatabase((Join-Path $PackageDirectory 'fixture-2.0.0.msi'),0)
 function Rows($Sql) {

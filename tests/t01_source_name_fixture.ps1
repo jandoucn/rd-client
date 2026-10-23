@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$ExpectedMsiSha256,[switch]$ElevatedSnapshots,[string]$CollectSnapshot)
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11'){throw 'Win11 owner only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11'))){throw 'Win11 owner only'}
 $code='{127981AF-9DA4-4B73-A731-9E07CCCB0901}'
 $marker='HKCU:\Software\T01SourceNameFixture-A731'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -52,7 +52,7 @@ function Snapshot {
   if(!$collector.WaitForExit(60000)){throw 'Collector pending; inspect elevation and receipt before retry'}
   if(!(Test-Path -LiteralPath $output)){throw 'Collector receipt missing'}
   $s=Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
-  if(!$s.complete -or !$s.elevated -or $s.error -or $s.computer -ne 'RDLAB-WIN11'){throw 'Collector incomplete; preservation unknown'}
+  if(!$s.complete -or !$s.elevated -or $s.error -or $s.computer -ne $env:COMPUTERNAME){throw 'Collector incomplete; preservation unknown'}
   $hashes=@{};foreach($p in $paths){$v=$s.hashes.PSObject.Properties[$p].Value;if($v -ne 'ABSENT' -and $v -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Missing or invalid snapshot hash'};$hashes[$p]=$v}
   return @{hashes=$hashes;services=@($s.services);collector_receipt=$output}
  }

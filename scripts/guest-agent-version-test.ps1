@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Executable)
 $ErrorActionPreference = 'Stop'
-if ($env:COMPUTERNAME -notin @('RDLAB-WIN10', 'RDLAB-WIN11')) { throw 'Lab VM required' }
+if (!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME) { throw 'Lab host required: set RUSTDESK_LAB_HOST to this COMPUTERNAME' }
 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Executable)
 if ($version.FileVersion -ne '1.5.3+2026100502') { throw "Agent file version mismatch: $($version.FileVersion)" }
 if ($version.OriginalFilename -ne 'rustdesk-management-agent.exe') { throw 'Agent original filename mismatch' }

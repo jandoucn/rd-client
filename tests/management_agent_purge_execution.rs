@@ -13,7 +13,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(result: InstallerResult, after: Probe) -> Self {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        base::lab_guard::require_lab_os("win11");
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let root = std::env::temp_dir().join(format!("purge-execution-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&root).unwrap();

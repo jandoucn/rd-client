@@ -1,11 +1,11 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-function Assert-AcceptanceContext([string]$Computer,[string]$Sid,[string]$Uuid){
-    if($Computer -ne 'RDLAB-WIN11' -or $Sid -ne 'S-1-5-18' -or $Uuid -ne 'd91a13d9-2bb7-40bf-b5e4-9d57870cd242'){
+function Assert-AcceptanceContext([string]$Computer,[string]$Sid,[string]$LabHost){
+    if(!$LabHost -or $LabHost -ne $Computer -or $Sid -ne 'S-1-5-18'){
         throw 'VM_SYSTEM_REQUIRED'
     }
 }
-Assert-AcceptanceContext $env:COMPUTERNAME ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) ((Get-CimInstance Win32_ComputerSystemProduct).UUID)
+Assert-AcceptanceContext $env:COMPUTERNAME ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) $env:RUSTDESK_LAB_HOST
 
 function New-AcceptanceRun([string]$Root,[string]$RunId){
     if($RunId -notmatch '^[a-z0-9-]{8,64}$'){throw 'INVALID_RUN_ID'}

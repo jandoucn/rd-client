@@ -72,7 +72,7 @@ fn adapter_combines_discovery_and_policy_without_external_effects() {
 
 #[test]
 fn native_readonly_enumeration_reports_observation_without_authorizing_purge() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let candidates = purge_discovery::native_candidates().expect("read-only native query must succeed");
     assert_eq!(candidates.len(), 1);
     let candidate = &candidates[0];

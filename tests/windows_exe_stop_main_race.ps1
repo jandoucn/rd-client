@@ -1,6 +1,6 @@
 param([string]$Source)
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN10'){throw 'guest only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10'))){throw 'guest only'}
 $text=[IO.File]::ReadAllText($Source)
 Invoke-Expression ($text.Split(@('const SCRIPT: &str = r###"'),[StringSplitOptions]::None)[1].Split(@('"###;'),[StringSplitOptions]::None)[0])
 $root=Join-Path $env:TEMP ('main-race-'+[Guid]::NewGuid().ToString('N'))

@@ -1,6 +1,6 @@
 # T01-Z 生产 snapshot 投影测试交接
 
-仅构建，host 未运行测试；Win10 owner 统一执行。测试要求提升管理员、`COMPUTERNAME=RDLAB-WIN10`，且 `C:\RustDeskAgentLab` 已存在。每例使用独立 UUID 子目录，使用真实 workspace ACL、文件打开和生产 snapshot；不需要 MSI 包、服务操作或网络。
+仅构建，host 未运行测试；Win10 owner 统一执行。测试要求提升管理员、`RUSTDESK_LAB_HOST` 等于本机 `COMPUTERNAME`（可选 `RUSTDESK_LAB_OS=win10`），且 `C:\RustDeskAgentLab` 已存在。每例使用独立 UUID 子目录，使用真实 workspace ACL、文件打开和生产 snapshot；不需要 MSI 包、服务操作或网络。
 
 ## 构建制品（2026-10-16）
 

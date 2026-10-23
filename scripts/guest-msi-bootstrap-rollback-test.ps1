@@ -3,7 +3,7 @@ param([Parameter(Mandatory=$true)][string]$Package,
       [Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]{1,48}$')][string]$RunId)
 $ErrorActionPreference='Stop'
 $root='C:\RustDeskAgentLab'
-if($env:COMPUTERNAME -notin @('RDLAB-WIN10','RDLAB-WIN11') -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'SYSTEM lab VM required'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'SYSTEM lab host required: set RUSTDESK_LAB_HOST to this COMPUTERNAME'}
 if([IO.Path]::GetDirectoryName($Package) -ne $root -or [IO.Path]::GetExtension($Package) -ne '.msi'){throw 'Only a package directly in the lab directory is permitted'}
 $prefix=Join-Path $root $RunId
 $fixture="$prefix.msi"

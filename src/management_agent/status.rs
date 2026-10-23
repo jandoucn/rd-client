@@ -14,9 +14,16 @@ struct BuildIdentity {
 
 fn capabilities() -> &'static [&'static str] {
     &[
-        "agent.status@1", "service.inspect@1", "service.start@1", "service.restart@1",
-        "service.repair@1", "recovery.reconcile@1", "package.verify@1",
-        "diagnostics.collect@1", "network.probe@1",
+        "agent.status@1",
+        "service.inspect@1",
+        "service.start@1",
+        "service.restart@1",
+        "service.repair@1",
+        "recovery.reconcile@1",
+        "package.verify@1",
+        "diagnostics.collect@1",
+        "network.probe@1",
+        "diagnostics.logs@1",
     ]
 }
 
@@ -389,8 +396,18 @@ mod tests {
     #[test]
     fn status_snapshot_declares_stable_agent_capabilities() {
         let actual = capabilities();
-        for required in ["agent.status@1", "service.inspect@1", "service.start@1", "service.restart@1",
-            "service.repair@1", "recovery.reconcile@1", "package.verify@1", "diagnostics.collect@1", "network.probe@1"] {
+        for required in [
+            "agent.status@1",
+            "service.inspect@1",
+            "service.start@1",
+            "service.restart@1",
+            "service.repair@1",
+            "recovery.reconcile@1",
+            "package.verify@1",
+            "diagnostics.collect@1",
+            "network.probe@1",
+            "diagnostics.logs@1",
+        ] {
             assert!(actual.contains(&required), "{required}");
         }
         assert_eq!(actual.len(), actual.iter().collect::<std::collections::HashSet<_>>().len());
@@ -402,7 +419,7 @@ mod tests {
     #[test]
     #[ignore = "Win11 SYSTEM read-only installed snapshot; no service mutations"]
     fn installed_snapshot_declares_msi_package_capabilities() {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        base::lab_guard::require_lab_os("win11");
         let root = std::path::Path::new(r"C:\ProgramData");
         let paths = AgentPaths::from_program_data(root, super::super::Edition::Sos);
         let bytes = std::fs::read(paths.state.join("agent.json")).unwrap();

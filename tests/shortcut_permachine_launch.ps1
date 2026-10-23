@@ -1,6 +1,6 @@
 param([ValidateSet('present','missing')][string]$Scenario='present')
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11'){throw 'Win11 only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11'))){throw 'Win11 only'}
 $name="RustDeskShortcut-Machine-$Scenario"
 if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'task already exists'}
 & "$env:SystemRoot\System32\icacls.exe" C:\Users\Public\shortcut-machine /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null

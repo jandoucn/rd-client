@@ -95,10 +95,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         let root =
             Path::new(r"C:\RustDeskAgentLab").join(format!("rescue-v200-{}", uuid::Uuid::new_v4()));
         workspace::create(&root).unwrap();
@@ -341,7 +338,7 @@ fn purge_handoff_child() {
 
 #[test]
 fn purge_handoff_real_child_parent_alive_hash_foreign_preserve_files() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\RustDeskAgentLab").join(format!("purge-handoff-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
     for mode in ["parent", "hash", "foreign"] {
@@ -375,7 +372,7 @@ fn purge_handoff_real_child_parent_alive_hash_foreign_preserve_files() {
 
 #[test]
 fn purge_handoff_parent_exit_then_helper_records_actual_file_cleanup() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\RustDeskAgentLab").join(format!("purge-handoff-success-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -410,7 +407,7 @@ fn purge_handoff_parent_exit_then_helper_records_actual_file_cleanup() {
 
 #[test]
 fn purge_handoff_error_receipt_preserves_detail_and_forbids_later_complete() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\RustDeskAgentLab").join(format!("purge-handoff-error-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -435,7 +432,7 @@ fn purge_handoff_error_receipt_preserves_detail_and_forbids_later_complete() {
 
 #[test]
 fn purge_approval_preflight_real_process_busy_then_release() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let guard = purge_preflight::acquire().unwrap();
     let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "purge_approval_preflight_child", "--nocapture"])
@@ -448,7 +445,7 @@ fn purge_approval_preflight_real_process_busy_then_release() {
 }
 
 fn purge_approval_case(case: &str) {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let original = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let bundle_bytes = std::fs::read(original.join("bundle.json")).unwrap();
     let bundle: serde_json::Value = serde_json::from_slice(&bundle_bytes).unwrap();
@@ -945,7 +942,7 @@ fn copied_installed_directory_acl_allows_existing_safe_assets() {
 
 #[test]
 fn create_child_permission_cannot_write_rename_or_delete_existing_protected_assets() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root =
         Path::new(r"C:\RustDeskAgentLab").join(format!("rescue-v200-acl-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -1115,7 +1112,7 @@ fn native_transaction_child() {
     let Some(directory) = std::env::var_os("RUSTDESK_HELPER_RUNTIME_FIXTURE") else {
         return;
     };
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let directory = PathBuf::from(directory);
     assert_eq!(
         directory.parent().unwrap(),
@@ -1172,7 +1169,7 @@ fn rotation_real_samebuild_msi_commit_refreshes_fixed_bundle() {
 }
 
 fn committed_rescue_case(rotate: bool) {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     if rotate {
         assert_eq!(std::env::var("RUSTDESK_ROTATION_LAB").unwrap(), "v217");
     } else {
@@ -1326,7 +1323,7 @@ fn committed_rescue_case(rotate: bool) {
 #[test]
 #[ignore = "Readback of real fixed bundle created by v205 E2E"]
 fn fixed_bundle_readback_is_verified_and_never_replaced() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let bytes = std::fs::read(root.join("bundle.json")).unwrap();
     let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1372,10 +1369,7 @@ fn r3_stopped_absent_gate_rejects_disabled_running_unknown_and_processes() {
 
 #[test]
 fn r3_periodic_startup_grace_precedes_any_service_or_bundle_action() {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     for elapsed in [
         Duration::ZERO,
         Duration::from_secs(30),
@@ -1571,10 +1565,7 @@ impl ReviewObservedState {
 #[test]
 fn review6_running_observation_survives_reload_resets_after_600_seconds_and_next_fault_starts_at_one(
 ) {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     let root = Path::new(r"C:\RustDeskAgentLab")
         .join(format!("rescue-v200-persist-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -1664,10 +1655,7 @@ fn review6_observation_write_failure_retains_original_disk_and_observed_memory_w
 
 #[test]
 fn r4_local_trigger_cannot_encode_original_fallback_service_in_existing_plan() {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     let fixture = Fixture::new();
     let path = fixture.tx().join("prepared.json");
     let bytes = std::fs::read(&path).unwrap();
@@ -1888,7 +1876,7 @@ fn freeze_v225_invalid_receipt_preflight_does_not_persist_package_verified_trans
 
 #[test]
 fn source_v224_fixed_schema2_approval_exports_without_creating_execution_transaction() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let before = std::fs::read(root.join("bundle.json")).unwrap();
     let bundle: serde_json::Value = serde_json::from_slice(&before).unwrap();
@@ -1916,7 +1904,7 @@ fn source_v224_fixed_schema2_approval_exports_without_creating_execution_transac
 
 #[test]
 fn source_v224_fixed_receipt_freezes_into_temp_execution_and_scheduler_keeps_source_separate() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let original = std::fs::read(root.join("bundle.json")).unwrap();
     let bundle: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -2414,7 +2402,7 @@ fn firstinstall_bundle_can_be_retained_as_previous_by_committed_rotation() {
 #[ignore = "Win11 clean ordinary SOS installation; automatic worker with fixture approval only"]
 fn firstinstall_clean_installed_worker_prepares_signed_bundle_without_transaction() {
     use std::time::{Duration, Instant};
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_FIRST_INSTALL_LAB").unwrap(), "v220");
     let agent = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
     let current = agent.join("rescue/current");
@@ -2599,10 +2587,7 @@ fn firstinstall_clean_installed_worker_prepares_signed_bundle_without_transactio
 }
 
 fn rotation_io_root() -> PathBuf {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     let root =
         Path::new(r"C:\RustDeskAgentLab").join(format!("rotation-v217-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -2714,7 +2699,7 @@ fn agentrestore_missing_publication_verifies_hash_and_never_replaces_bad_existin
 
 #[test]
 fn agentrestore_trusted_fixed_source_rejects_key_identity_build_and_bootstrap_mismatch() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let original = std::fs::read(root.join("bundle.json")).unwrap();
     let bundle: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -3583,7 +3568,7 @@ fn rescuestatus_full_verify_cache_read_missing_corrupt_signature_and_prior_evide
 
 #[test]
 fn rescuestatus_real_fixed_bundle_production_key_rejects_fixture_key_full_verifies_readonly() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let bundle = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let original = std::fs::read(bundle.join("bundle.json")).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -3688,10 +3673,7 @@ fn autoschedule_real_files_hold_terminal_active_and_partial_transactions_without
 
 #[test]
 fn capacity63_reserves_one_then_64_can_launch_64_cannot_create_65_and_65_is_rejected() {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     let root =
         Path::new(r"C:\RustDeskAgentLab").join(format!("capacity-v215-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -3770,7 +3752,7 @@ fn autoschedule_periodic_child() {
     let Some(root) = std::env::var_os("RUSTDESK_AUTOSCHEDULE_CHILD") else {
         return;
     };
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = PathBuf::from(root);
     assert!([
         Path::new(r"C:\RustDeskAgentLab\autoschedule-v213-evidence"),
@@ -3820,7 +3802,7 @@ fn autofailure_periodic_validation_rollback_never_repeats_source() {
 }
 
 fn autoschedule_real_case(fail: bool) {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(
         std::env::var("RUSTDESK_AUTO_REPAIR_LAB").unwrap(),
         if fail { "v215" } else { "v213" }
@@ -4339,10 +4321,7 @@ struct LocalReviewFixture {
 }
 impl LocalReviewFixture {
     fn new(phase: transaction::Phase) -> Self {
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("localrepair-review-v212-{}", uuid::Uuid::new_v4()));
         workspace::create(&root).unwrap();
@@ -4577,7 +4556,7 @@ fn reviewr4_services_already_stopped_can_restore_anchor_after_optin_revocation()
 
 #[test]
 fn reviewr4_real_health_preflight_rejection_preserves_actual_service_pid_and_identity() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let normal = service_control::Contract {
         name: "RustDesk".into(),
         executable: r"C:\Program Files\RustDesk\RustDesk.exe".into(),
@@ -4733,7 +4712,7 @@ fn localrepair_native_child() {
     let Ok(id) = std::env::var("RUSTDESK_LOCAL_REPAIR_CHILD") else {
         return;
     };
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let public = STANDARD
         .decode(std::env::var("RUSTDESK_LOCAL_REPAIR_PUBLIC").unwrap())
         .unwrap();
@@ -4821,7 +4800,7 @@ fn localrepair_preserve_attempt(
 
 #[test]
 fn localrepair_error_evidence_preserves_original_before_nonterminal_and_refuses_overwrite() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     let root = Path::new(r"C:\RustDeskAgentLab")
         .join(format!("r4-error-evidence-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -4851,7 +4830,7 @@ fn localrepair_error_evidence_preserves_original_before_nonterminal_and_refuses_
 
 #[test]
 fn localrepair_error_evidence_captures_panic_and_keeps_unknown_child_null() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     for (label, result, kind, error) in [
         (
             "panic",
@@ -4878,7 +4857,7 @@ fn localrepair_error_evidence_captures_panic_and_keeps_unknown_child_null() {
 }
 
 fn localrepair_real(fail: bool) {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_LOCAL_REPAIR_LAB").unwrap(), "v211");
     let label = if fail { "rollback" } else { "success" };
     let evidence = Path::new(r"C:\RustDeskAgentLab")
@@ -5272,7 +5251,7 @@ fn localrepair_real(fail: bool) {
 #[test]
 #[ignore = "R4 capability red: offline real fallback running, preparation must preserve old usable client; v210 runner"]
 fn r4_offline_local_package_preparation_from_live_fallback_capability() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_RESCUE_E2E").unwrap(), "v210");
     let root = Path::new(r"C:\RustDeskAgentLab\r4-v210-evidence");
     workspace::create(root).unwrap();
@@ -5520,7 +5499,7 @@ fn review5_non_directory_or_file_acl_error_is_not_missing() {
 #[test]
 #[ignore = "Win11 fixed fallback restart and whole-directory fault; v208 runner"]
 fn review_e2e_whole_directory_missing_and_existing_fallback_second_start() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_RESCUE_E2E").unwrap(), "v208");
     let evidence = Path::new(r"C:\RustDeskAgentLab\r3-review-v208");
     workspace::create(evidence).unwrap();
@@ -5766,7 +5745,7 @@ fn r3_invalid_bundle_identity_acl_or_occupied_destination_preserves_old_bytes() 
 #[test]
 #[ignore = "Real R3 Win11 fault, exact owned EXE backup and restoration; v206 runner only"]
 fn r3_real_missing_exe_uses_service_fallback_and_restores_original() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_RESCUE_E2E").unwrap(), "v206");
     let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
     let bundle: serde_json::Value =
@@ -5933,7 +5912,7 @@ fn r3_periodic_process_child() {
     let Some(root) = std::env::var_os("RUSTDESK_R3_PERIODIC_FIXTURE") else {
         return;
     };
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root = PathBuf::from(root);
     assert_eq!(
         root,
@@ -5969,7 +5948,7 @@ fn r3_periodic_process_child() {
 #[test]
 #[ignore = "Independent SYSTEM periodic process, real fault and owned restoration; v207 runner"]
 fn r3_automatic_periodic_process_honors_gates_recovers_and_restores() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(std::env::var("RUSTDESK_RESCUE_E2E").unwrap(), "v207");
     let root = Path::new(r"C:\RustDeskAgentLab\r3-periodic-v207-retry1");
     workspace::create(root).unwrap();

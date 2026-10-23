@@ -142,10 +142,7 @@ impl Drop for Server {
 }
 
 fn root(label: &str) -> PathBuf {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
     std::env::temp_dir().join(format!(
         "agent-mirror-{label}-{}-{}",
         std::process::id(),

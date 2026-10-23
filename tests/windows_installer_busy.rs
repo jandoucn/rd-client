@@ -146,11 +146,7 @@ fn only_idle_allows_an_attempt_and_native_status_layout_has_all_nine_dwords() {
 #[test]
 #[ignore = "VM-only readonly SCM probe; owner must first confirm Windows Installer is idle"]
 fn vm_actual_msiserver_idle_readonly() {
-    let machine = std::env::var("COMPUTERNAME").unwrap_or_default();
-    assert!(
-        matches!(machine.as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"),
-        "VM-only"
-    );
+    base::lab_guard::require_lab();
     let result = installer::probe();
     println!("native msiserver observation: {result:?}");
     assert_eq!(

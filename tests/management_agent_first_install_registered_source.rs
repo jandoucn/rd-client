@@ -8,7 +8,7 @@ mod package_gate;
 #[ignore = "Win11 owner after actual official 1501 MSI upgrade; read-only registration observation"]
 fn t01_installed_1501_real_registered_source_matches_signed_release() {
     use std::path::Path;
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(
         std::env::var("RUSTDESK_T01_REGISTERED").as_deref(),
         Ok("observe-installed-1501")

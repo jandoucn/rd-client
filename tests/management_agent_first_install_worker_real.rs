@@ -17,7 +17,7 @@ use std::{
 #[test]
 #[ignore = "Win10 only; real worker/HTTP/producer/reader, isolated registration and failed health"]
 fn t01_real_worker_http_producer_reader_preserves_health_failure_and_waiting() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN10"));
+    base::lab_guard::require_lab_os("win10");
     assert_eq!(
         std::env::var("RUSTDESK_T01_PRODUCER").as_deref(),
         Ok("red-formal-sos-1501")

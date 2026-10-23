@@ -198,7 +198,7 @@ mod tests {
             service::{ServiceAccess, ServiceState},
             service_manager::{ServiceManager, ServiceManagerAccess},
         };
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         assert_eq!(
             std::env::var("LOCAL_EVENTS_NATIVE_R1").unwrap(),
             "authorized"

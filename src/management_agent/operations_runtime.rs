@@ -250,6 +250,16 @@ fn execute_command(
     }
 }
 
+// Only fixed error codes leave the agent; OS errors and paths stay local.
+fn diagnostic_logs_terminal(
+    outcome: Result<serde_json::Value, &'static str>,
+) -> (&'static str, serde_json::Value) {
+    match outcome {
+        Ok(result) => ("succeeded", result),
+        Err(code) => ("failed", serde_json::json!({ "error_code": code })),
+    }
+}
+
 fn fixed_integrity_report(state: &AgentState, paths: &AgentPaths) -> serde_json::Value {
     let normal = super::normal_client_exe(&state.normal_install_path)
         .filter(|path| path.parent().is_some_and(super::approved_normal_install_path))
@@ -528,16 +538,31 @@ fn poll_with_identity(
         if matches!(log.state(&command.id), Some(ExecutionState::Running | ExecutionState::ReconciliationRequired))
             && matches!(command_type(wire)?, "package.reinstall" | "package.update" | "agent.update") {
             let root = paths.agent.join("transactions").join(&command.id);
-            match super::command_transaction::read_terminal(&root, wire) {
-                Ok(Some(status)) => {
-                    log.finish(&command.id, status, terminal_event_result(&command.id, status), unix_timestamp())?;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    if log.state(&command.id) == Some(ExecutionState::Running) {
-                        log.finish(&command.id, "reconciliation_required", serde_json::json!({"error_code":"transaction_evidence_unconfirmed"}), unix_timestamp())?;
+            if lost_self_update_workspace(command_type(wire)?, &root) {
+                let (status, result) =
+                    absent_workspace_terminal(&command.id, agent_self_update_confirmed(wire)?);
+                log.finish(&command.id, status, result, unix_timestamp())?;
+            } else {
+                match super::command_transaction::read_terminal(&root, wire) {
+                    Ok(Some(status)) => {
+                        log.finish(
+                            &command.id,
+                            status,
+                            terminal_event_result(&command.id, status),
+                            unix_timestamp(),
+                        )?;
                     }
-                    hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent transaction evidence refused: {error}");
+                    Ok(None) => {}
+                    Err(error) => {
+                        if log.state(&command.id) == Some(ExecutionState::Running) {
+                            log.finish(&command.id, "reconciliation_required", serde_json::json!({"error_code":"transaction_evidence_unconfirmed"}), unix_timestamp())?;
+                        }
+                        hbb_common::throttled_log!(
+                            Duration::from_secs(60),
+                            warn,
+                            "agent transaction evidence refused: {error}"
+                        );
+                    }
                 }
             }
             // A self-update's terminal evidence can be lost when the agent replaces
@@ -622,6 +647,12 @@ fn poll_with_identity(
             upload_events(identity, base, &binding, &mut log)?;
             break;
         }
+        if command_type(wire)? == "diagnostics.logs" {
+            let outcome = super::diagnostic_logs::execute(&wire["args"], paths);
+            let (status, result) = diagnostic_logs_terminal(outcome);
+            log.finish(&command.id, status, result, unix_timestamp())?;
+            continue;
+        }
         let outcome = if command_type(wire)? == "network.probe" {
             super::network_probe::fixed(Duration::from_secs(wire["timeout_seconds"].as_u64().unwrap_or(1)))
         } else {
@@ -644,16 +675,48 @@ fn command_type(wire: &serde_json::Value) -> Result<&str, PollError> {
     wire["type"].as_str().ok_or_else(|| PollError::from("command type missing"))
 }
 
-// A self-updating agent is, after it restarts, provably the target build: it is
-// the running process executing this poll, its identity was already bound by the
-// signed command envelope, and version.json reports its compiled build. When that
-// build equals the command's target, the self-update has landed regardless of what
-// transaction evidence survived the self-replacement. This lets a same-construct
-// agent.update (whose target equals the current build) reconcile to succeeded
-// instead of wedging at reconciliation_required forever and blocking later mutating
-// commands via the journal gate. It never fires for package.reinstall/package.update
-// (those keep their evidence-bound terminal path), and concrete terminal evidence
-// still wins because Ok(Some(..)) finishes the command before this check runs.
+// Limited to agent.update: package.reinstall/update keep their proven evidence
+// path, where an absent workspace stays reconciliation_required. Absence is
+// decided by the filesystem, so an existing but unreadable workspace is not lost.
+fn lost_self_update_workspace(command_type: &str, root: &std::path::Path) -> bool {
+    command_type == "agent.update"
+        && matches!(
+            std::fs::symlink_metadata(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+}
+
+// Terminal outcome for an agent.update whose transaction workspace no longer
+// exists. The workspace can vanish after a self-update really installed (seen on
+// the lab VM: the transaction MSI completed, then the directory was gone), so
+// absence alone proves neither outcome. Decide by the observable end state
+// instead: the running agent is the process executing this poll, so if it is the
+// target build the requested state holds and the command succeeded; the result
+// names that evidence rather than implying transaction receipts were read. If it
+// is not the target build, nothing is in progress and the target was not reached,
+// so the command failed. Both are terminal and release the journal gate.
+fn absent_workspace_terminal(id: &str, target_reached: bool) -> (&'static str, serde_json::Value) {
+    if target_reached {
+        (
+            "succeeded",
+            serde_json::json!({
+                "transaction_id":id,
+                "self_update_confirmed":true,
+                "evidence":"target_build_observed",
+            }),
+        )
+    } else {
+        (
+            "failed",
+            serde_json::json!({"error_code":"transaction_workspace_absent"}),
+        )
+    }
+}
+
+// Whether the running agent is already the build this command targets. The
+// running process is the one executing this poll and version.json reports its
+// compiled build, so equality is an observation, not an inference. Only consulted
+// once the transaction workspace is gone; existing evidence always decides first.
 fn agent_self_update_confirmed(wire: &serde_json::Value) -> Result<bool, PollError> {
     if command_type(wire)? != "agent.update" {
         return Ok(false);
@@ -752,6 +815,49 @@ mod tests {
         assert!(!agent_self_update_confirmed(&missing_target).unwrap());
     }
 
+    // With the workspace gone, the end state decides: at the target build the
+    // command succeeded and says which evidence that rests on; below it, failed.
+    #[test]
+    fn absent_workspace_terminal_follows_observed_target_build() {
+        let id = "a".repeat(32);
+        let (status, result) = absent_workspace_terminal(&id, true);
+        assert_eq!(status, "succeeded");
+        assert_eq!(result["transaction_id"], id.as_str());
+        assert_eq!(result["self_update_confirmed"], true);
+        assert_eq!(result["evidence"], "target_build_observed");
+        let (status, result) = absent_workspace_terminal(&id, false);
+        assert_eq!(status, "failed");
+        assert_eq!(result["error_code"], "transaction_workspace_absent");
+        assert!(result.get("self_update_confirmed").is_none());
+    }
+
+    // Only agent.update with no workspace at all takes the absent-workspace exit.
+    // A workspace that exists (even empty, so its evidence is unreadable) stays on
+    // the blocking evidence path, and package commands never take this exit.
+    #[test]
+    fn lost_workspace_exit_is_agent_update_only_and_requires_absence() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-workspace-evidence-{}-{}",
+            std::process::id(),
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        assert!(lost_self_update_workspace("agent.update", &root));
+        for kind in ["package.reinstall", "package.update"] {
+            assert!(!lost_self_update_workspace(kind, &root), "{kind}");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!lost_self_update_workspace("agent.update", &root));
+        assert!(
+            super::super::command_transaction::read_terminal(
+                &root,
+                &serde_json::json!({"id":"a","type":"agent.update","args":{}})
+            )
+            .is_err(),
+            "an existing empty workspace must keep the refused-evidence path"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn delivery_rollback_events_have_fixed_codes_and_keep_local_error() {
         let directory=std::env::temp_dir().join(format!("agent-rollback-contract-{}",std::process::id()));
@@ -773,7 +879,7 @@ mod tests {
     #[test]
     fn local_command_native_child() {
         let Some(root) = std::env::var_os("RUSTDESK_HELPER_RUNTIME_FIXTURE") else { return; };
-        assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+        base::lab_guard::require_lab();
         let root = std::path::PathBuf::from(root);
         assert!(root.starts_with(r"C:\RustDeskAgentLab"));
         let public = STANDARD.decode(std::env::var("RUSTDESK_HELPER_FIXTURE_PUBLIC").unwrap()).unwrap();
@@ -936,7 +1042,7 @@ mod tests {
     fn p09_boot_bridge_resumes_terminal_without_backend() {
         use sha2::{Digest, Sha256};
         use std::path::{Path, PathBuf};
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         let root = PathBuf::from(std::env::var_os("RUSTDESK_P09_ROOT").unwrap());
         let lab = root.ancestors().nth(4).unwrap();
         assert_eq!(lab.parent(), Some(Path::new(r"C:\RustDeskAgentLab")));
@@ -1120,7 +1226,7 @@ mod tests {
     #[test]
     fn local_command_poll_child() {
         let Some(root) = std::env::var_os("RUSTDESK_LOCAL_POLL_FIXTURE") else { return; };
-        assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+        base::lab_guard::require_lab();
         let root = std::path::PathBuf::from(root);
         assert_eq!(root.parent(), Some(std::path::Path::new(r"C:\RustDeskAgentLab")));
         assert!(root.file_name().unwrap().to_string_lossy().starts_with("local-command-"));
@@ -1163,7 +1269,7 @@ mod tests {
     fn powercut_original_identity_report_child() {
         use sha2::{Digest, Sha256};
         use std::path::{Path, PathBuf};
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         let root = PathBuf::from(std::env::var_os("RUSTDESK_REPORT_ROOT").unwrap());
         assert_eq!(root.parent(), Some(Path::new(r"C:\RustDeskAgentLab")));
         assert!(root
@@ -1277,7 +1383,7 @@ mod tests {
         use std::{io::{Read, Write}, net::TcpListener, path::{Path, PathBuf}, process::{Command, Stdio},
             sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Instant};
         use sha2::{Digest, Sha256};
-        assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+        base::lab_guard::require_lab();
         assert_eq!(std::env::var("RUSTDESK_LOCAL_COMMAND_LAB").unwrap(), "v142");
         let installed_paths = AgentPaths::from_program_data(r"C:\ProgramData", super::super::Edition::Standard);
         let actual: AgentState = serde_json::from_slice(&std::fs::read(installed_paths.state.join("agent.json")).unwrap()).unwrap();
@@ -1760,6 +1866,25 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_logs_terminal_reports_fixed_codes_without_local_detail() {
+        let result =
+            serde_json::json!({"schema":1,"source":"agent","file":null,"lines":[],"missing":true});
+        assert_eq!(
+            diagnostic_logs_terminal(Ok(result.clone())),
+            ("succeeded", result)
+        );
+        for code in [
+            "log_unreadable",
+            "log_path_refused",
+            "log_parameters_invalid",
+        ] {
+            let (status, result) = diagnostic_logs_terminal(Err(code));
+            assert_eq!(status, "failed");
+            assert_eq!(result, serde_json::json!({ "error_code": code }));
+        }
+    }
+
+    #[test]
     fn transport_rejects_wrong_identity_and_non_agent_routes_before_network() {
         hbb_common::sodiumoxide::init().unwrap();
         let (public, secret) = hbb_common::sodiumoxide::crypto::sign::gen_keypair();
@@ -1892,7 +2017,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("rustdesk-api");
+            .join("rd-api");
         let api = std::env::var_os("AGENT_TEST_API_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or(api);
@@ -2218,6 +2343,231 @@ mod tests {
             if after.process_id != before.process_id || after.state != before.state || after.command != before.command {
                 return Err("terminal reconciliation changed actual service".into());
             }
+            // agent.update whose transaction workspace is gone: the end state decides.
+            // At the current build it reconciles to succeeded with the evidence named;
+            // at a later build it is failed. Both release the journal and reach SQL.
+            let seed_running = |id: &str, kind: &str, target: u64| -> Result<String, String> {
+                let now = unix_timestamp();
+                let mut wire = serde_json::json!({
+                    "schema":1,"id":id,"type":kind,"type_version":1,
+                    "client_id":identity.id,"client_uuid":identity.uuid,
+                    "agent_installation_id":state.agent_installation_id,"enrollment_generation":1,
+                    "created_at":now,"expires_at":now+300,"timeout_seconds":900,
+                    "preconditions":{"active_sessions":"defer"},
+                    "args":{"package_id":"f".repeat(64),"target_key":"windows-x86_64-msi-standard",
+                        "target_build_seq":target,"allow_downgrade":false}
+                });
+                let envelope = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+                let digest = hex::encode(Sha256::digest(envelope.as_bytes()));
+                wire["digest"] = digest.clone().into();
+                let seed = r#"require getenv('AGENT_FIXTURE_ROOT').'/sqlite/lib.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_operations.php';$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));configure_pdo($db);$wire=json_decode(getenv('AGENT_TERMINAL_ENVELOPE'),true);$encoded=agent_ops_json($wire);db_exec($db,'INSERT INTO device_agent_commands(command_id,device_id,uuid,installation_id,generation,type,type_version,envelope,digest,status,event_sequence,receipt_persisted,idempotency_key,request_digest,created_at,expires_at,updated_at,actor_id) VALUES(:command,:id,:uuid,:installation,1,:type,1,:envelope,:digest,\'running\',2,1,:key,:digest,:now,:expires,:now,1)',['command'=>$wire['id'],'id'=>$wire['client_id'],'uuid'=>$wire['client_uuid'],'installation'=>$wire['agent_installation_id'],'type'=>$wire['type'],'envelope'=>$encoded,'digest'=>hash('sha256',$encoded),'key'=>'lost-'.$wire['id'],'now'=>$wire['created_at'],'expires'=>$wire['expires_at']]);"#;
+                let seeded = php_command()
+                    .args(["-r", seed])
+                    .env("AGENT_FIXTURE_ROOT", &api)
+                    .env("AGENT_HTTP_FIXTURE_DB", &db)
+                    .env("AGENT_TERMINAL_ENVELOPE", &envelope)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if !seeded.status.success() {
+                    return Err(format!(
+                        "lost workspace seed: {}",
+                        String::from_utf8_lossy(&seeded.stderr)
+                    ));
+                }
+                let mut journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+                journal.prepare(id, &digest, now + 300, now)?;
+                journal.receipt(id)?;
+                journal.start(id, now)?;
+                for event in journal.pending_events().to_vec() {
+                    journal.acknowledge(&event.event_id, &event.digest)?;
+                }
+                Ok(digest)
+            };
+            let lost_query = |id: &str| -> Result<serde_json::Value, String> {
+                let sql = format!(
+                    r#"$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));echo json_encode([$db->query("SELECT status FROM device_agent_commands WHERE command_id='{id}'")->fetchColumn(),$db->query("SELECT status FROM device_agent_events WHERE command_id='{id}' ORDER BY sequence")->fetchAll(PDO::FETCH_COLUMN),json_decode($db->query("SELECT payload FROM device_agent_events WHERE command_id='{id}' ORDER BY sequence DESC LIMIT 1")->fetchColumn(),true)['result']??null]);"#
+                );
+                let out = php_command()
+                    .args(["-r", &sql])
+                    .env("AGENT_HTTP_FIXTURE_DB", &db)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                serde_json::from_slice(&out.stdout).map_err(|e| {
+                    format!(
+                        "lost workspace SQL: {e}: {}",
+                        String::from_utf8_lossy(&out.stdout)
+                    )
+                })
+            };
+            let landed = "6".repeat(32);
+            seed_running(&landed, "agent.update", current_build)?;
+            if paths.agent.join("transactions").join(&landed).exists() {
+                return Err("lost workspace fixture unexpectedly has a workspace".into());
+            }
+            for _ in 0..2 {
+                poll_with_identity(
+                    &identity,
+                    &format!("http://{address}"),
+                    &blocked_state,
+                    &paths,
+                )?;
+            }
+            let journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+            if journal.state(&landed) != Some(ExecutionState::Succeeded)
+                || !journal.pending_events().is_empty()
+            {
+                return Err(format!(
+                    "landed self-update not reconciled: {:?}",
+                    journal.state(&landed)
+                ));
+            }
+            drop(journal);
+            let values = lost_query(&landed)?;
+            if values
+                != serde_json::json!(["succeeded",["succeeded"],{"transaction_id":landed,"self_update_confirmed":true,"evidence":"target_build_observed"}])
+            {
+                return Err(format!("landed self-update SQL mismatch: {values}"));
+            }
+            let short = "5".repeat(32);
+            seed_running(&short, "agent.update", current_build + 1)?;
+            for _ in 0..2 {
+                poll_with_identity(
+                    &identity,
+                    &format!("http://{address}"),
+                    &blocked_state,
+                    &paths,
+                )?;
+            }
+            let journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+            if journal.state(&short) != Some(ExecutionState::Failed)
+                || !journal.pending_events().is_empty()
+            {
+                return Err(format!(
+                    "unreached self-update not failed: {:?}",
+                    journal.state(&short)
+                ));
+            }
+            drop(journal);
+            let values = lost_query(&short)?;
+            if values
+                != serde_json::json!(["failed",["failed"],{"error_code":"transaction_workspace_absent"}])
+            {
+                return Err(format!("unreached self-update SQL mismatch: {values}"));
+            }
+            // agent.update whose workspace still exists but whose evidence is corrupt:
+            // the running build decides. At the target build it reconciles to
+            // succeeded; otherwise it stays reconciliation_required for an operator.
+            let corrupt_workspace = |id: &str| -> Result<(), String> {
+                let root = paths.agent.join("transactions").join(id);
+                std::fs::create_dir_all(paths.agent.join("transactions"))
+                    .map_err(|e| e.to_string())?;
+                workspace::create(&root)?;
+                std::fs::write(root.join("command-binding.json"), b"corrupt")
+                    .map_err(|e| e.to_string())
+            };
+            let corrupt_landed = "3".repeat(32);
+            seed_running(&corrupt_landed, "agent.update", current_build)?;
+            corrupt_workspace(&corrupt_landed)?;
+            for _ in 0..2 {
+                poll_with_identity(
+                    &identity,
+                    &format!("http://{address}"),
+                    &blocked_state,
+                    &paths,
+                )?;
+            }
+            let journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+            if journal.state(&corrupt_landed) != Some(ExecutionState::Succeeded)
+                || !journal.pending_events().is_empty()
+            {
+                return Err(format!(
+                    "landed self-update with corrupt evidence not reconciled: {:?}",
+                    journal.state(&corrupt_landed)
+                ));
+            }
+            drop(journal);
+            let values = lost_query(&corrupt_landed)?;
+            if values[0] != "succeeded"
+                || values[2]
+                    != serde_json::json!({"transaction_id":corrupt_landed,"self_update_confirmed":true})
+            {
+                return Err(format!(
+                    "landed self-update with corrupt evidence SQL mismatch: {values}"
+                ));
+            }
+            let corrupt_short = "2".repeat(32);
+            seed_running(&corrupt_short, "agent.update", current_build + 1)?;
+            corrupt_workspace(&corrupt_short)?;
+            poll_with_identity(
+                &identity,
+                &format!("http://{address}"),
+                &blocked_state,
+                &paths,
+            )?;
+            let mut journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+            if journal.state(&corrupt_short) != Some(ExecutionState::ReconciliationRequired) {
+                return Err(format!(
+                    "unreached self-update with corrupt evidence left reconciliation: {:?}",
+                    journal.state(&corrupt_short)
+                ));
+            }
+            let values = lost_query(&corrupt_short)?;
+            if values[0] != "reconciliation_required"
+                || values[2]["error_code"] != "transaction_evidence_unconfirmed"
+            {
+                return Err(format!(
+                    "unreached self-update with corrupt evidence SQL mismatch: {values}"
+                ));
+            }
+            journal.finish(
+                &corrupt_short,
+                "failed",
+                serde_json::json!({"error_code":"fixture_cleanup"}),
+                unix_timestamp(),
+            )?;
+            upload_events(
+                &identity,
+                &format!("http://{address}"),
+                &serde_json::json!({"schema":1,"client_id":identity.id,"client_uuid":identity.uuid,"agent_installation_id":state.agent_installation_id,"enrollment_generation":1}),
+                &mut journal,
+            )?;
+            drop(journal);
+            // package.update keeps its own path: an absent workspace stays blocked.
+            let package = "4".repeat(32);
+            seed_running(&package, "package.update", current_build + 1)?;
+            poll_with_identity(
+                &identity,
+                &format!("http://{address}"),
+                &blocked_state,
+                &paths,
+            )?;
+            if CommandJournal::open(&paths.state.join("commands-1.json"))?.state(&package)
+                != Some(ExecutionState::ReconciliationRequired)
+            {
+                return Err("package.update with absent workspace left its evidence path".into());
+            }
+            let values = lost_query(&package)?;
+            if values[0] != "reconciliation_required"
+                || values[2]["error_code"] != "transaction_evidence_unconfirmed"
+            {
+                return Err(format!(
+                    "package.update absent workspace SQL mismatch: {values}"
+                ));
+            }
+            let mut journal = CommandJournal::open(&paths.state.join("commands-1.json"))?;
+            journal.finish(
+                &package,
+                "failed",
+                serde_json::json!({"error_code":"fixture_cleanup"}),
+                unix_timestamp(),
+            )?;
+            upload_events(
+                &identity,
+                &format!("http://{address}"),
+                &serde_json::json!({"schema":1,"client_id":identity.id,"client_uuid":identity.uuid,"agent_installation_id":state.agent_installation_id,"enrollment_generation":1}),
+                &mut journal,
+            )?;
+            drop(journal);
             let package_seed = r#"require getenv('AGENT_FIXTURE_ROOT').'/sqlite/lib.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_status.php';require getenv('AGENT_FIXTURE_ROOT').'/sqlite/agent_operations.php';$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));configure_pdo($db);$now=time();$manifest=json_decode(getenv('AGENT_REFERENCE_MANIFEST'),true,64,JSON_THROW_ON_ERROR);$key='windows-x86_64-msi-standard';$rollback=$manifest;$rollback['targets'][$key]['build_seq']=ROLLBACK_BUILD;foreach([$manifest,$rollback] as $release)db_insert_ignore($db,'update_releases',['version'=>'1.5.4','build_seq'=>$release['targets'][$key]['build_seq'],'channel'=>'stable','manifest'=>agent_ops_json($release),'active'=>1,'published_at'=>$now]);$payload=['schema'=>1,'client_id'=>'test-device','client_uuid'=>'test-uuid','agent_installation_id'=>str_repeat('a',32),'boot_id'=>str_repeat('b',32),'session_generation'=>1,'sequence'=>1,'agent'=>['version'=>'1.5.3','build_seq'=>ROLLBACK_BUILD],'capabilities'=>['agent.status@1','package.update@1'],'package_identity'=>['edition'=>'standard','arch'=>'x86_64','kind'=>'msi'],'service'=>['state'=>'running'],'application'=>['state'=>'ready'],'recovery'=>['effective_enabled'=>true]];agent_status_store($db,$payload,$now);echo agent_ops_json(agent_command_create($db,['id'=>1,'address_book_scope'=>'all'],'test-device','test-uuid',['type'=>'package.update','type_version'=>1,'idempotency_key'=>'package-resolver-rejection','args'=>['package_id'=>agent_package_reference($manifest,$key),'target_key'=>$key,'target_build_seq'=>TARGET_BUILD,'allow_downgrade'=>false]],$now));"#;
             let package_seed = package_seed
                 .replace("ROLLBACK_BUILD",&rollback_build.to_string())

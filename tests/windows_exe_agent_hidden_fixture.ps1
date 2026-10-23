@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
-if ($env:COMPUTERNAME -ne 'RDLAB-WIN10') { throw 'guest required' }
+if ((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10'))) { throw 'guest required' }
 $text=[IO.File]::ReadAllText($Source)
 Invoke-Expression ($text.Split(@('const SCRIPT: &str = r###"'),[StringSplitOptions]::None)[1].Split(@('"###;'),[StringSplitOptions]::None)[0])
 $root=Join-Path $env:TEMP ('legacy-hidden-'+[Guid]::NewGuid().ToString('N'))

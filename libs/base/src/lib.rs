@@ -1,6 +1,7 @@
 pub mod config;
 pub mod fs;
 pub mod keyboard;
+pub mod lab_guard;
 pub mod platform;
 pub mod protos;
 pub mod update;

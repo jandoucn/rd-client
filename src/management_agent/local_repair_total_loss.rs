@@ -18,7 +18,7 @@ pub fn verified_state_read_fixture(
 std::thread_local! { static PRODUCT_FIXTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 #[cfg(all(windows, test))]
 pub fn product_fixture<T>(run: impl FnOnce() -> T) -> T {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     struct Reset(bool);
     impl Drop for Reset {
         fn drop(&mut self) {

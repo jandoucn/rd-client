@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]{1,48}$')][string]
 $ErrorActionPreference='Stop'
 $root='C:\RustDeskAgentLab'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if($env:COMPUTERNAME -notin @('RDLAB-WIN10','RDLAB-WIN11') -or $sid -ne 'S-1-5-18'){throw 'SYSTEM lab VM required'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or $sid -ne 'S-1-5-18'){throw 'SYSTEM lab host required: set RUSTDESK_LAB_HOST to this COMPUTERNAME'}
 $prefix=Join-Path $root $RunId
 if(Test-Path "$prefix.result.json"){throw 'Run already exists; preserve evidence'}
 $package=Join-Path $root 'agent-auto-bootstrap-v139.msi'

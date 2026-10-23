@@ -1,6 +1,6 @@
 param([string]$PackageDirectory,[string]$Receipt)
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11'){throw 'Win11 only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11'))){throw 'Win11 only'}
 $product='{D38BA039-2E82-4915-A8B1-B616520CCAB1}'
 $root=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RDShortcutFixture-7BC91'
 $link=Join-Path $root 'Desktop\RustDesk.lnk'

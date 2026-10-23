@@ -1,13 +1,13 @@
 use super::*;
+// Path-loaded: the standalone adapter crate has no `base` dependency.
+#[allow(dead_code)]
+#[path = "../../libs/base/src/lab_guard.rs"]
+mod lab_guard;
 use std::process::Command;
 use windows::core::PCWSTR;
 
 fn fixture() -> PathBuf {
-    assert_eq!(
-        std::env::var("COMPUTERNAME").unwrap(),
-        "RDLAB-WIN11",
-        "guest-only"
-    );
+    lab_guard::require_lab_os("win11");
     let root = std::env::temp_dir().join(format!(
         "rd-exe-desktop-{}-{}",
         std::process::id(),

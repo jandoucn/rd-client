@@ -221,7 +221,7 @@ fn native_ordinary_resume_with_real_source_b_and_task() {
         base64::{engine::general_purpose::STANDARD, Engine as _},
         sodiumoxide::crypto::sign,
     };
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let agent = Path::new(AGENT);
     let lab = Path::new(r"C:\RustDeskAgentLab\native-ordinary-resume");
     workspace::create(lab).unwrap();
@@ -496,7 +496,7 @@ fn preservation_resume_child() {
 
 #[test]
 fn completed_preservation_new_source_admission() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root =
         std::env::temp_dir().join(format!("completed-preservation-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
@@ -1123,7 +1123,7 @@ fn completed_preservation_new_source_admission() {
 
 #[test]
 fn acl_boundary_revocation_after_sd_save_blocks_write_and_stop() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root = std::env::temp_dir().join(format!("acl-boundary-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
     let marker = root.join("enabled");
@@ -1260,7 +1260,7 @@ fn coordination_helper_entry() {
 #[test]
 fn coordination_applying_real_helper_preserves_unknown_result() {
     use hbb_common::base64::{engine::general_purpose::STANDARD, Engine as _};
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let source = Path::new(AGENT).join("transactions/d9c041beca18488f957238579f542934");
     let bundle: serde_json::Value = serde_json::from_slice(
         &std::fs::read(Path::new(AGENT).join("rescue/current/bundle.json")).unwrap(),
@@ -1605,7 +1605,7 @@ fn coordination_applying_real_helper_preserves_unknown_result() {
 
 #[test]
 fn acl_slice_protect_fixture() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     workspace::protect_agent_directory_fixture().unwrap();
     assert_eq!(
         std::fs::read(r"C:\RustDeskAgentLab\total-loss-acl-fixture\existing.exe").unwrap(),
@@ -1619,10 +1619,7 @@ fn acl_slice_protect_fixture() {
 }
 
 fn vm_only() {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").as_deref(),
-        Ok("RDLAB-WIN10" | "RDLAB-WIN11")
-    ));
+    base::lab_guard::require_lab();
     assert_eq!(
         std::env::var("RUSTDESK_R4_TOTAL_LOSS_RED").as_deref(),
         Ok("owner-prepared")
@@ -1739,7 +1736,7 @@ fn total_loss_chain_offline_success() {
 #[test]
 fn worker_event_lock_process() {
     use std::os::windows::fs::OpenOptionsExt;
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\RustDeskAgentLab\total-loss-worker-events");
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
     while !root.join("at-started").exists() {
@@ -2034,7 +2031,7 @@ fn missing_agent_native_query_isolated_service_without_file() {
     use windows_service::service::{
         ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
     };
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let scm = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -2190,7 +2187,7 @@ fn native_slice_contract_rejections_and_wrapper() {
     use windows_service::service::{
         ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
     };
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root = Path::new(r"C:\RustDeskAgentLab\total-loss-native");
     if root.exists() {
         workspace::verify(root).unwrap();
@@ -2349,7 +2346,7 @@ fn missing_agent_failures_preserve_old_data_and_both_errors() {
 fn missing_agent_case(case: &str) {
     use local_repair_plan::total_loss::{self, AgentObservation, Binding};
     use std::cell::Cell;
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root = std::env::temp_dir().join(format!("missing-agent-{}", uuid::Uuid::new_v4()));
     workspace::create(&root).unwrap();
     let native = matches!(case, "native" | "native-existing");

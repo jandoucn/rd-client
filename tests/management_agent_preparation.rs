@@ -29,7 +29,7 @@ fn native_transaction_child() {
     let Some(root) = std::env::var_os("RUSTDESK_HELPER_RUNTIME_FIXTURE") else { return; };
     use hbb_common::base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::{path::PathBuf, time::{Duration, Instant}};
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     let root=PathBuf::from(root);
     assert!(root.starts_with(r"C:\RustDeskAgentLab"));
     let public=STANDARD.decode(std::env::var("RUSTDESK_HELPER_FIXTURE_PUBLIC").unwrap()).unwrap();
@@ -58,7 +58,7 @@ fn real_preparation_binds_signed_assets_and_preserves_running_installation() {
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use windows_service::{service::ServiceAccess, service_manager::{ServiceManager, ServiceManagerAccess}};
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     let requested_package = std::env::var("RUSTDESK_PREPARATION_PACKAGE").unwrap_or_default();
     let activity_package = requested_package == "v65";
     let package_name = if requested_package == "v139" { "agent-auto-bootstrap-v139.msi" }

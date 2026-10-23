@@ -374,7 +374,7 @@ fn native_exe_runtime_child() {
 #[test]
 #[ignore = "requires clean EXE product baseline; never run on MSI"]
 fn native_exe_runtime_real_layout() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     let state = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
     let initial: serde_json::Value =
         serde_json::from_slice(&std::fs::read(state.join("agent.json")).unwrap()).unwrap();
@@ -1026,7 +1026,7 @@ impl Fixture {
         Self::from_package(&Self::package())
     }
     fn from_package(package: &Path) -> Self {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("exe-tx-v218-{}", uuid::Uuid::new_v4().simple()));
         workspace::create(&root).unwrap();

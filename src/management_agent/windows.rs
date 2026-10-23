@@ -327,6 +327,138 @@ fn service_exists(name: &str) -> Result<bool, String> {
     }
 }
 
+// The same local stop intent that gates start_existing/restart_service/repair_service
+// also gates failure action writes: an operator who disabled recovery is
+// troubleshooting and must not have restart actions quietly reinstated.
+pub fn failure_actions_allowed(paths: &AgentPaths, intent: recovery::Intent) -> bool {
+    intent == recovery::Intent::Enabled && failure_actions_markers_clear(paths)
+}
+
+fn failure_actions_markers_clear(paths: &AgentPaths) -> bool {
+    !super::purge_marker_path(paths).exists()
+        && !paths.state.join("disable-agent").exists()
+        && !paths.state.join("maintenance.json").exists()
+}
+
+// The retry thread re-evaluates the gate on every attempt, so a marker appearing
+// or clearing after startup is honoured instead of being frozen at start-time.
+// An absent intent file means no stop was ever recorded, exactly as service_main
+// decides at startup; a present but unreadable one is Unknown and must not
+// authorize the mutation.
+pub fn failure_actions_allowed_now(paths: &AgentPaths) -> bool {
+    failure_actions_allowed_at(paths, &Config2::file())
+}
+
+fn failure_actions_allowed_at(paths: &AgentPaths, intent_path: &Path) -> bool {
+    let intent = match std::fs::symlink_metadata(intent_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => recovery::Intent::Enabled,
+        _ => read_intent_from(intent_path).unwrap_or(recovery::Intent::Unknown),
+    };
+    failure_actions_allowed(paths, intent)
+}
+
+// Per-service result of one configuration pass, kept apart from the SCM and
+// sc.exe calls so the completion rule can be tested without a real service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureActionsOutcome {
+    Absent,
+    Applied,
+    Refused,
+}
+
+fn failure_actions_complete(outcomes: &[(&str, FailureActionsOutcome)]) -> bool {
+    outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome != FailureActionsOutcome::Refused)
+        && outcomes.iter().any(|(name, outcome)| {
+            *name == "RustDesk" && *outcome == FailureActionsOutcome::Applied
+        })
+}
+
+// Decisions of the background retry loop in service_main, separated from the
+// clock, the SCM and the sleep so each rule is testable on its own.
+pub struct FailureActionsRetry {
+    overall: std::time::Instant,
+    window: Option<std::time::Instant>,
+    ever_allowed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureActionsStep {
+    // Configure now.
+    Attempt,
+    // Sleep and ask again.
+    Wait,
+    // Finished: configured, stopped, or out of time.
+    Done(FailureActionsEnd),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureActionsEnd {
+    Configured,
+    Stopped,
+    // A local stop marker or maintenance held the gate for the whole time.
+    HeldByGate,
+    // The gate was open but configuration did not complete in time.
+    Incomplete,
+}
+
+impl FailureActionsRetry {
+    pub const OVERALL: Duration = Duration::from_secs(1800);
+    pub const WINDOW: Duration = Duration::from_secs(120);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            overall: now,
+            window: None,
+            ever_allowed: false,
+        }
+    }
+
+    pub fn before_attempt(
+        &mut self,
+        now: std::time::Instant,
+        stopped: bool,
+        allowed: bool,
+    ) -> FailureActionsStep {
+        if stopped {
+            return FailureActionsStep::Done(FailureActionsEnd::Stopped);
+        }
+        if now >= self.overall + Self::OVERALL {
+            return FailureActionsStep::Done(self.out_of_time());
+        }
+        if !allowed {
+            // The window measures time with the gate open, so a closed gate
+            // restarts it rather than letting maintenance consume it.
+            self.window = None;
+            return FailureActionsStep::Wait;
+        }
+        self.ever_allowed = true;
+        self.window.get_or_insert(now + Self::WINDOW);
+        FailureActionsStep::Attempt
+    }
+
+    pub fn after_attempt(&mut self, now: std::time::Instant, complete: bool) -> FailureActionsStep {
+        if complete {
+            return FailureActionsStep::Done(FailureActionsEnd::Configured);
+        }
+        match self.window {
+            Some(deadline) if now >= deadline => {
+                FailureActionsStep::Done(FailureActionsEnd::Incomplete)
+            }
+            _ => FailureActionsStep::Wait,
+        }
+    }
+
+    fn out_of_time(&self) -> FailureActionsEnd {
+        if self.ever_allowed {
+            FailureActionsEnd::Incomplete
+        } else {
+            FailureActionsEnd::HeldByGate
+        }
+    }
+}
+
 // Idempotent on every agent start. An in-place upgrade stops and restarts the
 // services without running the install script that creates them, so configuring
 // failure actions only at install time would never reach an upgraded machine.
@@ -346,12 +478,14 @@ pub fn ensure_service_failure_actions() -> Result<bool, String> {
         .ok_or("Windows system directory unavailable")?
         .join("System32/sc.exe");
     let tokens = failure_actions_tokens();
-    let mut configured = true;
+    let mut outcomes = Vec::new();
     // The agent binary has no access to the client crate root, so the service
     // name is the same fixed literal used by inspect/repair/rescue_recovery.
     for name in ["RustDesk", "RustDeskManagementAgent"] {
-        // Absent services belong to bootstrap/repair; nothing to configure here.
+        // Absent services belong to bootstrap/repair; failure_actions_complete
+        // decides what an absent client service means for this pass.
         if !service_exists(name).unwrap_or(true) {
+            outcomes.push((name, FailureActionsOutcome::Absent));
             continue;
         }
         let output = Command::new(&sc)
@@ -360,9 +494,10 @@ pub fn ensure_service_failure_actions() -> Result<bool, String> {
             .output()
             .map_err(|error| format!("service failure actions {name}: {error}"))?;
         if output.status.success() {
+            outcomes.push((name, FailureActionsOutcome::Applied));
             continue;
         }
-        configured = false;
+        outcomes.push((name, FailureActionsOutcome::Refused));
         // The message is localized and its encoding is the console codepage, so
         // it is logged for an operator to read rather than interpreted here.
         hbb_common::throttled_log!(
@@ -372,7 +507,7 @@ pub fn ensure_service_failure_actions() -> Result<bool, String> {
             output.status
         );
     }
-    Ok(configured)
+    Ok(failure_actions_complete(&outcomes))
 }
 
 #[cfg(test)]
@@ -406,6 +541,199 @@ mod tests {
         );
     }
 
+    // A pass is complete only when the client service accepted the actions and no
+    // present service refused them. An absent client service is the install
+    // ordering case the caller retries, so it must never count as done.
+    #[test]
+    fn failure_actions_complete_requires_client_applied_and_no_refusal() {
+        use FailureActionsOutcome::{Absent, Applied, Refused};
+        let cases = [
+            ((Applied, Applied), true),
+            ((Applied, Absent), true),
+            ((Absent, Applied), false),
+            ((Absent, Absent), false),
+            ((Refused, Applied), false),
+            ((Applied, Refused), false),
+            ((Refused, Refused), false),
+            ((Absent, Refused), false),
+        ];
+        for ((client, agent), expected) in cases {
+            assert_eq!(
+                failure_actions_complete(&[
+                    ("RustDesk", client),
+                    ("RustDeskManagementAgent", agent)
+                ]),
+                expected,
+                "client={client:?} agent={agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_stops_immediately_when_service_stops() {
+        let t = std::time::Instant::now();
+        let mut retry = FailureActionsRetry::new(t);
+        assert_eq!(
+            retry.before_attempt(t, true, true),
+            FailureActionsStep::Done(FailureActionsEnd::Stopped)
+        );
+    }
+
+    #[test]
+    fn retry_waits_while_gated_and_attempts_once_the_gate_opens() {
+        let t = std::time::Instant::now();
+        let mut retry = FailureActionsRetry::new(t);
+        // maintenance.json held during an in-place upgrade: wait, never configure.
+        for s in [0, 5, 600, 1500] {
+            assert_eq!(
+                retry.before_attempt(t + Duration::from_secs(s), false, false),
+                FailureActionsStep::Wait,
+                "{s}s"
+            );
+        }
+        // Cleanup removed the marker: configure.
+        assert_eq!(
+            retry.before_attempt(t + Duration::from_secs(1600), false, true),
+            FailureActionsStep::Attempt
+        );
+        assert_eq!(
+            retry.after_attempt(t + Duration::from_secs(1600), true),
+            FailureActionsStep::Done(FailureActionsEnd::Configured)
+        );
+    }
+
+    #[test]
+    fn retry_window_starts_when_gate_opens_and_resets_when_it_closes() {
+        let t = std::time::Instant::now();
+        let mut retry = FailureActionsRetry::new(t);
+        assert_eq!(
+            retry.before_attempt(t, false, true),
+            FailureActionsStep::Attempt
+        );
+        // Client service not created yet: keep trying inside the window.
+        assert_eq!(
+            retry.after_attempt(t + Duration::from_secs(60), false),
+            FailureActionsStep::Wait
+        );
+        // Gate closes mid-window (maintenance began): the window must reset.
+        assert_eq!(
+            retry.before_attempt(t + Duration::from_secs(100), false, false),
+            FailureActionsStep::Wait
+        );
+        // Reopens later: a fresh window, so 200s after start is still inside it.
+        assert_eq!(
+            retry.before_attempt(t + Duration::from_secs(200), false, true),
+            FailureActionsStep::Attempt
+        );
+        assert_eq!(
+            retry.after_attempt(t + Duration::from_secs(300), false),
+            FailureActionsStep::Wait
+        );
+        // 120s after the window reopened it gives up as incomplete.
+        assert_eq!(
+            retry.after_attempt(t + Duration::from_secs(320), false),
+            FailureActionsStep::Done(FailureActionsEnd::Incomplete)
+        );
+    }
+
+    #[test]
+    fn retry_overall_limit_distinguishes_gate_from_failure() {
+        let t = std::time::Instant::now();
+        let mut held = FailureActionsRetry::new(t);
+        held.before_attempt(t, false, false);
+        assert_eq!(
+            held.before_attempt(t + FailureActionsRetry::OVERALL, false, false),
+            FailureActionsStep::Done(FailureActionsEnd::HeldByGate)
+        );
+        let mut failing = FailureActionsRetry::new(t);
+        // Window keeps reopening (gate flapping) so only the overall limit ends it.
+        let mut now = t;
+        while now < t + FailureActionsRetry::OVERALL {
+            assert_ne!(
+                failing.before_attempt(now, false, true),
+                FailureActionsStep::Done(FailureActionsEnd::HeldByGate)
+            );
+            failing.after_attempt(now, false);
+            now += Duration::from_secs(50);
+            failing.before_attempt(now, false, false);
+            now += Duration::from_secs(10);
+        }
+        assert_eq!(
+            failing.before_attempt(t + FailureActionsRetry::OVERALL, false, true),
+            FailureActionsStep::Done(FailureActionsEnd::Incomplete)
+        );
+    }
+
+    #[test]
+    fn failure_actions_respect_local_stop_intent() {
+        let root =
+            std::env::temp_dir().join(format!("agent-failure-actions-gate-{}", std::process::id()));
+        let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
+        std::fs::create_dir_all(&paths.state).unwrap();
+        assert!(failure_actions_allowed(&paths, recovery::Intent::Enabled));
+        for intent in [recovery::Intent::Disabled, recovery::Intent::Unknown] {
+            assert!(!failure_actions_allowed(&paths, intent), "{intent:?}");
+        }
+        for marker in ["disable-recovery", "disable-agent", "maintenance.json"] {
+            let path = paths.state.join(marker);
+            std::fs::write(&path, b"local-block").unwrap();
+            assert!(
+                !failure_actions_allowed(&paths, recovery::Intent::Enabled),
+                "{marker}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"local-block");
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // The retry thread re-reads the gate, so a marker that clears during an
+    // in-place upgrade must start allowing configuration, and a marker that
+    // appears must stop it.
+    #[test]
+    fn retry_gate_tracks_markers_that_change_after_startup() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-failure-actions-live-gate-{}",
+            std::process::id()
+        ));
+        let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
+        std::fs::create_dir_all(&paths.state).unwrap();
+        // No intent file: nothing was ever stopped, same as the startup decision.
+        assert!(failure_actions_allowed_at(
+            &paths,
+            &root.join("missing.toml")
+        ));
+        let intent = root.join("RustDesk2.toml");
+        // Present but unreadable: Unknown, which must not authorize the mutation.
+        std::fs::write(&intent, b"not = [toml").unwrap();
+        assert!(
+            !failure_actions_allowed_at(&paths, &intent),
+            "corrupt intent blocks"
+        );
+        std::fs::write(&intent, b"[options]\nstop-service = 'N'\n").unwrap();
+        assert!(
+            failure_actions_allowed_at(&paths, &intent),
+            "enabled intent allows"
+        );
+        let maintenance = paths.state.join("maintenance.json");
+        std::fs::write(&maintenance, b"transaction in progress").unwrap();
+        assert!(
+            !failure_actions_allowed_at(&paths, &intent),
+            "maintenance blocks"
+        );
+        std::fs::remove_file(&maintenance).unwrap();
+        assert!(
+            failure_actions_allowed_at(&paths, &intent),
+            "cleanup re-allows"
+        );
+        std::fs::write(&intent, b"[options]\nstop-service = 'Y'\n").unwrap();
+        assert!(
+            !failure_actions_allowed_at(&paths, &intent),
+            "disabled intent blocks"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn disabled_mutations_do_not_read_intent_or_change_the_service() {
         let root = std::env::temp_dir().join(format!("agent-command-gates-{}", std::process::id()));
@@ -432,8 +760,7 @@ mod tests {
 
     #[test]
     fn blocked_public_service_actions_preserve_actual_service() {
-        let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
-        assert!(matches!(computer.as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"), "VM-only service acceptance");
+        base::lab_guard::require_lab();
         let root = std::env::temp_dir().join(format!("agent-public-gates-{}", std::process::id()));
         let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
         std::fs::create_dir_all(&paths.state).unwrap();

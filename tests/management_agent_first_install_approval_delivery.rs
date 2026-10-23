@@ -27,11 +27,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        assert_eq!(
-            std::env::var("COMPUTERNAME").as_deref(),
-            Ok("RDLAB-WIN10"),
-            "INPUT BLOCKED: Win10 owner only"
-        );
+        base::lab_guard::require_lab_os("win10");
         assert_eq!(
             std::env::var("RUSTDESK_T01_PRODUCER").as_deref(),
             Ok("red-formal-sos-1501"),

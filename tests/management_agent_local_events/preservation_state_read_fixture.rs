@@ -97,7 +97,7 @@ fn preservation_installed_state_acl_read_boundary() {
     }
     let mut previous = 0u8;
     assert_eq!(unsafe { RtlAdjustPrivilege(18, 1, 0, &mut previous) }, 0);
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN11"));
+    base::lab_guard::require_lab_os("win11");
     let root =
         Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\preservation-state-read-fixture");
     if root.exists() {

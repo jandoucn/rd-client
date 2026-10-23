@@ -44,7 +44,7 @@ fn native_purge_service_initial_stopped_is_not_exited() {
     service_case(true);
 }
 fn service_case(initial_stopped: bool) {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(),"RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root=Path::new(ROOT);std::fs::create_dir(root).unwrap();
     std::fs::create_dir(root.join("payload")).unwrap();
     std::fs::write(root.join("payload/keep"),b"preserve until actual exit").unwrap();
@@ -115,7 +115,7 @@ fn service_case(initial_stopped: bool) {
 #[test]
 fn native_purge_com_missing_and_maintenance_preserves_task() {
     use std::process::Command;
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(),"RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     const TASK: &str="RustDeskAgentTestTask-PurgeCom";
     fn run(script: &str) -> std::process::Output {
         Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")

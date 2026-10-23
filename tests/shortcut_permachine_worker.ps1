@@ -1,7 +1,7 @@
 param([ValidateSet('present','missing')][string]$Scenario='present')
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'fixed Win11 SYSTEM required'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11')) -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'fixed Win11 SYSTEM required'}
 $base='C:\Users\Public\shortcut-machine'
 $receipt="$base\$Scenario.json"
 if(Test-Path $receipt){throw 'receipt exists; do not repeat'}

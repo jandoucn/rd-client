@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11'){throw 'Win11 only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11'))){throw 'Win11 only'}
 $installer=New-Object -ComObject WindowsInstaller.Installer
 foreach($code in '{D38BA039-2E82-4915-A8B1-B616520CCAB1}','{D38BA039-2E82-4915-A8B1-B616520CCAB2}'){
     $state=$installer.ProductState($code)

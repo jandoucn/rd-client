@@ -40,7 +40,7 @@ $env:RUSTDESK_T01_PRODUCER='red-formal-sos-1501'
 
 ## owner 执行
 
-主协调串行交给 RDLAB-WIN10 owner；本任务不操作 VM。保持原输入目录，测试EXE放入独立文件名。示例中的 EXE 路径由 owner 按实际复制位置替换。
+主协调串行交给 Win10 实验机 owner（`RUSTDESK_LAB_HOST` 等于本机 `COMPUTERNAME`，可选 `RUSTDESK_LAB_OS=win10`）；本任务不操作 VM。保持原输入目录，测试EXE放入独立文件名。示例中的 EXE 路径由 owner 按实际复制位置替换。
 
 ```powershell
 $env:RUSTDESK_T01_PRODUCER='red-formal-sos-1501'

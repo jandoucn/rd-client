@@ -1,6 +1,6 @@
 # Win11 独立验收驱动
 
-仅允许 `RDLAB-WIN11`、SMBIOS UUID `d91a13d9-2bb7-40bf-b5e4-9d57870cd242`、SYSTEM SID `S-1-5-18` 同时匹配。全部 PowerShell 文件使用 ASCII，兼容无 BOM 的 Windows PowerShell 5.1。禁止在宿主执行；宿主只传输文件和读取证据。当前固定基线为 SOS MSI build `2026100502`，installation `dcc73dd2fba22bf04c7df497053ae2df`；更换基线需要先协调、记录新批准摘要并复核驱动期望值。
+原隔离 VM 已停用，Windows 真机验收统一在 `win10-gs` 执行。仅允许 `RUSTDESK_LAB_HOST` 非空且与本机 `COMPUTERNAME`（忽略大小写）相等、SYSTEM SID `S-1-5-18` 同时匹配；运行前在 SYSTEM 任务中设置 `RUSTDESK_LAB_HOST=%COMPUTERNAME%`。全部 PowerShell 文件使用 ASCII，兼容无 BOM 的 Windows PowerShell 5.1。禁止在宿主执行；宿主只传输文件和读取证据。当前固定基线为 SOS MSI build `2026100502`，installation `dcc73dd2fba22bf04c7df497053ae2df`；更换基线需要先协调、记录新批准摘要并复核驱动期望值。
 
 ## 调用与结果
 

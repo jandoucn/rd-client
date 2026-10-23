@@ -2,8 +2,9 @@
 #include <cstdio>
 
 int wmain() {
-    WCHAR machine[256]{}; DWORD length = 256;
-    if (!GetComputerNameW(machine, &length) || wcscmp(machine, L"RDLAB-WIN11")) return 90;
+    WCHAR machine[256]{}, lab[256]{}; DWORD length = 256;
+    DWORD declared = GetEnvironmentVariableW(L"RUSTDESK_LAB_HOST", lab, 256);
+    if (!declared || declared >= 256 || !GetComputerNameW(machine, &length) || _wcsicmp(machine, lab)) return 90;
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(com)) return 91;
     WCHAR temp[MAX_PATH]{}, unique[MAX_PATH]{};

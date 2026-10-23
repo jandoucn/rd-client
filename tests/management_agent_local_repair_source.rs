@@ -77,11 +77,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let machine = std::env::var("COMPUTERNAME").unwrap();
-        assert!(
-            matches!(machine.as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"),
-            "VM-only test"
-        );
+        base::lab_guard::require_lab();
         let root = std::env::temp_dir().join(format!("local-source-v223-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         hbb_common::sodiumoxide::init().unwrap();

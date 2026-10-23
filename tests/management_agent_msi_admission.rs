@@ -57,7 +57,7 @@ fn product_state(code: &str) -> i32 {
 }
 
 fn require_vm() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     assert_eq!(
         std::env::var("RUSTDESK_ADMISSION_NATIVE_LAB").unwrap(),
         "v236"

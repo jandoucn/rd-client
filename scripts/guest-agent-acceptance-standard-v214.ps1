@@ -1,7 +1,7 @@
 param([ValidateSet('Prepare','Run')][string]$Mode)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-if($env:COMPUTERNAME -ne 'RDLAB-WIN10' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or (Get-CimInstance Win32_ComputerSystemProduct).UUID -ne 'a6c9edff-6159-468f-bdba-08720a153424'){throw 'WIN10_SYSTEM_REQUIRED'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10') -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'WIN10_SYSTEM_REQUIRED: set RUSTDESK_LAB_HOST to this COMPUTERNAME (RUSTDESK_LAB_OS unset or win10) and run as SYSTEM'}
 $lab='C:\RustDeskAgentLab';$prefix="$lab\standard-v214-$Mode"
 if(Test-Path "$prefix.result.json"){throw 'RUN_USED'}
 $agent='C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe'

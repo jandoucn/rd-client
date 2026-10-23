@@ -387,7 +387,7 @@ async fn blocking_pipe_wrong_existing_image_is_not_a_missing_file_failure() {
 }
 
 fn dual_token_root() -> PathBuf {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     let root = PathBuf::from(std::env::var_os("T04Z_DUAL_ROOT").unwrap());
     assert_eq!(
         root,

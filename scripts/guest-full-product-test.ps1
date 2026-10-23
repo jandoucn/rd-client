@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -notlike 'RDLAB-*'){throw 'Only lab guests may run this test'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME){throw 'Only the declared lab host may run this test: set RUSTDESK_LAB_HOST to this COMPUTERNAME'}
 $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Administrator required'}
 $folder='C:\RustDeskAgentLab'

@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
-if ($env:COMPUTERNAME -ne 'RDLAB-WIN10' -or (Get-CimInstance Win32_OperatingSystem).BuildNumber -ne '17763') { throw 'isolated Win10 required' }
+if ((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10')) -or (Get-CimInstance Win32_OperatingSystem).BuildNumber -ne '17763') { throw 'isolated Win10 required' }
 if (!(New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'normal elevated token required' }
 $mutex=[Threading.Mutex]::new($false,'Global\RustDeskWin10LegacyAgentFixture')
 if (!$mutex.WaitOne(0)) { throw 'fixture already owned' }

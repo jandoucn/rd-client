@@ -1294,7 +1294,7 @@ mod admission_program_tests {
     #[ignore = "VM-only: frozen admission MSI required; validates pre-launch rejection, never installs"]
     fn native_join_recorded_caller_reads_package_then_refuses_foreign_workspace() {
         use sha2::{Digest, Sha256};
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         assert_eq!(option_env!("RUSTDESK_MSI_ADMISSION"), Some("1"));
         let package = Path::new(r"C:\RustDeskAgentLab\admission234-package.msi");
         let bytes = std::fs::read(package).unwrap();
@@ -1423,7 +1423,7 @@ mod admission_recovery_tests {
     #[ignore = "Win11 SYSTEM only: frozen unregistered v235-new MSI; no installation"]
     fn actual_unregistered_target_omits_only_rollback_removal_and_preserves_assets() {
         use sha2::{Digest, Sha256};
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        base::lab_guard::require_lab_os("win11");
         let package = Path::new(r"C:\RustDeskAgentLab\agent-sos-admission-v235-new.msi");
         let bytes = std::fs::read(package).unwrap();
         let hash = hex::encode(Sha256::digest(&bytes));

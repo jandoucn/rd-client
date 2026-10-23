@@ -37,10 +37,7 @@ fn request() -> Vec<u8> {
     .unwrap()
 }
 fn vm() {
-    assert!(matches!(
-        std::env::var("COMPUTERNAME").unwrap().as_str(),
-        "RDLAB-WIN10" | "RDLAB-WIN11"
-    ));
+    base::lab_guard::require_lab();
 }
 
 #[test]

@@ -17,7 +17,7 @@ fn pipe() -> String {
 #[hbb_common::tokio::test]
 #[ignore = "Requires v2-capable installed client in isolated SYSTEM lab VM"]
 async fn installed_activity_pipe_confirms_idle_and_preserves_legacy_response() {
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     let exe = std::path::Path::new(r"C:\Program Files\RustDesk\RustDesk.exe");
     let legacy = health_windows::probe(r"\\.\pipe\RustDesk\management-health-v1", exe, 2026100502, std::time::Duration::from_secs(3)).await.unwrap();
     assert!(legacy.local_responsive);
@@ -61,8 +61,7 @@ async fn activity_pipe_reports_idle_and_busy_while_legacy_pipe_stays_compatible(
 #[hbb_common::tokio::test]
 async fn actual_health_pipe_binds_server_process_build_and_separates_network_status() {
     if let Some(executable) = std::env::var_os("RUSTDESK_ACTUAL_HEALTH_EXECUTABLE") {
-        let computer = std::env::var("COMPUTERNAME").unwrap();
-        assert!(computer == "RDLAB-WIN10" || computer == "RDLAB-WIN11");
+        base::lab_guard::require_lab();
         let response = health_windows::probe(
             r"\\.\pipe\RustDesk\management-health-v1",
             std::path::Path::new(&executable),

@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Source)
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN10'){throw 'guest only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10'))){throw 'guest only'}
 $text=[IO.File]::ReadAllText($Source)
 $body=$text.Substring($text.IndexOf('function Save-MainIdentityDiagnostic('))
 $body=$body.Substring(0,$body.IndexOf('function Invoke-Bounded('))

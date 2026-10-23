@@ -29,7 +29,7 @@ fn approved_msi_assets_extract_without_changing_installed_services_or_identity()
     use sha2::{Digest, Sha256};
     use std::path::Path;
     use windows_service::{service::ServiceAccess, service_manager::{ServiceManager, ServiceManagerAccess}};
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     let package = Path::new(r"C:\RustDeskAgentLab\agent-health-v25.msi");
     let bytes = std::fs::read(package).unwrap();
     let hash = hex::encode(Sha256::digest(&bytes));

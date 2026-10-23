@@ -8,7 +8,7 @@ fn ps(script:&str) {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
 }
 fn setup()->PathBuf {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(),"RDLAB-WIN11");
+    base::lab_guard::require_lab_os("win11");
     let root=Path::new(r"C:\ProgramData").join(format!("RustDeskPurgeMarkerFixture-{}",uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     ps(&format!("$ErrorActionPreference='Stop';$a=New-Object Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)');Set-Acl -LiteralPath '{}' -AclObject $a",root.display()));

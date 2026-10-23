@@ -58,7 +58,7 @@ fn actual_msi_rollback(upgrade: bool, bootstrap: bool) {
     use std::path::{Path, PathBuf};
     use transaction::{Evidence, Phase, Transaction};
     use windows_service::{service::ServiceAccess, service_manager::{ServiceManager, ServiceManagerAccess}};
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     assert_eq!(std::env::var("RUSTDESK_NATIVE_MSI_LAB").unwrap(), "rollback-v28");
     let package = Path::new(r"C:\RustDeskAgentLab\agent-health-v25.msi");
     assert_eq!(hex::encode(Sha256::digest(std::fs::read(package).unwrap())), "d158bbb84ff98b7b1ac84cd373181555f9b97a9a2782c6690aaaa8859f4956d3");

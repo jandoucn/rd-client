@@ -190,10 +190,7 @@ impl Fixture {
             Ok("1"),
             "only the main agent's scheduled VM driver may execute these tests"
         );
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         let base = PathBuf::from(std::env::var_os("RUSTDESK_LOCAL_EVENTS_ROOT").unwrap());
         assert!(base.is_absolute());
         let root = base.join(format!(

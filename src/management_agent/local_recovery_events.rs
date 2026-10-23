@@ -29,7 +29,7 @@ pub fn context() -> Result<Option<EventContext>, String> {
     #[cfg(test)]
     if let Some(path) = std::env::var_os("RUSTDESK_LOCAL_EVENTS_FIXTURE") {
         let path = PathBuf::from(path);
-        if std::env::var("COMPUTERNAME").as_deref() != Ok("RDLAB-WIN11")
+        if !base::lab_guard::is_lab_os("win11")
             || !path.starts_with(r"C:\RustDeskAgentLab")
         {
             return Err("local events fixture outside scheduled lab".into());
@@ -342,7 +342,7 @@ pub(super) fn total_loss_event_step<T>(
     #[cfg(test)]
     if let Some(root) = std::env::var_os("RUSTDESK_EVENT_LOCK_BOUNDARY") {
         let root = std::path::PathBuf::from(root);
-        if std::env::var("COMPUTERNAME").as_deref() != Ok("RDLAB-WIN11")
+        if !base::lab_guard::is_lab_os("win11")
             || root != Path::new(r"C:\RustDeskAgentLab\total-loss-worker-events")
         {
             return Err("event lock fixture outside fixed lab".into());
@@ -843,7 +843,7 @@ mod tests {
     struct Fixture(EventContext);
     impl Fixture {
         fn new() -> Self {
-            assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+            base::lab_guard::require_lab_os("win10");
             assert_eq!(std::env::var("LOCAL_EVENTS_R34_SAFE").unwrap(), "1");
             let root = PathBuf::from(std::env::var_os("RUSTDESK_LOCAL_EVENTS_ROOT").unwrap()).join(
                 format!(

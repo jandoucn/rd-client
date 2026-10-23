@@ -48,7 +48,7 @@
 `management_agent_first_install_delivery_contract.rs`：两个显式 ignored 的 VM-owner 测试。默认执行可能筛出零测试，**必须使用 --ignored 和下面的精确名称**。
 
 - `t01_formal_approval_tamper_refused_preserves_original_inputs`：正式公钥验证输入，篡改 hash 保留旧签名必须精确返回 signature verification failed；跨包型 reply 绑定失败；原包 hash 不变。无安装器调用、无网络、无服务变更，不使用 test key；仍须在 Win10 执行，且需要原签名 manifest 生成的 resolved.json。
-- `t01_ordinary_msi_missing_approval_preserves_installation_observation`：仅 RDLAB-WIN10，已安装正式同版本 MSI、无 rescue/transactions/sidecar 的干净基线。冻结 API reply→正式验签→双服务固定契约及真实1501 IPC健康/无会话→loopback原包下载→固定msiexec同版本重装。**安装进程返回后才重新读取报告mtime基线**，只接受随后mtime变化且读前读后mtime相同的完整JSON发布（最长360秒）。观测证据保留安装完成UTC、基线采集UTC、基线/新报告mtime、观测UTC、测试PID、前后双服务PID及健康IPC PID；不向worker报告注入schema或时间字段。验证缺批准时unavailable/waiting_approval/ready=false、无新bundle、身份/配置/文件/实例保全。身份与配置使用布尔比较和固定脱敏失败消息，不输出TOML原字节。测试不写sidecar、不造Committed。
+- `t01_ordinary_msi_missing_approval_preserves_installation_observation`：仅在 `RUSTDESK_LAB_HOST` 等于本机 `COMPUTERNAME` 的 Win10 实验机（可选 `RUSTDESK_LAB_OS=win10`），已安装正式同版本 MSI、无 rescue/transactions/sidecar 的干净基线。冻结 API reply→正式验签→双服务固定契约及真实1501 IPC健康/无会话→loopback原包下载→固定msiexec同版本重装。**安装进程返回后才重新读取报告mtime基线**，只接受随后mtime变化且读前读后mtime相同的完整JSON发布（最长360秒）。观测证据保留安装完成UTC、基线采集UTC、基线/新报告mtime、观测UTC、测试PID、前后双服务PID及健康IPC PID；不向worker报告注入schema或时间字段。验证缺批准时unavailable/waiting_approval/ready=false、无新bundle、身份/配置/文件/实例保全。身份与配置使用布尔比较和固定脱敏失败消息，不输出TOML原字节。测试不写sidecar、不造Committed。
 
 在当前无批准入口的基线上，预期观察waiting_approval且旧安装保全；不能要求未来sidecar产生，也不据此记业务RED。缺正式包/manifest、验签失败、无注册源、非Win10、安装非零/3010、无安装后新报告均为输入/环境阻塞。已有或后来出现合法批准时不适用缺批准观察，保留现场，不删除批准。
 

@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Source, [string]$OnlyCase='')
 $ErrorActionPreference='Stop'
-if ((Get-CimInstance Win32_OperatingSystem).BuildNumber -ne '17763' -or (Get-CimInstance Win32_ComputerSystem).Model -ne 'VirtualBox') { throw 'Win10 isolated guest required' }
+if ((Get-CimInstance Win32_OperatingSystem).BuildNumber -ne '17763' -or !$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10')) { throw 'Win10 isolated guest required' }
 $text = [IO.File]::ReadAllText($Source)
 $script = $text.Split(@('const SCRIPT: &str = r###"'),[StringSplitOptions]::None)[1].Split(@('"###;'),[StringSplitOptions]::None)[0]
 $root = Join-Path $env:TEMP ('legacy-agent-fixture-'+[Guid]::NewGuid().ToString('N'))

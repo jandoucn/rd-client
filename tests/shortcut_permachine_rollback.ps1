@@ -1,6 +1,6 @@
 param([ValidateSet('present','missing')][string]$Scenario='present',[string]$ExpectedHash='90051585121DF95802CC2B9E3934ACD3ECCCF4DBA9AF162B360F4496B0D7CB93')
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'fixed SYSTEM only'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11')) -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'fixed SYSTEM only'}
 $base='C:\Users\Public\shortcut-machine';$receipt="$base\rollback-$Scenario.json";$package="$base\failure.msi"
 if(Test-Path $receipt){throw 'existing receipt'}
 function Snapshot {

@@ -32,6 +32,9 @@ mod status;
 #[path = "management_agent/bootstrap_policy.rs"]
 mod bootstrap_policy;
 #[cfg(windows)]
+#[path = "management_agent/diagnostic_logs.rs"]
+mod diagnostic_logs;
+#[cfg(windows)]
 #[path = "management_agent/bootstrap.rs"]
 pub mod bootstrap;
 #[cfg(windows)]
@@ -811,6 +814,28 @@ pub fn recovery_msi_args(paths: &AgentPaths) -> Vec<String> {
     ]
 }
 
+// Fixed verbose log of the silent recovery MSI, overwritten on each run, beside
+// the agent's other fixed directories.
+pub fn recovery_msi_log_args(paths: &AgentPaths) -> Vec<String> {
+    vec![
+        "/L*v".into(),
+        paths.logs.join("recovery-msi.log").display().to_string(),
+    ]
+}
+
+// msiexec aborts with 1622 when the log directory is missing; recovery must
+// not fail just because its log cannot be written.
+#[cfg(windows)]
+fn usable_recovery_msi_log_args(paths: &AgentPaths) -> Vec<String> {
+    match std::fs::create_dir_all(&paths.logs) {
+        Ok(()) => recovery_msi_log_args(paths),
+        Err(error) => {
+            hbb_common::log::warn!("recovery MSI log directory unavailable: {error}");
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(windows)]
 const RECOVERY_DEFERRED: &str = "management agent recovery delegated to helper";
 
@@ -892,6 +917,7 @@ pub fn run_recovery_helper(arguments: &[std::ffi::OsString]) -> Result<(), Strin
             .arg("/i")
             .arg(&cache)
             .args(recovery_msi_args(&paths))
+            .args(usable_recovery_msi_log_args(&paths))
             .status()
             .map_err(|error| error.to_string())?;
         if !status.success() {
@@ -1569,27 +1595,81 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     })?;
     let paths = AgentPaths::from_program_data(program_data, config.edition);
     ensure_agent_layout(&paths).map_err(windows_service::Error::Winapi)?;
-    // Re-apply SCM failure actions on every start so an in-place upgrade (which
-    // never re-runs the install script) still gains sub-second crash recovery.
-    // Non-fatal: a failure is retried on the next start.
-    match recovery_windows::ensure_service_failure_actions() {
-        Ok(true) => {}
-        Ok(false) => hbb_common::throttled_log!(
-            Duration::from_secs(3600),
-            warn,
-            "service failure actions not fully applied"
-        ),
-        Err(error) => hbb_common::throttled_log!(
-            Duration::from_secs(3600),
-            warn,
-            "service failure actions setup failed: {error}"
-        ),
-    }
     let intent = if hbb_common::config::Config2::file().exists() {
         recovery_windows::read_intent().unwrap_or(recovery::Intent::Unknown)
     } else {
         recovery::Intent::Enabled
     };
+    // Re-apply SCM failure actions on every start so an in-place upgrade (which
+    // never re-runs the install script) still gains sub-second crash recovery.
+    // Gated by the same local stop intent as every other mutating action: an
+    // operator who disabled recovery is troubleshooting, and rewriting restart
+    // actions behind their back would undo that. Failing to configure is
+    // non-fatal; failing to even start the worker is treated like every other
+    // worker thread here.
+    //
+    // The gate is re-read on every attempt rather than decided once here: an
+    // in-place upgrade holds maintenance.json while its own new agent starts, so a
+    // start-time decision would skip configuration for exactly the upgrade this
+    // capability exists for, and never revisit it until the next restart.
+    let failures_stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failure_actions_stop = failures_stopped.clone();
+    let failure_actions_paths = paths.clone();
+    std::thread::Builder::new()
+        .name("agent-failure-actions".into())
+        .spawn(move || {
+            // The installer creates the client service near InstallFinalize, after
+            // this agent service starts, so the first attempt can legitimately find
+            // it absent; and a pending transaction can hold the gate for its whole
+            // duration. Retrying in the background covers both without blocking
+            // service startup.
+            use recovery_windows::{FailureActionsEnd as End, FailureActionsStep as Step};
+            let mut retry = recovery_windows::FailureActionsRetry::new(std::time::Instant::now());
+            let mut reported = false;
+            let end = loop {
+                let stopped = failure_actions_stop.load(std::sync::atomic::Ordering::SeqCst);
+                let allowed = recovery_windows::failure_actions_allowed_now(&failure_actions_paths);
+                match retry.before_attempt(std::time::Instant::now(), stopped, allowed) {
+                    Step::Done(end) => break end,
+                    Step::Wait => {
+                        std::thread::sleep(Duration::from_secs(5));
+                        continue;
+                    }
+                    Step::Attempt => {}
+                }
+                let complete = match recovery_windows::ensure_service_failure_actions() {
+                    Ok(complete) => complete,
+                    Err(error) => {
+                        if !reported {
+                            reported = true;
+                            hbb_common::throttled_log!(
+                                Duration::from_secs(3600),
+                                warn,
+                                "service failure actions setup failed: {error}"
+                            );
+                        }
+                        false
+                    }
+                };
+                match retry.after_attempt(std::time::Instant::now(), complete) {
+                    Step::Done(end) => break end,
+                    _ => std::thread::sleep(Duration::from_secs(5)),
+                }
+            };
+            match end {
+                End::Configured | End::Stopped => {}
+                // The operator's local stop intent, not a fault.
+                End::HeldByGate => {
+                    hbb_common::log::info!("service failure actions left unchanged by local gate")
+                }
+                End::Incomplete => hbb_common::throttled_log!(
+                    Duration::from_secs(3600),
+                    warn,
+                    "service failure actions not fully applied after retries"
+                ),
+            }
+        })
+        .map_err(windows_service::Error::Winapi)?;
     enable_service_recovery(&paths, intent).map_err(windows_service::Error::Winapi)?;
     hbb_common::sodiumoxide::init().map_err(|_| {
         windows_service::Error::Winapi(std::io::Error::other("agent crypto initialization failed"))
@@ -1599,6 +1679,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         "RustDeskManagementAgent",
         move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
+                failures_stopped.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = stop_tx.send(());
                 ServiceControlHandlerResult::NoError
             }
@@ -2435,6 +2516,24 @@ mod tests {
         record_success(&mut state, &t);
         assert_eq!(state.retry_stage, 0);
         assert!(state.last_error.is_empty());
+    }
+
+    #[test]
+    fn recovery_msi_writes_fixed_verbose_log_under_agent_logs() {
+        let paths = AgentPaths::from_program_data(r"C:\ProgramData", Edition::Standard);
+        assert_eq!(
+            recovery_msi_log_args(&paths),
+            vec![
+                "/L*v".to_owned(),
+                paths.logs.join("recovery-msi.log").display().to_string(),
+            ]
+        );
+        assert!(paths
+            .logs
+            .join("recovery-msi.log")
+            .starts_with(&paths.agent));
+        let original = recovery_msi_args(&paths);
+        assert!(!original.iter().any(|argument| argument.starts_with("/L")));
     }
 
     #[test]

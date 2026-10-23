@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 fn lab() -> PathBuf {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     PathBuf::from(r"C:\RustDeskAgentLab\exe-v215")
 }
 struct Fixture(PathBuf);

@@ -1652,10 +1652,7 @@ pub(super) mod r4_finalize_tests {
 
     impl Fixture {
         pub(crate) fn new() -> Self {
-            assert!(matches!(
-                std::env::var("COMPUTERNAME").as_deref(),
-                Ok("RDLAB-WIN10" | "RDLAB-WIN11")
-            ));
+            base::lab_guard::require_lab();
             assert_eq!(
                 std::env::var("LOCAL_EVENTS_R4_FINALIZE").as_deref(),
                 Ok("scheduled")

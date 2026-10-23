@@ -16,7 +16,7 @@ const KEY: &str = "windows-x86_64-msi-standard";
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("rescue-projection-{}", uuid::Uuid::new_v4()));
         workspace::create(&root).unwrap();

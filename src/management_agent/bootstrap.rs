@@ -869,10 +869,7 @@ mod tests {
     fn agent_restore_review_revocation_after_copy_preserves_missing_and_partial() {
         use super::super::{agent_restore, workspace};
         use std::cell::Cell;
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         for reason in [
             "disable-agent",
             "disable-recovery",
@@ -1000,10 +997,7 @@ mod tests {
     fn agent_restore_review_budget_write_failure_precedes_creation() {
         use super::super::{agent_restore, workspace};
         use std::os::windows::fs::OpenOptionsExt;
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
         workspace::create(&root).unwrap();
@@ -1055,10 +1049,7 @@ mod tests {
     fn agent_restore_review_success_debits_once_and_rechecks_copied_file() {
         use super::super::{agent_restore, workspace};
         use std::cell::Cell;
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
         workspace::create(&root).unwrap();
@@ -1113,10 +1104,7 @@ mod tests {
     #[test]
     fn agent_restore_review_occupied_partial_and_bad_source_preserve_evidence() {
         use super::super::{agent_restore, workspace};
-        assert!(matches!(
-            std::env::var("COMPUTERNAME").unwrap().as_str(),
-            "RDLAB-WIN10" | "RDLAB-WIN11"
-        ));
+        base::lab_guard::require_lab();
         for scenario in ["partial", "bad-source", "appeared"] {
             let root = Path::new(r"C:\RustDeskAgentLab")
                 .join(format!("agentrestore-review-{}", uuid::Uuid::new_v4()));
@@ -1181,7 +1169,7 @@ mod tests {
             service_control::{self, Contract},
             Edition, PackageKind,
         };
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN11");
+        base::lab_guard::require_lab_os("win11");
         assert_eq!(std::env::var("RUSTDESK_AGENT_RESTORE_LAB").unwrap(), "v218");
         let config = ServiceConfig {
             edition: Edition::Sos,
@@ -1420,7 +1408,7 @@ mod tests {
     #[test]
     #[ignore = "Win10 SYSTEM fixed installed bootstrap fixture, current-exe identity only substituted"]
     fn fixed_installed_bootstrap_repair_entry() {
-        assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+        base::lab_guard::require_lab_os("win10");
         assert_eq!(
             std::env::var("RUSTDESK_BOOTSTRAP_REPAIR_LAB").unwrap(),
             "v210"

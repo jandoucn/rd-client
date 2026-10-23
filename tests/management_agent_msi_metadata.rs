@@ -17,7 +17,7 @@ fn invalid_database_is_refused_without_changing_bytes() {
 #[ignore = "Requires verified v25 MSI in lab VM"]
 fn actual_package_metadata_is_read_only_and_matches_registered_identity() {
     use sha2::{Digest, Sha256};
-    assert!(matches!(std::env::var("COMPUTERNAME").unwrap().as_str(), "RDLAB-WIN10" | "RDLAB-WIN11"));
+    base::lab_guard::require_lab();
     let path = std::path::Path::new(r"C:\RustDeskAgentLab\agent-health-v25.msi");
     let before = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
     assert_eq!(before, "d158bbb84ff98b7b1ac84cd373181555f9b97a9a2782c6690aaaa8859f4956d3");

@@ -1,7 +1,7 @@
 param([Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]{8,64}$')][string]$RunId)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-if($env:COMPUTERNAME -ne 'RDLAB-WIN10' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or (Get-CimInstance Win32_ComputerSystemProduct).UUID -ne 'a6c9edff-6159-468f-bdba-08720a153424'){throw 'WIN10_SYSTEM_REQUIRED'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win10') -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'WIN10_SYSTEM_REQUIRED: set RUSTDESK_LAB_HOST to this COMPUTERNAME (RUSTDESK_LAB_OS unset or win10) and run as SYSTEM'}
 $lab='C:\RustDeskAgentLab'
 $scene="$lab\local-command-5608"
 $transaction='517bab529ccc3a5494642fd63a606d2b'

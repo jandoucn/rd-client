@@ -870,7 +870,7 @@ pub fn prepare_fixture(agent: &Path, public: &[u8]) -> Result<serde_json::Value,
 
 #[cfg(test)]
 pub fn prepare_native_resume_source_fixture(public: &[u8]) -> Result<serde_json::Value, String> {
-    if std::env::var("COMPUTERNAME").as_deref() != Ok("RDLAB-WIN11") {
+    if !base::lab_guard::is_lab_os("win11") {
         return Err("native source fixture requires Win11".into());
     }
     let mut layout = fixed_layout()?;

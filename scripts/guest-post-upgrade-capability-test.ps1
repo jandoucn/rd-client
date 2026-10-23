@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-if($env:COMPUTERNAME -notlike 'RDLAB-*'){throw 'Only lab guests may run this test'}
+if(!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME){throw 'Only the declared lab host may run this test: set RUSTDESK_LAB_HOST to this COMPUTERNAME'}
 $folder='C:\RustDeskAgentLab'
 $statePath='C:\ProgramData\RustDesk\ManagementAgent\state\agent.json'
 $agentPath='C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe'

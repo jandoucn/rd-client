@@ -29,7 +29,7 @@ const BUILD: u64 = 2026101501;
 const AGENT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
 
 fn lab() {
-    assert_eq!(std::env::var("COMPUTERNAME").as_deref(), Ok("RDLAB-WIN10"));
+    base::lab_guard::require_lab_os("win10");
     assert_eq!(
         std::env::var("RUSTDESK_T01_DELIVERY").as_deref(),
         Ok("ordinary-msi-1501")

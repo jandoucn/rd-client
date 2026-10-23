@@ -155,7 +155,7 @@ fn wrapper_preserves_legacy_update_with_pending_event_and_rejects_ambiguous_oute
 
 #[test]
 fn signed_catalog_exact_build_kind_edition_and_bytes_or_refuse() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     hbb_common::sodiumoxide::init().unwrap();
     let path = Path::new(r"C:\RustDeskAgentLab")
         .join(format!("migration-{}.exe", uuid::Uuid::new_v4().simple()));
@@ -441,7 +441,7 @@ fn readonly_status_tail_fixture_child() {
 
 #[test]
 fn readonly_status_exit_after_empty_peek_drains_tail_with_limits() {
-    assert_eq!(std::env::var("COMPUTERNAME").unwrap(), "RDLAB-WIN10");
+    base::lab_guard::require_lab_os("win10");
     for case in ["json", "limit", "error", "inherited"] {
         let root = Path::new(r"C:\RustDeskAgentLab")
             .join(format!("status-tail-{}", uuid::Uuid::new_v4().simple()));

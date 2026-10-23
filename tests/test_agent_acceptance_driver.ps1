@@ -1,8 +1,7 @@
 param([Parameter(Mandatory=$true)][ValidatePattern('^[a-z0-9-]{8,64}$')][string]$RunId)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-if($env:COMPUTERNAME -ne 'RDLAB-WIN11' -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or
-    (Get-CimInstance Win32_ComputerSystemProduct).UUID -ne 'd91a13d9-2bb7-40bf-b5e4-9d57870cd242'){throw 'VM_SYSTEM_REQUIRED'}
+if((!$env:RUSTDESK_LAB_HOST -or $env:RUSTDESK_LAB_HOST -ne $env:COMPUTERNAME -or ($env:RUSTDESK_LAB_OS -and $env:RUSTDESK_LAB_OS -ne 'win11')) -or [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'VM_SYSTEM_REQUIRED'}
 $root='C:\RustDeskAgentLab'
 $output=Join-Path $root "$RunId.tests.json"
 if(Test-Path -LiteralPath $output){throw 'RUN_ID_REUSED'}
@@ -27,12 +26,16 @@ try {
             if($errors.Count){throw ($errors|Out-String)}
         }
     }
-    Test-Case 'guard rejects host UUID even with VM name and SYSTEM' {
-        Reject {Assert-AcceptanceContext 'RDLAB-WIN11' 'S-1-5-18' '00000000-0000-0000-0000-000000000000'} 'VM_SYSTEM_REQUIRED'
+    Test-Case 'guard rejects undeclared lab host even with SYSTEM' {
+        Reject {Assert-AcceptanceContext 'YAN' 'S-1-5-18' ''} 'VM_SYSTEM_REQUIRED'
+        Reject {Assert-AcceptanceContext 'YAN' 'S-1-5-18' $null} 'VM_SYSTEM_REQUIRED'
     }
-    Test-Case 'guard rejects ordinary user and Win10' {
-        Reject {Assert-AcceptanceContext 'RDLAB-WIN11' 'S-1-5-21' 'd91a13d9-2bb7-40bf-b5e4-9d57870cd242'} 'VM_SYSTEM_REQUIRED'
-        Reject {Assert-AcceptanceContext 'RDLAB-WIN10' 'S-1-5-18' 'd91a13d9-2bb7-40bf-b5e4-9d57870cd242'} 'VM_SYSTEM_REQUIRED'
+    Test-Case 'guard rejects ordinary user and other declared host' {
+        Reject {Assert-AcceptanceContext 'YAN' 'S-1-5-21' 'YAN'} 'VM_SYSTEM_REQUIRED'
+        Reject {Assert-AcceptanceContext 'YAN' 'S-1-5-18' 'OTHER-HOST'} 'VM_SYSTEM_REQUIRED'
+    }
+    Test-Case 'guard accepts declared host as SYSTEM case-insensitively' {
+        Assert-AcceptanceContext 'YAN' 'S-1-5-18' 'yan'
     }
     Test-Case 'unique run preserves old evidence byte for byte' {
         $prefix=New-AcceptanceRun $root "$RunId-reserve"
