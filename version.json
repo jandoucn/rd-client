@@ -1,10 +1,10 @@
 {
   "product": "rustdesk-yan",
   "edition": "custom",
-  "version": "1.5.3",
-  "build_number": "20261018.5",
-  "build_seq": 2026101805,
-  "android_version_code": 2026101805,
+  "version": "1.5.4",
+  "build_number": "20261024.1",
+  "build_seq": 2026102401,
+  "android_version_code": 2026102401,
   "channel": "stable",
-  "source_commit": "28012fed1d7ab4ef4d668cfc672bd87727e34baa"
+  "source_commit": "f6db6bb1dc2e8c94897d3ab53b05b88af87502a6"
 }

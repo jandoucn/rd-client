@@ -10,10 +10,10 @@ class ReleaseMetadataPolicyTest(unittest.TestCase):
     def test_new_semver_starts_at_build_one_with_independent_android_code(self):
         metadata = json.loads((ROOT / "version.json").read_text())
 
-        self.assertEqual(metadata["version"], "1.5.3")
-        self.assertEqual(metadata["build_number"], "20261018.5")
-        self.assertEqual(metadata["build_seq"], 2026101805)
-        self.assertEqual(metadata["android_version_code"], 2026101805)
+        self.assertEqual(metadata["version"], "1.5.4")
+        self.assertEqual(metadata["build_number"], "20261024.1")
+        self.assertEqual(metadata["build_seq"], 2026102401)
+        self.assertEqual(metadata["android_version_code"], 2026102401)
 
         pubspec = (ROOT / "flutter/pubspec.yaml").read_text()
         self.assertIn(
