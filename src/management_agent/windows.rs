@@ -272,7 +272,16 @@ pub fn restart_service(state: &AgentState, paths: &AgentPaths) -> Result<bool, S
         loop {
             let status = service.query_status().map_err(|error| format!("service stop verify: {error}"))?;
             if status.current_state == ScmState::Stopped { break; }
-            if status.current_state != ScmState::StopPending || std::time::Instant::now() >= deadline {
+            // `stop()` only queues the request, so the SCM may still report Running
+            // for a few milliseconds. Only a state that cannot become Stopped fails.
+            let settle = match status.current_state {
+                ScmState::Running => Some(super::recovery::ServiceState::Running),
+                ScmState::StopPending => Some(super::recovery::ServiceState::StopPending),
+                _ => None,
+            };
+            if !settle.is_some_and(super::recovery::stop_settling)
+                || std::time::Instant::now() >= deadline
+            {
                 return Err("service stop timeout or unexpected state".into());
             }
             std::thread::sleep(Duration::from_millis(100));

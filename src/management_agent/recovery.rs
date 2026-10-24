@@ -5,6 +5,16 @@ pub enum Intent {
     Unknown,
 }
 
+/// Whether a state observed while waiting for a stop is "still stopping". The SCM
+/// keeps reporting `Running` for a few milliseconds after `stop()` returns,
+/// because the request is queued to the service thread. Treating that as an
+/// unexpected state failed a restart whose stop had in fact been accepted: the
+/// service went to `Stopped` and the failure action brought it back, while the
+/// command was reported as failed.
+pub fn stop_settling(state: ServiceState) -> bool {
+    matches!(state, ServiceState::Running | ServiceState::StopPending)
+}
+
 /// Shared with the registration reconnect path through `base`, so both readers
 /// resolve a missing `stop-service` the same way.
 pub fn intent_enabled(stop_service: Option<&str>) -> bool {
@@ -151,6 +161,19 @@ pub fn classify_msi_exit(code: i32) -> MsiOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_in_flight_covers_the_window_before_the_scm_reports_stop_pending() {
+        assert!(stop_settling(ServiceState::Running));
+        assert!(stop_settling(ServiceState::StopPending));
+        // A stop that already finished settles at `Stopped` and is handled by the caller.
+        assert!(!stop_settling(ServiceState::Stopped));
+        // Anything else is a real fault worth failing on.
+        assert!(!stop_settling(ServiceState::StartPending));
+        assert!(!stop_settling(ServiceState::Paused));
+        assert!(!stop_settling(ServiceState::Absent));
+        assert!(!stop_settling(ServiceState::Unknown));
+    }
 
     #[test]
     fn a_missing_stop_service_option_reads_as_enabled() {
