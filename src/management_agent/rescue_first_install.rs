@@ -280,6 +280,13 @@ fn waiting() -> serde_json::Value {
     serde_json::json!({"state":"unavailable","error_code":"waiting_approval","ready":false})
 }
 
+/// First-install approval and the rescue bundle exist for MSI installs only. An EXE
+/// install has no approved package source and no MSI product code, so reporting
+/// `waiting_approval` described a decision that would never be made.
+fn not_applicable() -> serde_json::Value {
+    serde_json::json!({"state":"unavailable","error_code":"unsupported_package_kind","ready":false})
+}
+
 fn fallback_compatible(
     layout: &Layout,
     key: &str,
@@ -656,6 +663,25 @@ fn prepare(
             Err("first installation budget exceeded".to_owned())
         }
     };
+    // Read the state first: first-install approval only exists for MSI, and an EXE
+    // install has no approved source to wait for. Checking the sidecar first made every
+    // EXE install report `waiting_approval`, which the backend could only mask by
+    // looking at the package kind.
+    let state: serde_json::Value =
+        serde_json::from_slice(&read(&layout.agent.join("state/agent.json"), 65536, true)?)
+            .map_err(|_| "first installation state malformed")?;
+    let installation = state["agent_installation_id"]
+        .as_str()
+        .ok_or("first installation identity missing")?;
+    let key = state["target_key"]
+        .as_str()
+        .ok_or("first installation target missing")?;
+    if !matches!(
+        key,
+        "windows-x86_64-msi-sos" | "windows-x86_64-msi-standard"
+    ) {
+        return Ok(not_applicable());
+    }
     let cache = layout.agent.join("release-cache");
     let sidecar = cache.join("first-install.json");
     if absent(&sidecar)? {
@@ -668,15 +694,6 @@ fn prepare(
     if approval.schema != 1 {
         return Err("first installation approval schema invalid".into());
     }
-    let state: serde_json::Value =
-        serde_json::from_slice(&read(&layout.agent.join("state/agent.json"), 65536, true)?)
-            .map_err(|_| "first installation state malformed")?;
-    let installation = state["agent_installation_id"]
-        .as_str()
-        .ok_or("first installation identity missing")?;
-    let key = state["target_key"]
-        .as_str()
-        .ok_or("first installation target missing")?;
     let _guard = super::InstallGuard::try_acquire()
         .map_err(|_| "first installation guard unavailable")?
         .ok_or("first installation busy")?;

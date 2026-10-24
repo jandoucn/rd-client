@@ -2231,6 +2231,33 @@ fn firstreview_unknown_occupied_fallback_refuses_and_status_preserves_route() {
 }
 
 #[test]
+fn firstinstall_exe_install_reports_not_applicable_instead_of_waiting_approval() {
+    // First-install approval and the rescue bundle exist for MSI only. An EXE install has
+    // no approved source to wait for, so it must not report waiting_approval: the backend
+    // used to mask that by looking at the package kind, while the client kept reporting a
+    // decision that would never be made.
+    let root = Path::new(r"C:\RustDeskAgentLab")
+        .join(format!("firstinstall-exe-{}", uuid::Uuid::new_v4()));
+    workspace::create(&root).unwrap();
+    for name in ["state", "current", "bootstrap"] {
+        workspace::create(&root.join(name)).unwrap();
+    }
+    save(
+        &root.join("state/agent.json"),
+        &serde_json::json!({
+            "agent_installation_id": "e".repeat(32),
+            "target_key": "windows-x86_64-exe-standard",
+            "management_agent_enabled": true,
+            "disabled": false
+        }),
+    );
+    let value = rescue_assets::first_install::prepare_fixture(&root, &[0; 32]).unwrap();
+    assert_eq!(value["error_code"], "unsupported_package_kind");
+    assert!(!root.join("rescue/current").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn firstinstall_stale_staging_from_a_failed_attempt_does_not_block_the_next_attempt() {
     let f = firstinstall_fixture();
     // Publication renames first-install-staging to current, so a failed attempt leaves
