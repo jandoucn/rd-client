@@ -1462,7 +1462,28 @@ fn schedule_update_command_retry(command: UpdateCommand) {
     });
 }
 
+/// 安装命令在安装过程中会终止本进程，终态来不及上报。重启后恢复该命令时，
+/// 若当前运行的就是目标版本（或更新），安装其实已经完成；此时再查一次更新
+/// 只会得到「无更新」，把已完成的安装改写成 no_update。
+fn install_command_satisfied(
+    command: &UpdateCommand,
+    running_version: &str,
+    running_build_seq: u64,
+) -> bool {
+    if command.action != UpdateCommandAction::Install {
+        return false;
+    }
+    let (Some(version), Some(build_seq)) = (&command.target_version, command.target_build_seq)
+    else {
+        return false;
+    };
+    !hbb_common::is_newer_version(version, build_seq, running_version, running_build_seq)
+}
+
 fn check_update_for_command(command: &UpdateCommand) -> ResultType<UpdateCommandRunOutcome> {
+    if install_command_satisfied(command, crate::VERSION, crate::BUILD_SEQ) {
+        return Ok(UpdateCommandRunOutcome::Installed);
+    }
     check_update_request(false, Some(command), "command")
 }
 
@@ -2996,10 +3017,69 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::wait_for_mac_schedule_change;
     use super::{
-        get_download_file_from_url, scheduled_update_delay, update_filename_from_url,
-        verify_detached_signature, UpdateDownloadStaging,
+        get_download_file_from_url, install_command_satisfied, scheduled_update_delay,
+        update_filename_from_url, verify_detached_signature, UpdateCommandAction,
+        UpdateDownloadStaging,
     };
+    use super::UpdateCommand;
     use std::time::Duration;
+
+    fn install_command(version: Option<&str>, build_seq: Option<u64>) -> UpdateCommand {
+        UpdateCommand {
+            command_id: "c".repeat(32),
+            action: UpdateCommandAction::Install,
+            client_id: "1".repeat(10),
+            client_uuid: "u".into(),
+            target_version: version.map(str::to_owned),
+            target_build_seq: build_seq,
+            expires_at: i64::MAX,
+        }
+    }
+
+    // 安装命令会在安装过程中终止本进程，终态来不及上报。重启后恢复该命令时，
+    // 若运行的已经是目标版本，说明安装已完成；此时再走一次检查更新只会得到
+    // 「无更新」，把已完成的安装改写成 no_update。
+    #[test]
+    fn install_command_already_applied_is_satisfied_by_the_running_build() {
+        for (running_version, running_build) in [("1.5.4", 2026102402), ("1.5.5", 1)] {
+            assert!(
+                install_command_satisfied(
+                    &install_command(Some("1.5.4"), Some(2026102402)),
+                    running_version,
+                    running_build,
+                ),
+                "{running_version}+{running_build}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_command_with_a_newer_target_is_not_satisfied() {
+        assert!(!install_command_satisfied(
+            &install_command(Some("1.5.4"), Some(2026102404)),
+            "1.5.4",
+            2026102402,
+        ));
+    }
+
+    // 检查更新命令必须每次都真的去查，不能被「已是最新」短路。
+    #[test]
+    fn check_command_is_never_satisfied_by_the_running_build() {
+        let mut command = install_command(Some("1.5.4"), Some(2026102402));
+        command.action = UpdateCommandAction::Check;
+        assert!(!install_command_satisfied(&command, "1.5.4", 2026102402));
+    }
+
+    #[test]
+    fn install_command_without_a_target_is_not_satisfied() {
+        for command in [
+            install_command(None, Some(2026102402)),
+            install_command(Some("1.5.4"), None),
+            install_command(None, None),
+        ] {
+            assert!(!install_command_satisfied(&command, "1.5.4", 2026102402));
+        }
+    }
 
     #[test]
     fn update_download_file_accepts_expected_github_asset_urls() {
