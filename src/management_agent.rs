@@ -1863,13 +1863,6 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                 "rescue readonly status unavailable: {error}"
             );
         }
-        if let Err(error) = first_install_worker.notify() {
-            hbb_common::throttled_log!(
-                Duration::from_secs(300),
-                warn,
-                "first installation rescue unavailable: {error}"
-            );
-        }
         if let Err(error) = registration_worker.notify(&state.agent_installation_id) {
             hbb_common::throttled_log!(
                 Duration::from_secs(300),
@@ -1882,6 +1875,17 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                 Ok(initialized) => bootstrap_initialized = initialized,
                 Err(error) => hbb_common::throttled_log!(Duration::from_secs(300), warn, "agent bootstrap initialization failed: {error}"),
             }
+        }
+        // Notified after bootstrap initialization: the first-install worker copies the
+        // recovery bootstrap, and on the first tick it used to run before the directory
+        // existed. Its ancestor walk then failed with "os error 3" and left a staging
+        // directory behind, which the next attempt refused.
+        if let Err(error) = first_install_worker.notify() {
+            hbb_common::throttled_log!(
+                Duration::from_secs(300),
+                warn,
+                "first installation rescue unavailable: {error}"
+            );
         }
         let mut rescue_error = None;
         let signed_rescue = match rescue_recovery::bundle_present() {

@@ -2231,6 +2231,28 @@ fn firstreview_unknown_occupied_fallback_refuses_and_status_preserves_route() {
 }
 
 #[test]
+fn firstinstall_stale_staging_from_a_failed_attempt_does_not_block_the_next_attempt() {
+    let f = firstinstall_fixture();
+    // Publication renames first-install-staging to current, so a failed attempt leaves
+    // the staging directory behind. Refusing when it exists made every retry reject its
+    // own leftover, and rescue/current was never published on any machine that had one
+    // failure: the backend then reported bundle_missing for the rest of the install.
+    let stage = f.root.join("rescue/first-install-staging");
+    workspace::create(&f.root.join("rescue")).unwrap();
+    workspace::create(&stage).unwrap();
+    std::fs::write(stage.join("agent.exe"), b"partial from a failed attempt").unwrap();
+
+    let result = rescue_assets::first_install::prepare_fixture(&f.root, f.public.as_ref()).unwrap();
+
+    assert_eq!(result["rescue_readiness"], "degraded");
+    assert!(
+        f.root.join("rescue/current/bundle.json").is_file(),
+        "a stale staging directory must be reclaimed so the retry can publish"
+    );
+    assert!(!stage.exists(), "the reclaimed staging must not survive publication");
+}
+
+#[test]
 fn firstinstall_approved_installed_without_transaction_creates_independent_receipt_and_is_idempotent(
 ) {
     let f = firstinstall_fixture();

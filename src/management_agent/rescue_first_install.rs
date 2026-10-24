@@ -261,6 +261,21 @@ fn absent(path: &Path) -> Result<bool, String> {
         Err(_) => Err("first installation path unreadable".into()),
     }
 }
+
+/// Remove a staging directory left by an attempt that did not finish. Its contents are
+/// this flow's own scratch copies, recreated from the registered package, so nothing
+/// here is an input another flow depends on. Refuse a reparse point: following one would
+/// delete whatever it points at.
+fn reclaim_staging(stage: &Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(stage)
+        .map_err(|_| "first installation staging unreadable")?;
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Err("first installation staging is a reparse point".into());
+    }
+    std::fs::remove_dir_all(stage).map_err(|_| "first installation staging not reclaimed".into())
+}
+
 fn waiting() -> serde_json::Value {
     serde_json::json!({"state":"unavailable","error_code":"waiting_approval","ready":false})
 }
@@ -707,9 +722,14 @@ fn prepare(
     }
     if !absent(&layout.destination.join("previous"))?
         || !absent(&layout.destination.join("staging"))?
-        || !absent(&layout.destination.join("first-install-staging"))?
     {
         return Err("first installation occupied assets preserved".into());
+    }
+    // The recovery bootstrap is installed by the agent tick, not by this worker. Check it
+    // before creating anything: a missing directory there used to fail after the staging
+    // copy with "install package path unavailable", leaving a staging directory behind.
+    if absent(&layout.bootstrap.join("rustdesk-recovery-bootstrap.exe"))? {
+        return Err("first installation bootstrap not installed".into());
     }
     budget()?;
     if absent(&layout.destination)? {
@@ -717,7 +737,15 @@ fn prepare(
     } else {
         workspace::verify(&layout.destination)?;
     }
+    // `previous` and `staging` belong to other flows and are left alone above.
+    // `first-install-staging` is this flow's own scratch directory and publication
+    // renames it to `current`, so one that still exists belongs to an attempt that did
+    // not finish. Refusing it made every retry reject its own leftover, and
+    // `rescue/current` was then never published on any machine that had failed once.
     let stage = layout.destination.join("first-install-staging");
+    if !absent(&stage)? {
+        reclaim_staging(&stage)?;
+    }
     workspace::create(&stage)?;
     let package = copy_registered(&package_path, &stage, &name, target, deadline)?;
     write_new(
