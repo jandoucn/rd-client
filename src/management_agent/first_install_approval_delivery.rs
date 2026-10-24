@@ -59,6 +59,20 @@ pub enum CoordinationOutcome {
     WaitingSource,
     WaitingSignature,
     WaitingExactBuild,
+    /// The installation is not an MSI, so first-install approval does not apply.
+    /// Returning an error here made every EXE install log a refusal every five
+    /// minutes and left the repair worker observing without ever acting.
+    NotApplicable,
+}
+
+/// First-install approval exists for MSI installs: it publishes the approved
+/// package source a later MSI repair can fall back to. An EXE install has no MSI
+/// product code to report, so the question does not arise.
+fn approval_applies_to(target_key: &str) -> bool {
+    matches!(
+        target_key,
+        "windows-x86_64-msi-standard" | "windows-x86_64-msi-sos"
+    )
 }
 
 pub fn coordinate_approval(
@@ -66,10 +80,7 @@ pub fn coordinate_approval(
     fetch_fixed_source: impl FnOnce() -> Result<Vec<u8>, String>,
     deliver: impl FnOnce(Request<'_>) -> Result<(), DeliveryError>,
 ) -> Result<CoordinationOutcome, DeliveryError> {
-    if !matches!(
-        current.target_key,
-        "windows-x86_64-msi-standard" | "windows-x86_64-msi-sos"
-    ) {
+    if !approval_applies_to(current.target_key) {
         return Err(DeliveryError::TargetMismatch);
     }
     let bytes = match fetch_fixed_source() {
@@ -264,6 +275,12 @@ pub fn coordinate_current_installation() -> Result<CoordinationOutcome, Delivery
     let key = state["target_key"]
         .as_str()
         .ok_or(DeliveryError::TargetMismatch)?;
+    // Check the target before enumerating MSI products: `current_product_code`
+    // reports `RegisteredSourceMismatch` on any machine whose EXE install left an
+    // old MSI registration behind, which is exactly the EXE case this guard covers.
+    if !approval_applies_to(key) {
+        return Ok(CoordinationOutcome::NotApplicable);
+    }
     let metadata: serde_json::Value = serde_json::from_str(include_str!("../../version.json"))
         .map_err(|_| DeliveryError::BuildMismatch)?;
     let build = metadata["build_seq"]
@@ -710,4 +727,38 @@ pub fn deliver_before_publish(
             hook,
         )
     })
+}
+
+#[cfg(test)]
+mod approval_scope_tests {
+    use super::*;
+
+    // `coordinate_current_installation` enumerated MSI products before checking
+    // whether the install was an MSI at all. On an EXE install that has an old MSI
+    // registration left behind, that scan fails and the refusal is logged every
+    // five minutes for a check which never applied in the first place.
+    #[test]
+    fn approval_applies_only_to_msi_targets() {
+        assert!(approval_applies_to("windows-x86_64-msi-standard"));
+        assert!(approval_applies_to("windows-x86_64-msi-sos"));
+        assert!(!approval_applies_to("windows-x86_64-exe-standard"));
+        assert!(!approval_applies_to("windows-x86_64-exe-sos"));
+    }
+
+    // `coordinate_approval` must keep rejecting a non-MSI target rather than
+    // silently pretending approval succeeded.
+    #[test]
+    fn a_non_msi_target_is_rejected_before_any_source_is_fetched() {
+        let outcome = coordinate_approval(
+            CurrentInstallation {
+                installation_id: "a",
+                target_key: "windows-x86_64-exe-standard",
+                current_build: 2026102401,
+                product_code: "code",
+            },
+            || panic!("the source must not be fetched for a non-MSI target"),
+            |_| panic!("nothing is delivered for a non-MSI target"),
+        );
+        assert_eq!(outcome, Err(DeliveryError::TargetMismatch));
+    }
 }
