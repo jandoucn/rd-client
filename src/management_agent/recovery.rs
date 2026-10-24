@@ -5,6 +5,12 @@ pub enum Intent {
     Unknown,
 }
 
+/// Shared with the registration reconnect path through `base`, so both readers
+/// resolve a missing `stop-service` the same way.
+pub fn intent_enabled(stop_service: Option<&str>) -> bool {
+    base::stop_service_intent_enabled(stop_service)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
     Absent,
@@ -139,5 +145,22 @@ pub fn classify_msi_exit(code: i32) -> MsiOutcome {
         1641 => MsiOutcome::RebootInitiated,
         1618 => MsiOutcome::Busy,
         code => MsiOutcome::Failed(code),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_stop_service_option_reads_as_enabled() {
+        assert!(intent_enabled(None));
+        assert!(intent_enabled(Some("")));
+        assert!(intent_enabled(Some("N")));
+        assert!(!intent_enabled(Some("Y")));
+        // Anything unrecognised must stay on the safe side: recovery refuses rather
+        // than guessing that a service the user may have stopped should come back.
+        assert!(!intent_enabled(Some("n")));
+        assert!(!intent_enabled(Some("anything else")));
     }
 }

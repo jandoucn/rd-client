@@ -753,13 +753,11 @@ mod production {
         let text = std::str::from_utf8(&bytes).map_err(|_| "R0 intent encoding")?;
         let intent: hbb_common::toml::Value =
             hbb_common::toml::from_str(text).map_err(|_| "R0 intent malformed")?;
-        if !matches!(
-            intent
-                .get("options")
-                .and_then(|v| v.get("stop-service"))
-                .and_then(|v| v.as_str()),
-            Some("" | "N")
-        ) {
+        let stop_service = intent
+            .get("options")
+            .and_then(|v| v.get("stop-service"))
+            .and_then(|v| v.as_str());
+        if !base::stop_service_intent_enabled(stop_service) {
             return Err("R0 stopped or unknown intent".into());
         }
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
