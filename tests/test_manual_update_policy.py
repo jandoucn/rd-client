@@ -17,6 +17,9 @@ class ManualUpdatePolicyTest(unittest.TestCase):
         gate = updater[start:updater.index("    let Some(ref manifest)", start)]
         start = updater.index("    let mut action = decide_update_action", start)
         action = updater[start:updater.index("    if let Some(command) = command {", start)]
+        # 显式安装请求的抬升只作用于 download，disabled 不得被越过。
+        self.assertIn("if install_requested && action == UpdateAction::Download", action)
+        self.assertNotIn("if manually && response.update_available", action)
         decision = base[base.index("pub fn decide_update_action("):base.index("pub fn update_target_key(")]
         source = r'''
 #[derive(Debug, PartialEq)]
@@ -32,7 +35,7 @@ fn admitted(response: &VersionCheckResponse, manually: bool, command: Option<()>
 ''' + gate + '''
     Ok(UpdateCommandRunOutcome::CheckCompleted)
 }
-fn install_action(response: &VersionCheckResponse, manually: bool) -> UpdateAction {
+fn install_action(response: &VersionCheckResponse, install_requested: bool) -> UpdateAction {
 ''' + action + '''
     action
 }
@@ -59,9 +62,14 @@ fn confirmed_manual_install_is_admitted_for_every_mode() {
     }
 }
 #[test]
-fn confirmed_manual_install_overrides_background_action() {
-    let response = VersionCheckResponse { update_available: true, mode: "disabled".into(), auto_install: false };
-    assert_eq!(install_action(&response, true), UpdateAction::AutoInstall);
+fn explicit_install_lifts_download_but_never_disabled() {
+    let download = VersionCheckResponse { update_available: true, mode: "download".into(), auto_install: false };
+    assert_eq!(install_action(&download, true), UpdateAction::AutoInstall);
+    assert_eq!(install_action(&download, false), UpdateAction::Download);
+    let disabled = VersionCheckResponse { update_available: true, mode: "disabled".into(), auto_install: false };
+    assert_eq!(install_action(&disabled, true), UpdateAction::Ignore);
+    let notify = VersionCheckResponse { update_available: true, mode: "notify".into(), auto_install: false };
+    assert_eq!(install_action(&notify, true), UpdateAction::Notify);
 }
 #[test]
 fn disabled_background_install_and_missing_update_stay_inert() {

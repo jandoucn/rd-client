@@ -286,7 +286,7 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
     def test_verified_update_command_supports_android_but_not_ios(self):
         source = (ROOT / "src/flutter_ffi.rs").read_text()
         command = source[source.index('if _key == "install-verified-update"') - 100 :]
-        command = command[: command.index("return;", command.index("manually_check_update"))]
+        command = command[: command.index("return;", command.index("install_update_now"))]
 
         self.assertIn('#[cfg(not(target_os = "ios"))]', command)
         self.assertNotIn('target_os = "android"', command)
