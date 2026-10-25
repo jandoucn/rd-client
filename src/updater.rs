@@ -1533,9 +1533,11 @@ fn release_notice_should_check(
     background_enabled
         && notice.build_seq > running_build_seq
         && (notice.channel.is_empty() || notice.channel == crate::CHANNEL)
+        // `map_or(true, ..)` 而不是 `is_none_or`：后者在发布用的 Rust 1.90 上仍是
+        // unstable（E0658），macOS 构建会直接编译失败。
         && notice
             .device_build_seq
-            .is_none_or(|seen| seen == running_build_seq)
+            .map_or(true, |seen| seen == running_build_seq)
 }
 
 fn should_check_on_connectivity_restored(check_on_startup: bool, scheduled_update: bool) -> bool {
