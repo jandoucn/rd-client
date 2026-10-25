@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 pub(crate) mod ordinary_update_receipts;
 
+#[path = "updater/install_state.rs"]
+mod install_state;
+
 use crate::{
     common::{
         do_check_software_update, do_check_software_update_with_context,
@@ -55,6 +58,9 @@ use std::os::unix::fs::MetadataExt;
 
 enum UpdateMsg {
     CheckUpdate,
+    /// 桌面用户显式点了「立即安装更新」。它与后台/定时检查的区别是：这一次
+    /// 允许真的安装，而被动检查只按 mode 决定是否提示或下载。
+    InstallUpdate,
     ConnectivityRestored,
     ScheduleChanged,
     Command(UpdateCommand),
@@ -272,6 +278,20 @@ fn notify_update_connectivity_restored() {
     let _ = sender.send(UpdateMsg::ConnectivityRestored);
 }
 
+/// 发布广播走和「连接恢复」同一条后台检查通道。它绝不能折成 `manually=true`
+/// 的手动检查，否则 `mode=notify` 的机器会被广播直接推进安装。
+fn on_release_published(notice: base::update::ReleaseNotice) {
+    if !release_notice_should_check(&notice, crate::BUILD_SEQ, background_update_enabled()) {
+        return;
+    }
+    log::debug!(
+        "Release broadcast {} ({}) is newer than the running build",
+        notice.version,
+        notice.build_seq
+    );
+    notify_update_connectivity_restored();
+}
+
 fn update_policy_stream_loop() {
     const POLICY_BASE_URL: &str = "https://rdapi.yan.life";
     let mut connection_seen = false;
@@ -371,6 +391,7 @@ fn read_update_policy_stream_once(
                 Some(UpdateStreamEvent::Command(_)) => {
                     log::warn!("Ignored update command from unauthenticated policy stream");
                 }
+                Some(UpdateStreamEvent::ReleasePublished(notice)) => on_release_published(notice),
                 None => {}
             }
             event.clear();
@@ -392,6 +413,137 @@ fn update_command_matches_target(
     command_version == manifest_version && command_build_seq == manifest_build_seq
 }
 
+// The server's `mode` is the authority for whether an update may install itself.
+// A manual check only decides to run the check now, so it must not turn `notify`
+// into an install. The person at the desk asking to install is a separate,
+// explicit request, and it only lifts `download` to an install: `notify` still
+// never installs, and `disabled` still installs nothing at all.
+fn update_action_for(
+    response: &hbb_common::VersionCheckResponse,
+    local_auto_update: bool,
+    command: Option<&UpdateCommand>,
+    install_requested: bool,
+) -> UpdateAction {
+    if let Some(command) = command {
+        return match command.action {
+            UpdateCommandAction::Check => UpdateAction::Notify,
+            UpdateCommandAction::Install => UpdateAction::AutoInstall,
+        };
+    }
+    let action = decide_update_action(response, local_auto_update);
+    if install_requested && action == UpdateAction::Download {
+        UpdateAction::AutoInstall
+    } else {
+        action
+    }
+}
+
+fn update_now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+// A launched installer that exits without replacing this build used to look like
+// a success, so a build that crashes on start was reinstalled forever. The
+// attempt is now recorded before the launch and confirmed after the restart.
+fn note_install_attempt(automatic: bool, version: &str, build_seq: u64) {
+    let now = update_now_unix();
+    if automatic {
+        install_state::record_auto_install_attempt(version, build_seq, now);
+    }
+}
+
+// Called once per process before the update loop reads pending commands. The
+// installer terminates this process while it replaces the files, so the only
+// place left to decide whether it worked is the next start.
+fn resolve_pending_install() {
+    if std::env::args().any(|arg| arg == "--update") {
+        return;
+    }
+    let Some(pending) = install_state::load().pending else {
+        return;
+    };
+    let event = pending.event;
+    let confirmation = install_state::install_confirmation(
+        &event.version,
+        event.build_seq,
+        crate::VERSION,
+        crate::BUILD_SEQ,
+        update_now_unix(),
+        pending.deadline_unix,
+    );
+    match confirmation {
+        install_state::InstallConfirmation::Pending => {}
+        install_state::InstallConfirmation::Confirmed => {
+            log::info!(
+                "Previous update to {} is confirmed by the running build",
+                event.version
+            );
+            install_state::clear_pending(&event.transaction_id);
+            install_state::clear_auto_install_attempts();
+            report_update_event(
+                "installed",
+                &event.version,
+                event.build_seq,
+                event.source.as_str(),
+            );
+        }
+        install_state::InstallConfirmation::Failed => {
+            log::warn!(
+                "Previous update to {} never took effect; the running build is still {}",
+                event.version,
+                crate::VERSION
+            );
+            install_state::clear_pending(&event.transaction_id);
+            report_update_event(
+                "failed",
+                &event.version,
+                event.build_seq,
+                event.source.as_str(),
+            );
+        }
+    }
+}
+
+// The installer normally kills this process within seconds. If it is still alive
+// after the confirmation window, the installer exited without replacing the
+// build, and the update counts as failed instead of started.
+#[cfg(target_os = "windows")]
+fn spawn_install_confirmation_watchdog(event: PendingUpdateEvent) {
+    let deadline =
+        update_now_unix().saturating_add(install_state::INSTALL_CONFIRM_TIMEOUT.as_secs() as i64);
+    let spawned = std::thread::Builder::new()
+        .name("update-install-confirm".to_owned())
+        .spawn(move || {
+            std::thread::sleep(install_state::INSTALL_CONFIRM_TIMEOUT);
+            let still_old = install_state::install_confirmation(
+                &event.version,
+                event.build_seq,
+                crate::VERSION,
+                crate::BUILD_SEQ,
+                update_now_unix(),
+                deadline,
+            ) == install_state::InstallConfirmation::Failed;
+            if !still_old {
+                return;
+            }
+            log::error!(
+                "Update to {} did not replace the running build {}",
+                event.version,
+                crate::VERSION
+            );
+            install_state::clear_pending(&event.transaction_id);
+            report_update_event(
+                "failed",
+                &event.version,
+                event.build_seq,
+                event.source.as_str(),
+            );
+        });
+    if let Err(err) = spawned {
+        log::warn!("Failed to start install confirmation watchdog: {err}");
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum UpdateCommandRunOutcome {
     NoUpdate,
@@ -400,6 +552,8 @@ enum UpdateCommandRunOutcome {
     AwaitingInstallResult,
     Installed,
     Refused,
+    /// 同一目标版本已连续自动尝试到上限，暂不再拉起安装器。
+    Suspended,
 }
 
 fn load_pending_update_commands() -> Vec<UpdateCommandState> {
@@ -1048,6 +1202,15 @@ pub fn manually_check_update() -> ResultType<()> {
     Ok(())
 }
 
+/// 桌面用户显式要求安装。与 `manually_check_update` 分开，是因为后台/连接恢复
+/// 的检查也会按 `manually` 处理，而只有这一条消息代表「这个人现在就要装」。
+#[allow(dead_code)]
+pub fn install_update_now() -> ResultType<()> {
+    let sender = TX_MSG.lock().unwrap();
+    sender.send(UpdateMsg::InstallUpdate)?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn stop_auto_update() {
     let sender = TX_MSG.lock().unwrap();
@@ -1164,6 +1327,13 @@ fn start_manual_update_check() -> Sender<UpdateMsg> {
                     &mut last_check_time,
                     &mut next_scheduled_check,
                 ),
+                UpdateMsg::InstallUpdate => run_update_check_with_action(
+                    true,
+                    "manual",
+                    true,
+                    &mut last_check_time,
+                    &mut next_scheduled_check,
+                ),
                 UpdateMsg::Exit => break,
                 _ => {}
             }
@@ -1182,7 +1352,9 @@ fn start_auto_update_check() -> Sender<UpdateMsg> {
     std::thread::spawn(move || start_auto_update_check_(rx));
     for state in pending {
         #[cfg(target_os = "windows")]
-        if ordinary_update_receipts::runtime::owns_command(&state.command.command_id) { continue; }
+        if ordinary_update_receipts::runtime::owns_command(&state.command.command_id) {
+            continue;
+        }
         if state.terminal.is_some() {
             retry_update_command_terminal(&state.command.command_id);
         } else {
@@ -1195,6 +1367,9 @@ fn start_auto_update_check() -> Sender<UpdateMsg> {
 fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
     #[cfg(target_os = "macos")]
     consume_mac_update_result();
+    // 上一次安装是否真的生效，只有重启后的这里才能判断：安装器会终止旧进程，
+    // 终态上报来不及发出。失败会在此计入熔断，避免一个装不上的版本被反复拉起。
+    resolve_pending_install();
     let started_at = Instant::now();
     let mut startup_check_pending = true;
     let mut last_check_time = None;
@@ -1214,6 +1389,15 @@ fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
                 run_update_check(
                     true,
                     "manual",
+                    &mut last_check_time,
+                    &mut next_scheduled_check,
+                );
+            }
+            Ok(UpdateMsg::InstallUpdate) => {
+                run_update_check_with_action(
+                    true,
+                    "manual",
+                    true,
                     &mut last_check_time,
                     &mut next_scheduled_check,
                 );
@@ -1271,6 +1455,13 @@ fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
                             }
                             Ok(UpdateCommandRunOutcome::AwaitingInstallResult) => {}
                             Ok(UpdateCommandRunOutcome::Refused) => {}
+                            Ok(UpdateCommandRunOutcome::Suspended) => {
+                                persist_and_report_update_command_terminal(
+                                    &command,
+                                    "failed",
+                                    "auto_install_suspended",
+                                );
+                            }
                             Ok(UpdateCommandRunOutcome::Installed) => {
                                 persist_and_report_update_command_terminal(
                                     &command,
@@ -1329,6 +1520,24 @@ fn startup_update_enabled() -> bool {
     ))
 }
 
+/// 收到服务端的发布广播后，本机是否应该主动检查一次更新。
+///
+/// 广播只是「有新版本了」的提示，不是一条命令：它必须完全走后台路径，不能把
+/// `manually` 置真，否则会把 `mode=notify` 的设备直接推进安装，正是 D37 那种
+/// 绕过 mode / auto_install / allow_auto_update 的写法。
+fn release_notice_should_check(
+    notice: &base::update::ReleaseNotice,
+    running_build_seq: u64,
+    background_enabled: bool,
+) -> bool {
+    background_enabled
+        && notice.build_seq > running_build_seq
+        && (notice.channel.is_empty() || notice.channel == crate::CHANNEL)
+        && notice
+            .device_build_seq
+            .is_none_or(|seen| seen == running_build_seq)
+}
+
 fn should_check_on_connectivity_restored(check_on_startup: bool, scheduled_update: bool) -> bool {
     check_on_startup || scheduled_update
 }
@@ -1369,7 +1578,23 @@ fn run_update_check(
     last_check_time: &mut Option<Instant>,
     next_scheduled_check: &mut Option<Instant>,
 ) {
-    match check_update_request(manually, None, request_origin) {
+    run_update_check_with_action(
+        manually,
+        request_origin,
+        false,
+        last_check_time,
+        next_scheduled_check,
+    )
+}
+
+fn run_update_check_with_action(
+    manually: bool,
+    request_origin: &str,
+    install_requested: bool,
+    last_check_time: &mut Option<Instant>,
+    next_scheduled_check: &mut Option<Instant>,
+) {
+    match check_update_request_with_action(manually, None, request_origin, install_requested) {
         Ok(UpdateCommandRunOutcome::Deferred) => {
             *next_scheduled_check = Some(Instant::now() + DEFERRED_UPDATE_RETRY_INTERVAL);
         }
@@ -1480,8 +1705,26 @@ fn install_command_satisfied(
     !hbb_common::is_newer_version(version, build_seq, running_version, running_build_seq)
 }
 
+/// 只有同时满足「运行的就是目标版本」和「这条命令确由本机发起并已交给安装器」，
+/// 才能断定安装已完成。缺了后者，一条与本机签名清单不符、本机从未执行过的命令
+/// 会被记成安装成功，跳过目标与签名校验。
+fn install_command_already_applied(
+    command: &UpdateCommand,
+    running_version: &str,
+    running_build_seq: u64,
+    launched_by_this_install: bool,
+) -> bool {
+    launched_by_this_install
+        && install_command_satisfied(command, running_version, running_build_seq)
+}
+
 fn check_update_for_command(command: &UpdateCommand) -> ResultType<UpdateCommandRunOutcome> {
-    if install_command_satisfied(command, crate::VERSION, crate::BUILD_SEQ) {
+    if install_command_already_applied(
+        command,
+        crate::VERSION,
+        crate::BUILD_SEQ,
+        install_state::pending_install_owns_command(&command.command_id),
+    ) {
         return Ok(UpdateCommandRunOutcome::Installed);
     }
     check_update_request(false, Some(command), "command")
@@ -1491,6 +1734,15 @@ fn check_update_request(
     manually: bool,
     command: Option<&UpdateCommand>,
     request_origin: &str,
+) -> ResultType<UpdateCommandRunOutcome> {
+    check_update_request_with_action(manually, command, request_origin, false)
+}
+
+fn check_update_request_with_action(
+    manually: bool,
+    command: Option<&UpdateCommand>,
+    request_origin: &str,
+    install_requested: bool,
 ) -> ResultType<UpdateCommandRunOutcome> {
     // On macOS, auto-update is handled by check_update_as_root() in the service process.
     // The shared check_update() path is only used for manual update checks from the GUI.
@@ -1583,7 +1835,8 @@ fn check_update_request(
         &response,
         update_option_enabled(&config::Config::get_option(keys::OPTION_ALLOW_AUTO_UPDATE)),
     );
-    if manually && response.update_available {
+    // `disabled` 是设备上真正的开关，显式安装请求也不能越过它。
+    if install_requested && action == UpdateAction::Download {
         action = UpdateAction::AutoInstall;
     }
     if let Some(command) = command {
@@ -1606,6 +1859,25 @@ fn check_update_request(
         report_command_update_event(command, "deferred", "active_session");
         return Ok(UpdateCommandRunOutcome::Deferred);
     }
+    // 只有真正会拉安装器的路径才受尝试次数与安装租约约束：检查、下载、
+    // 提示都不碰本机安装，不该被上一次安装的失败记录挡住。
+    let _install_lease = if should_install {
+        if !install_state::auto_install_allowed(version, target_build_seq, update_now_unix()) {
+            log::warn!(
+                "Automatic update to {version} ({target_build_seq}) is suspended after repeated attempts"
+            );
+            return Ok(UpdateCommandRunOutcome::Suspended);
+        }
+        match install_state::try_acquire_install_lease() {
+            Some(lease) => Some(lease),
+            None => {
+                report_command_update_event(command, "deferred", "install_in_progress");
+                return Ok(UpdateCommandRunOutcome::Deferred);
+            }
+        }
+    } else {
+        None
+    };
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if should_install
         && remote_install_needs_refused_elevation(manually, command, version, target_build_seq)
@@ -1630,13 +1902,27 @@ fn check_update_request(
         // Recheck because a session can start while the verified asset is downloading.
         if should_install && has_no_active_conns() {
             #[cfg(target_os = "windows")]
-            if update_msi && ordinary_update_receipts::runtime::use_receipt_path()
-                .map_err(|error| hbb_common::anyhow::anyhow!(error))? {
-                let approved_name = ordinary_update_receipts::package_contract::primary_package_name(&target.primary, "msi")
+            if update_msi
+                && ordinary_update_receipts::runtime::use_receipt_path()
+                    .map_err(|error| hbb_common::anyhow::anyhow!(error))?
+            {
+                let approved_name =
+                    ordinary_update_receipts::package_contract::primary_package_name(
+                        &target.primary,
+                        "msi",
+                    )
                     .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
-                ordinary_update_receipts::runtime::install(&file_path, &approved_name, &target.sha256, &target_key,
-                    version, target_build_seq, source, command.map(|value| value.command_id.clone()))
-                    .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
+                ordinary_update_receipts::runtime::install(
+                    &file_path,
+                    &approved_name,
+                    &target.sha256,
+                    &target_key,
+                    version,
+                    target_build_seq,
+                    source,
+                    command.map(|value| value.command_id.clone()),
+                )
+                .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
                 return Ok(UpdateCommandRunOutcome::AwaitingInstallResult);
             }
             report_update_event("installing", version, target_build_seq, source);
@@ -2502,6 +2788,10 @@ fn update_new_version(
                             false
                         } else {
                             log::debug!("New version \"{}\" is launched.", version);
+                            install_state::store_pending_install_command(
+                                &pending_event,
+                                update_now_unix(),
+                            );
                             true
                         }
                     }
@@ -3016,13 +3306,26 @@ pub fn check_update_as_root() -> ResultType<bool> {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::wait_for_mac_schedule_change;
-    use super::{
-        get_download_file_from_url, install_command_satisfied, scheduled_update_delay,
-        update_filename_from_url, verify_detached_signature, UpdateCommandAction,
-        UpdateDownloadStaging,
-    };
     use super::UpdateCommand;
+    use super::{
+        get_download_file_from_url, install_command_already_applied, install_command_satisfied,
+        release_notice_should_check, scheduled_update_delay, update_filename_from_url,
+        verify_detached_signature, UpdateCommandAction, UpdateDownloadStaging,
+    };
     use std::time::Duration;
+
+    fn release_notice(
+        build_seq: u64,
+        channel: &str,
+        device_build_seq: Option<u64>,
+    ) -> base::update::ReleaseNotice {
+        base::update::ReleaseNotice {
+            version: "1.5.4".into(),
+            build_seq,
+            channel: channel.into(),
+            device_build_seq,
+        }
+    }
 
     fn install_command(version: Option<&str>, build_seq: Option<u64>) -> UpdateCommand {
         UpdateCommand {
@@ -3062,12 +3365,108 @@ mod tests {
         ));
     }
 
+    // 目标版本相符但本机从未发起过这次安装，说明这条命令不是本机装的。
+    // 此时必须继续走目标与签名校验，不能直接记成安装完成。
+    #[test]
+    fn an_install_command_this_machine_never_launched_is_not_already_applied() {
+        assert!(!install_command_already_applied(
+            &install_command(Some("1.5.4"), Some(2026102402)),
+            "1.5.4",
+            2026102402,
+            false,
+        ));
+    }
+
+    // 本机发起过、且运行的已经是目标版本，才判为已完成。
+    #[test]
+    fn an_install_command_this_machine_launched_is_already_applied() {
+        assert!(install_command_already_applied(
+            &install_command(Some("1.5.4"), Some(2026102402)),
+            "1.5.4",
+            2026102402,
+            true,
+        ));
+    }
+
+    // 本机发起过但运行版本没跟上，说明安装没生效，必须继续走检查路径。
+    #[test]
+    fn an_install_command_this_machine_launched_but_not_effective_is_not_applied() {
+        assert!(!install_command_already_applied(
+            &install_command(Some("1.5.4"), Some(2026102404)),
+            "1.5.4",
+            2026102402,
+            true,
+        ));
+    }
+
+    // 检查更新命令即使目标版本相符、即使本机有同名记录，也不能被短路。
+    #[test]
+    fn a_check_command_is_never_already_applied() {
+        let mut command = install_command(Some("1.5.4"), Some(2026102402));
+        command.action = UpdateCommandAction::Check;
+        assert!(!install_command_already_applied(
+            &command, "1.5.4", 2026102402, true,
+        ));
+    }
+
     // 检查更新命令必须每次都真的去查，不能被「已是最新」短路。
     #[test]
     fn check_command_is_never_satisfied_by_the_running_build() {
         let mut command = install_command(Some("1.5.4"), Some(2026102402));
         command.action = UpdateCommandAction::Check;
         assert!(!install_command_satisfied(&command, "1.5.4", 2026102402));
+    }
+
+    // 发布广播只是「有新版本了」的提示，必须完全受后台开关约束；关掉后台更新的
+    // 机器不能因为收到广播就去检查，否则等于绕过了用户的设置。
+    #[test]
+    fn a_release_notice_does_not_wake_a_disabled_background_updater() {
+        assert!(!release_notice_should_check(
+            &release_notice(2026102405, "", None),
+            2026102404,
+            false,
+        ));
+    }
+
+    // 广播的构建号不比本机新时不必再查一次；相同或更旧都跳过。
+    #[test]
+    fn an_older_release_notice_is_ignored() {
+        for build in [2026102404, 2026102403] {
+            assert!(
+                !release_notice_should_check(&release_notice(build, "", None), 2026102404, true),
+                "{build}"
+            );
+        }
+    }
+
+    // 通道不符的广播与运行在 stable 的客户端无关。
+    #[test]
+    fn a_release_notice_for_another_channel_is_ignored() {
+        assert!(!release_notice_should_check(
+            &release_notice(2026102405, "beta", None),
+            2026102404,
+            true,
+        ));
+    }
+
+    // 后端判定时看到的本机构建号与现在不同，说明这条广播已经过期。
+    #[test]
+    fn a_release_notice_for_a_stale_device_build_is_ignored() {
+        assert!(!release_notice_should_check(
+            &release_notice(2026102405, "", Some(2026102402)),
+            2026102404,
+            true,
+        ));
+    }
+
+    // 正常情形：后台更新开启、构建号更新、通道与本机一致，才去检查。
+    #[test]
+    fn a_newer_release_notice_on_the_same_channel_triggers_a_check() {
+        assert!(release_notice_should_check(
+            &release_notice(2026102405, "", Some(2026102404)),
+            2026102404,
+            true,
+        ));
     }
 
     #[test]

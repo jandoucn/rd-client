@@ -2822,7 +2822,7 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 pub fn main_set_common(_key: String, _value: String) {
     #[cfg(not(target_os = "ios"))]
     if _key == "install-verified-update" {
-        if let Err(err) = crate::updater::manually_check_update() {
+        if let Err(err) = crate::updater::install_update_now() {
             log::error!("Failed to request verified update: {}", err);
         }
         return;

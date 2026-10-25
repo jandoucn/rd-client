@@ -97,6 +97,21 @@ pub struct UpdateCommand {
 pub enum UpdateStreamEvent {
     Policy(UpdatePolicy),
     Command(UpdateCommand),
+    /// 服务端发布了一个新版本。它不是一条命令，客户端只据此知道「有新版了」，
+    /// 是否检查、是否安装仍由本机策略和 mode 决定。
+    ReleasePublished(ReleaseNotice),
+}
+
+/// 一次发布广播。`build_seq` 是服务端最新生效版本，`device_build_seq` 是广播
+/// 判定时后端看到的本机构建号，用来识别「本机已经变了，这条广播是过期的」。
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ReleaseNotice {
+    pub version: String,
+    pub build_seq: u64,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub device_build_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +437,15 @@ pub fn parse_update_stream_sse_event(event: &str) -> anyhow::Result<Option<Updat
                 );
             }
             Ok(Some(UpdateStreamEvent::Command(command)))
+        }
+        Some("release-published") => {
+            let notice: ReleaseNotice = serde_json::from_str(&data)?;
+            anyhow::ensure!(
+                !notice.version.is_empty(),
+                "release notice version is empty"
+            );
+            anyhow::ensure!(notice.build_seq > 0, "release notice build is missing");
+            Ok(Some(UpdateStreamEvent::ReleasePublished(notice)))
         }
         _ => Ok(None),
     }
