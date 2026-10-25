@@ -1,5 +1,13 @@
 ## 版本变化
 
+本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261026.1`，构建序号及 Android 基准 versionCode 为 `2026102601`。Android arm64 APK 预期实际 versionCode 为 `2026104601`。
+
+- 修复客户端每 3 秒向后台重复上传一次相同设备信息的问题：内容不变不再上传，更新检查结果、策略、IP、用户名等任一变化仍在数秒内上报，在线状态仍由心跳刷新。
+
+本轮 Mac 全量 Rust 库测试 408 项通过；win10-gs 用本地编译的 DLL 真机验证上传频率由每 2 分钟 40 次降为 9 分钟 0 次，检查更新后 3 秒内上报。20261025.4 在 win10-gs 上已完成 2503 升级、首装救援包 ProductCode 更换自愈、发布广播、设置页隐藏等复测；本版本发布后按重测义务全部重测。
+
+### 20261025.4
+
 本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261025.4`，构建序号及 Android 基准 versionCode 为 `2026102504`。Android arm64 APK 预期实际 versionCode 为 `2026104504`。
 
 - Windows 只发布 MSI，不再构建 EXE 安装包；发布产物固定为 MSI standard、MSI SOS、DMG standard、DMG SOS、APK standard 五个。
