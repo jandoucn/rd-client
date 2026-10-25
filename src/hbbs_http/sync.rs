@@ -127,7 +127,11 @@ async fn start_hbbs_sync_async() {
                 let sys_username = v["username"].as_str().unwrap_or_default().to_string();
                 // Though the username comparison is only necessary on Windows,
                 // we still keep the comparison on other platforms for consistency.
-                let sysinfo_refresh_requested = config::Status::get("sysinfo_hash").is_empty();
+                let private_digest = (!crate::is_public(&url)).then(|| sysinfo_content_digest(&v));
+                let sysinfo_refresh_requested = sysinfo_upload_requested(
+                    &config::Status::get("sysinfo_hash"),
+                    private_digest.as_deref(),
+                );
                 let need_upload = (!info_uploaded.uploaded
                     || info_uploaded.username.as_ref() != Some(&sys_username)
                     || sysinfo_refresh_requested) &&
@@ -220,6 +224,8 @@ async fn start_hbbs_sync_async() {
                                 if !hash.is_empty() {
                                     config::Status::set("sysinfo_hash", hash);
                                     config::Status::set("sysinfo_ver", sysinfo_ver.clone());
+                                } else if let Some(digest) = private_digest.clone() {
+                                    config::Status::set("sysinfo_hash", digest);
                                 }
                                 *PRO.lock().unwrap() = true;
                             } else if x == "ID_NOT_FOUND" {
@@ -415,6 +421,24 @@ fn switch_grant_signed_msg(id: &str, switch_code_verifier: &str, timestamp: &str
     msg
 }
 
+/// Only public servers get a content hash, yet an empty `sysinfo_hash` is also the
+/// "refresh requested" signal, so a private server re-uploaded on every loop. For a
+/// private server the stored value is the digest of the last uploaded content: an
+/// unchanged report is skipped and any changed field is still uploaded. `cpu` carries
+/// the live clock speed, so it is left out of the comparison (it is still uploaded).
+fn sysinfo_content_digest(v: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut compared = v.clone();
+    if let Some(fields) = compared.as_object_mut() {
+        fields.remove("cpu");
+    }
+    crate::encode64(&Sha256::digest(compared.to_string().as_bytes())[..])
+}
+
+fn sysinfo_upload_requested(stored: &str, private_digest: Option<&str>) -> bool {
+    stored.is_empty() || private_digest.is_some_and(|digest| digest != stored)
+}
+
 #[cfg(all(
     test,
     feature = "flutter",
@@ -447,5 +471,52 @@ mod tests {
         ]
         .concat();
         assert_eq!(switch_grant_signed_msg("id1", "c1", "1700000000"), expected);
+    }
+}
+
+#[cfg(test)]
+mod sysinfo_refresh_tests {
+    use super::{sysinfo_content_digest, sysinfo_upload_requested};
+    use serde_json::json;
+
+    // 私有服务器不计算哈希，空哈希又被当作「请求刷新」，客户端因此每 3 秒
+    // 全量上传一次。改为内容没变就不传，内容一变照常上传，信息收集不受影响。
+    #[test]
+    fn unchanged_content_is_not_uploaded_again() {
+        let v = json!({"hostname": "yan", "last_update_check": "t1"});
+        let digest = sysinfo_content_digest(&v);
+        assert!(!sysinfo_upload_requested(&digest, Some(&digest)));
+    }
+
+    #[test]
+    fn changed_content_is_uploaded() {
+        let old = sysinfo_content_digest(&json!({"last_update_check": "t1"}));
+        let new = sysinfo_content_digest(&json!({"last_update_check": "t2"}));
+        assert_ne!(old, new);
+        assert!(sysinfo_upload_requested(&old, Some(&new)));
+    }
+
+    // cpu 字段带着实时主频（如 1.56GHz 与 0.08GHz 交替），不能让它每次都触发上传。
+    #[test]
+    fn the_live_cpu_clock_does_not_count_as_a_change() {
+        let a =
+            sysinfo_content_digest(&json!({"cpu": "i9, 1.56GHz, 32/24 cores", "hostname": "yan"}));
+        let b =
+            sysinfo_content_digest(&json!({"cpu": "i9, 0.08GHz, 32/24 cores", "hostname": "yan"}));
+        assert_eq!(a, b);
+    }
+
+    // 后台勾选更新选项、策略下发、服务端要求重传时都会清空哈希，必须照常重传一次。
+    #[test]
+    fn a_cleared_hash_still_requests_a_refresh() {
+        let digest = sysinfo_content_digest(&json!({"hostname": "yan"}));
+        assert!(sysinfo_upload_requested("", Some(&digest)));
+        assert!(sysinfo_upload_requested("", None));
+    }
+
+    // 官方服务器沿用原有哈希与 sysinfo_ver 比对，这里不介入。
+    #[test]
+    fn a_public_server_keeps_the_original_rule() {
+        assert!(!sysinfo_upload_requested("public-hash", None));
     }
 }
