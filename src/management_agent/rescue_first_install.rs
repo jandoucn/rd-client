@@ -8,6 +8,27 @@ use std::{
 };
 
 const AGENT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
+// 首装线程和救援状态、注册重连等线程在同一轮周期任务里一起被唤醒，后者会毫秒级地
+// 短暂持有安装锁。立即放弃会让首装每轮都恰好撞上、永远报 busy；在这个窗口内重试即可，
+// 真有长期持锁者时照旧报 busy。
+const FIRST_INSTALL_GUARD_WAIT: Duration = Duration::from_secs(10);
+const FIRST_INSTALL_GUARD_RETRY: Duration = Duration::from_millis(200);
+
+fn acquire_guard_patiently<G>(
+    mut attempt: impl FnMut() -> std::io::Result<Option<G>>,
+    wait: Duration,
+    retry: Duration,
+) -> Result<G, String> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match attempt() {
+            Ok(Some(guard)) => return Ok(guard),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(retry),
+            Ok(None) => return Err("first installation busy".into()),
+            Err(_) => return Err("first installation guard unavailable".into()),
+        }
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Approval {
@@ -694,9 +715,11 @@ fn prepare(
     if approval.schema != 1 {
         return Err("first installation approval schema invalid".into());
     }
-    let _guard = super::InstallGuard::try_acquire()
-        .map_err(|_| "first installation guard unavailable")?
-        .ok_or("first installation busy")?;
+    let _guard = acquire_guard_patiently(
+        super::InstallGuard::try_acquire,
+        FIRST_INSTALL_GUARD_WAIT,
+        FIRST_INSTALL_GUARD_RETRY,
+    )?;
     check_gates(layout, installation, key)?;
     let manifest: hbb_common::UpdateManifest = serde_json::from_value(approval.manifest.clone())
         .map_err(|_| "first installation manifest malformed")?;
@@ -1013,4 +1036,57 @@ pub struct WorkerScope {
 #[cfg(test)]
 pub fn start_scoped_fixture(scope: WorkerScope) -> std::io::Result<Worker> {
     start_checked(None, Some(scope))
+}
+
+#[cfg(test)]
+mod guard_wait_tests {
+    use super::acquire_guard_patiently;
+    use std::{cell::Cell, io, time::Duration};
+
+    // 同一轮周期任务里，救援状态、注册重连等线程会和首装线程一起被唤醒，
+    // 它们毫秒级的短暂持锁曾让首装每 5 分钟都恰好撞上，永远报 busy。
+    #[test]
+    fn a_briefly_held_guard_is_acquired_after_waiting() {
+        let calls = Cell::new(0);
+        let result = acquire_guard_patiently(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(if calls.get() < 3 { None } else { Some(7) })
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        );
+        assert_eq!(result, Ok(7));
+        assert_eq!(calls.get(), 3);
+    }
+
+    // 真有长期持锁者时，等待有上限，照旧报 busy，不能无限阻塞首装线程。
+    #[test]
+    fn a_guard_held_past_the_window_still_reports_busy() {
+        let result = acquire_guard_patiently::<u8>(
+            || Ok(None),
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+        );
+        assert_eq!(result, Err("first installation busy".to_owned()));
+    }
+
+    // 系统调用失败不是「被占用」，不应重试，直接报不可用。
+    #[test]
+    fn a_failing_guard_is_not_retried() {
+        let calls = Cell::new(0);
+        let result = acquire_guard_patiently::<u8>(
+            || {
+                calls.set(calls.get() + 1);
+                Err(io::Error::other("denied"))
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        );
+        assert_eq!(
+            result,
+            Err("first installation guard unavailable".to_owned())
+        );
+        assert_eq!(calls.get(), 1);
+    }
 }
