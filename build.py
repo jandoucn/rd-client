@@ -980,7 +980,13 @@ def build_flutter_windows(version, features, skip_portable_pack):
             print("cargo build failed, please check rust source code.")
             exit(-1)
     os.chdir('flutter')
-    system2('flutter build windows --release')
+    flutter_version_args = ''
+    if os.environ.get('VERSION') and os.environ.get('BUILD_SEQ'):
+        flutter_version_args = (
+            f' --build-name "{os.environ["VERSION"]}"'
+            f' --build-number "{os.environ["BUILD_SEQ"]}"'
+        )
+    system2(f'flutter build windows --release{flutter_version_args}')
     os.chdir('..')
     shutil.copy2('target/release/deps/dylib_virtual_display.dll',
                  flutter_build_dir_2)

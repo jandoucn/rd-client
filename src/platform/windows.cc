@@ -234,6 +234,10 @@ extern "C"
     {
         HANDLE hProcess = NULL;
         HANDLE hToken = NULL;
+        if (!cmd)
+        {
+            return NULL;
+        }
         if (GetSessionUserTokenWin(&hToken, dwSessionId, as_user, pDwTokenPid))
         {
             STARTUPINFOW si;
@@ -245,8 +249,7 @@ extern "C"
                 si.lpDesktop = (LPWSTR)L"winsta0\\default";
                 si.wShowWindow = SW_SHOW;
             }
-            wchar_t buf[MAX_PATH];
-            wcscpy_s(buf, MAX_PATH, cmd);
+            std::vector<wchar_t> buf(cmd, cmd + wcslen(cmd) + 1);
             PROCESS_INFORMATION pi;
             LPVOID lpEnvironment = NULL;
             DWORD dwCreationFlags = DETACHED_PROCESS;
@@ -261,7 +264,7 @@ extern "C"
             {
                 dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
             }
-            if (CreateProcessAsUserW(hToken, NULL, buf, NULL, NULL, FALSE, dwCreationFlags, lpEnvironment, NULL, &si, &pi))
+            if (CreateProcessAsUserW(hToken, NULL, buf.data(), NULL, NULL, FALSE, dwCreationFlags, lpEnvironment, NULL, &si, &pi))
             {
                 CloseHandle(pi.hThread);
                 hProcess = pi.hProcess;
