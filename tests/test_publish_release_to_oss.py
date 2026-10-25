@@ -83,7 +83,6 @@ class PublishReleaseToOssTest(unittest.TestCase):
         names = []
         for edition in ("standard", "sos"):
             suffixes = [
-                "windows-x86_64.exe",
                 "windows-x86_64.msi",
                 "macos-aarch64.dmg" if signed else "aarch64.dmg",
             ]
@@ -105,7 +104,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
 
                 resolved = self.publisher.resolve_release_assets(directory, "1.5.0")
 
-                self.assertEqual(len(resolved), 7)
+                self.assertEqual(len(resolved), 5)
                 self.assertEqual({path.name for path in resolved.values()}, set(names))
                 self.assertEqual(
                     resolved["macos-aarch64-dmg-standard"].name,
@@ -131,7 +130,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
         }
 
         payload = self.publisher.signature_payload(
-            metadata, "windows-x86_64-exe-standard", 42, "AB" * 32
+            metadata, "windows-x86_64-msi-standard", 42, "AB" * 32
         )
 
         self.assertEqual(
@@ -143,7 +142,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
             "version=1.5.0\n"
             "build_seq=2026093005\n"
             "source_commit=0123456789abcdef0123456789abcdef01234567\n"
-            "target_key=windows-x86_64-exe-standard\n"
+            "target_key=windows-x86_64-msi-standard\n"
             "size=42\n"
             f"sha256={'ab' * 32}\n",
         )
@@ -169,7 +168,30 @@ class PublishReleaseToOssTest(unittest.TestCase):
 
             (directory / names[0]).write_bytes(b"restored")
             (directory / "unexpected.txt").write_text("unexpected")
-            with self.assertRaisesRegex(self.publisher.PublishError, "exactly 7"):
+            with self.assertRaisesRegex(self.publisher.PublishError, "exactly 5"):
+                self.publisher.resolve_release_assets(directory, "1.5.0")
+
+    def test_release_targets_are_exactly_five_packages_without_windows_exe(self):
+        self.assertEqual(
+            self.publisher.EXPECTED_TARGETS,
+            {
+                "windows-x86_64-msi-standard",
+                "windows-x86_64-msi-sos",
+                "macos-aarch64-dmg-standard",
+                "macos-aarch64-dmg-sos",
+                "android-aarch64-apk-standard",
+            },
+        )
+        self.assertNotIn("windows-x86_64-exe", self.publisher.TARGET_SUFFIXES)
+        self.assertNotIn("windows-x86_64-exe", self.publisher.TARGET_EDITIONS)
+
+    def test_windows_exe_asset_in_release_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.make_assets(directory, signed=True)
+            (directory / "rustdesk-1.5.0-standard-windows-x86_64.exe").write_bytes(b"exe")
+
+            with self.assertRaisesRegex(self.publisher.PublishError, "exactly 5"):
                 self.publisher.resolve_release_assets(directory, "1.5.0")
 
     def test_sha256_manifest_is_metadata_not_an_install_asset(self):
@@ -180,7 +202,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
 
             resolved = self.publisher.resolve_release_assets(directory, "1.5.0")
 
-            self.assertEqual(len(resolved), 7)
+            self.assertEqual(len(resolved), 5)
 
     def test_upload_concurrency_is_capped_at_four_total_transfers(self):
         source = inspect.getsource(self.publisher)
@@ -191,9 +213,9 @@ class PublishReleaseToOssTest(unittest.TestCase):
     def test_failed_release_cleanup_deletes_only_the_current_prefix(self):
         bucket = FakeBucket({}, [], {})
         objects = [
-            FakeObject("rustdesk/stable/current/a.exe"),
+            FakeObject("rustdesk/stable/current/a.msi"),
             FakeObject("rustdesk/stable/current/catalog.json"),
-            FakeObject("rustdesk/stable/previous/a.exe"),
+            FakeObject("rustdesk/stable/previous/a.msi"),
         ]
 
         self.publisher.cleanup_release_prefix(
@@ -205,7 +227,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
         self.assertEqual(
             bucket.deleted,
             [
-                "rustdesk/stable/current/a.exe",
+                "rustdesk/stable/current/a.msi",
                 "rustdesk/stable/current/catalog.json",
             ],
         )
@@ -221,8 +243,8 @@ class PublishReleaseToOssTest(unittest.TestCase):
     def test_failed_publish_does_not_delete_active_release_prefix(self):
         active_manifest = {
             "targets": {
-                "windows-x86_64-exe-standard": {
-                    "primary": "https://download.yan.life/rustdesk/stable/current/app.exe"
+                "windows-x86_64-msi-standard": {
+                    "primary": "https://download.yan.life/rustdesk/stable/current/app.msi"
                 }
             }
         }
@@ -239,8 +261,8 @@ class PublishReleaseToOssTest(unittest.TestCase):
     def test_failed_publish_deletes_prefix_only_when_active_release_differs(self):
         active_manifest = {
             "targets": {
-                "windows-x86_64-exe-standard": {
-                    "primary": "https://download.yan.life/rustdesk/stable/previous/app.exe"
+                "windows-x86_64-msi-standard": {
+                    "primary": "https://download.yan.life/rustdesk/stable/previous/app.msi"
                 }
             }
         }
@@ -296,8 +318,8 @@ class PublishReleaseToOssTest(unittest.TestCase):
         bucket = FakeBucket({catalog_key: body}, keys, sizes)
         active_manifest = {
             "targets": {
-                "windows-x86_64-exe-standard": {
-                    "primary": "https://download.yan.life/rustdesk/stable/newer/app.exe"
+                "windows-x86_64-msi-standard": {
+                    "primary": "https://download.yan.life/rustdesk/stable/newer/app.msi"
                 }
             }
         }
@@ -528,9 +550,9 @@ class PublishReleaseToOssTest(unittest.TestCase):
                 "signature": "new",
                 "release": {**metadata, "source_tag": "new"},
             },
-            "windows-x86_64-exe-standard": {
-                "name": "rustdesk-1.5.0-standard-windows-x86_64.exe",
-                "key": "rustdesk/stable/new/windows.exe",
+            "windows-x86_64-msi-standard": {
+                "name": "rustdesk-1.5.0-standard-windows-x86_64.msi",
+                "key": "rustdesk/stable/new/windows.msi",
                 "size": 20,
                 "sha256": "c" * 64,
                 "signature": "inherited",
@@ -551,7 +573,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
         self.assertEqual(manifest["schema"], 2)
         self.assertEqual(manifest["catalog_revision"], 2026100201)
         self.assertEqual(
-            manifest["targets"]["windows-x86_64-exe-standard"]["build_seq"],
+            manifest["targets"]["windows-x86_64-msi-standard"]["build_seq"],
             2026100107,
         )
         self.assertEqual(
@@ -563,9 +585,9 @@ class PublishReleaseToOssTest(unittest.TestCase):
         operations = []
         current = {"android-aarch64-apk-standard": Path("android.apk")}
         inherited = {
-            "windows-x86_64-exe-standard": {
-                "source_key": "rustdesk/stable/old/windows.exe",
-                "name": "windows.exe",
+            "windows-x86_64-msi-standard": {
+                "source_key": "rustdesk/stable/old/windows.msi",
+                "name": "windows.msi",
                 "copy_source_verified": True,
             }
         }
@@ -584,8 +606,8 @@ class PublishReleaseToOssTest(unittest.TestCase):
                 ("upload", "rustdesk/stable/new/android.apk", "android.apk"),
                 (
                     "copy",
-                    "rustdesk/stable/old/windows.exe",
-                    "rustdesk/stable/new/windows.exe",
+                    "rustdesk/stable/old/windows.msi",
+                    "rustdesk/stable/new/windows.msi",
                 ),
             ],
         )
@@ -593,11 +615,11 @@ class PublishReleaseToOssTest(unittest.TestCase):
     def test_unverified_inherited_copy_source_falls_back_to_upload(self):
         operations = []
         inherited = {
-            "windows-x86_64-exe-standard": {
-                "source_key": "rustdesk/stable/old/windows.exe",
-                "name": "windows.exe",
+            "windows-x86_64-msi-standard": {
+                "source_key": "rustdesk/stable/old/windows.msi",
+                "name": "windows.msi",
                 "copy_source_verified": False,
-                "path": Path("verified-windows.exe"),
+                "path": Path("verified-windows.msi"),
             }
         }
 
@@ -611,7 +633,7 @@ class PublishReleaseToOssTest(unittest.TestCase):
 
         self.assertEqual(
             operations,
-            [("upload", "rustdesk/stable/new/windows.exe", "verified-windows.exe")],
+            [("upload", "rustdesk/stable/new/windows.msi", "verified-windows.msi")],
         )
 
     def test_release_metadata_comes_from_release_checkout_and_its_commit(self):
@@ -685,9 +707,9 @@ class PublishReleaseToOssTest(unittest.TestCase):
             "build_seq": 2026093005,
             "source_commit": "c" * 40,
             "targets": {
-                "windows-x86_64-exe-standard": {
-                    "primary": "https://download.example/file.exe",
-                    "mirrors": ["https://github.example/file.exe"],
+                "windows-x86_64-msi-standard": {
+                    "primary": "https://download.example/file.msi",
+                    "mirrors": ["https://github.example/file.msi"],
                 }
             },
         }

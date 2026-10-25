@@ -58,7 +58,7 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
     @staticmethod
     def write_current_platforms(directory, platforms, version="1.5.1", build_seq=2026100202):
         suffixes = {
-            "windows": ("windows-x86_64.exe", "windows-x86_64.msi"),
+            "windows": ("windows-x86_64.msi",),
             "macos": ("macos-aarch64.dmg",),
             "android": ("android-aarch64.apk",),
         }
@@ -69,7 +69,7 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                     name = f"rustdesk-{version}-{build_seq}-{edition}-{suffix}"
                     (directory / name).write_bytes(name.encode())
 
-    def test_android_only_builds_one_target_and_inherits_six(self):
+    def test_android_only_builds_one_target_and_inherits_four(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             current = root / "current"
@@ -93,9 +93,10 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                 )[2],
             )
 
-            self.assertEqual(len(snapshot["targets"]), 7)
-            self.assertEqual(len(list(output.glob("rustdesk-*"))), 7)
-            self.assertEqual(len(fetched), 6)
+            self.assertEqual(len(snapshot["targets"]), 5)
+            self.assertEqual(len(list(output.glob("rustdesk-*"))), 5)
+            self.assertEqual(len(fetched), 4)
+            self.assertEqual(list(output.glob("*.exe")), [])
             self.assertNotIn("android-aarch64-apk-sos", snapshot["targets"])
             self.assertIsNone(
                 self.assembler.target_key_for_name(
@@ -103,7 +104,7 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                snapshot["targets"]["windows-x86_64-exe-standard"]["build_seq"],
+                snapshot["targets"]["windows-x86_64-msi-standard"]["build_seq"],
                 2026100107,
             )
             self.assertEqual(
@@ -115,15 +116,15 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                 "rustdesk-1.5.0-2026100201-standard-android-aarch64.apk",
             )
             self.assertEqual(
-                snapshot["targets"]["windows-x86_64-exe-standard"]["name"],
-                "rustdesk-1.5.0-2026100107-standard-windows-x86_64.exe",
+                snapshot["targets"]["windows-x86_64-msi-standard"]["name"],
+                "rustdesk-1.5.0-2026100107-standard-windows-x86_64.msi",
             )
             self.assertEqual(
-                snapshot["targets"]["windows-x86_64-exe-standard"]["source_key"],
-                "rustdesk/stable/old/rustdesk-1.5.0-standard-windows-x86_64.exe",
+                snapshot["targets"]["windows-x86_64-msi-standard"]["source_key"],
+                "rustdesk/stable/old/rustdesk-1.5.0-standard-windows-x86_64.msi",
             )
             self.assertTrue(
-                snapshot["targets"]["windows-x86_64-exe-standard"]["copy_source_verified"]
+                snapshot["targets"]["windows-x86_64-msi-standard"]["copy_source_verified"]
             )
 
     def test_android_only_does_not_require_a_current_sos_asset(self):
@@ -178,7 +179,7 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
             current.mkdir()
             self.write_current_platforms(current, ("android",))
             previous = self.previous_manifest()
-            previous["targets"]["windows-x86_64-exe-standard"]["build_number"] = ""
+            previous["targets"]["windows-x86_64-msi-standard"]["build_number"] = ""
 
             with self.assertRaisesRegex(
                 self.assembler.SnapshotError, "release identity is incomplete"
@@ -215,7 +216,7 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
             )
 
             self.assertFalse(
-                snapshot["targets"]["windows-x86_64-exe-standard"]["copy_source_verified"]
+                snapshot["targets"]["windows-x86_64-msi-standard"]["copy_source_verified"]
             )
 
     def test_windows_and_macos_build_inherit_only_android_targets(self):
@@ -241,13 +242,13 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                 key for key, target in snapshot["targets"].items() if target["current"]
             }
             inherited_targets = set(snapshot["targets"]) - current_targets
-            self.assertEqual(len(current_targets), 6)
+            self.assertEqual(len(current_targets), 4)
             self.assertEqual(
                 inherited_targets,
                 {"android-aarch64-apk-standard"},
             )
 
-    def test_all_platform_build_uses_seven_current_targets_without_android_sos(self):
+    def test_all_platform_build_uses_five_current_targets_without_android_sos(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             current = root / "current"
@@ -263,12 +264,60 @@ class AssembleReleaseSnapshotTest(unittest.TestCase):
                 lambda target, path: self.fail("all build must not fetch inherited assets"),
             )
 
-            self.assertEqual(len(snapshot["targets"]), 7)
+            self.assertEqual(len(snapshot["targets"]), 5)
             self.assertEqual(
                 {key for key, target in snapshot["targets"].items() if target["current"]},
                 self.assembler.EXPECTED_TARGETS,
             )
             self.assertNotIn("android-aarch64-apk-sos", snapshot["targets"])
+
+    def test_release_targets_are_exactly_five_packages_without_windows_exe(self):
+        self.assertEqual(
+            self.assembler.EXPECTED_TARGETS,
+            {
+                "windows-x86_64-msi-standard",
+                "windows-x86_64-msi-sos",
+                "macos-aarch64-dmg-standard",
+                "macos-aarch64-dmg-sos",
+                "android-aarch64-apk-standard",
+            },
+        )
+        self.assertFalse(any("-exe" in key for key in self.assembler.EXPECTED_TARGETS))
+        for edition in ("standard", "sos"):
+            self.assertIsNone(
+                self.assembler.target_key_for_name(
+                    f"rustdesk-1.5.0-2026100202-{edition}-windows-x86_64.exe"
+                )
+            )
+
+    def test_stray_and_legacy_windows_exe_never_enter_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current = root / "current"
+            output = root / "output"
+            current.mkdir()
+            self.write_current_platforms(current, ("windows",))
+            for edition in ("standard", "sos"):
+                name = f"rustdesk-1.5.1-2026100202-{edition}-windows-x86_64.exe"
+                (current / name).write_bytes(name.encode())
+            previous = self.previous_manifest()
+            self.assertIn("windows-x86_64-exe-standard", previous["targets"])
+
+            snapshot = self.assembler.assemble_snapshot(
+                current,
+                output,
+                {**self.metadata("new", 2026100202), "version": "1.5.1"},
+                "new",
+                previous,
+                lambda target, path: (
+                    path.write_bytes(b"old"),
+                    target["primary"],
+                )[1],
+            )
+
+            self.assertEqual(len(snapshot["targets"]), 5)
+            self.assertFalse(any("-exe" in key for key in snapshot["targets"]))
+            self.assertEqual(list(output.glob("*.exe")), [])
 
 
 if __name__ == "__main__":

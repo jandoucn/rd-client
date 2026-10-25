@@ -33,7 +33,9 @@
 * Management Agent 属于本私人项目的远程维护通道。客户端默认声明并启用已实现的全部 agent 运维能力，包含状态上报、固定 RustDesk 服务检查/启动/重启/修复、恢复协调、固定对象校验、脱敏诊断和固定 API/下载/ID 网络探测；后续已实现的批准包修复、主程序升级和 agent 升级能力也默认纳入能力清单。API 绑定默认授予全部 agent 运维权限，不默认降级为仅观测；权限变更、实例绑定、命令、事务和事件必须保留审计。任何能力仍只能作用于固定 RustDesk 对象、批准且签名的发布包和固定域名，禁止任意脚本、任意路径、任意端口扫描、任意进程或任意环境变量执行。本地 `disable-recovery`、`disable-agent`、维护状态、用户明确停止意图、安装互斥、签名/哈希/身份校验和回滚门禁优先于远程命令，远程权限不得绕过这些本地约束。
 * OSS 发布采用分离链路：GitHub Actions 上传必须使用 `oss-accelerate.aliyuncs.com`；客户端 `DOWNLOAD_BASE` 固定为 `https://download.yan.life`，其 CNAME 指向 `rustdesk-release.oss-cn-shanghai.aliyuncs.com`，不要因上传加速而改动客户端下载域名。
 * Android 发布必须始终使用固定长期签名证书。证书 SHA-256 指纹为 `71:11:D7:30:EC:A2:C7:98:47:41:53:04:59:DD:38:97:20:16:2F:7B:FE:B7:39:FA:96:8F:2E:D7:4E:6F:0B:D8`，GitHub Actions 使用 `ANDROID_SIGNING_KEY`、`ANDROID_ALIAS`、`ANDROID_KEY_STORE_PASSWORD`、`ANDROID_KEY_PASSWORD`。缺少任一签名配置时必须终止 Android 发布，禁止把 debug 或 unsigned APK 上传到 Release 或 OSS。不得更换证书；确需更换时必须先得到明确确认并制定已安装客户端迁移方案。
-* Android 永久只发布 standard APK，不存在 Android SOS 发布目标。Android 必须安装后使用；禁止构建、上传、写入 Release/OSS manifest 或恢复 `android-aarch64-apk-sos`。Windows 和 macOS 的 SOS 发布保持不变。
+* Android 永久只发布 standard APK，不存在 Android SOS 发布目标。Android 必须安装后使用；禁止构建、上传、写入 Release/OSS manifest 或恢复 `android-aarch64-apk-sos`。macOS 的 standard 与 SOS DMG 发布保持不变。
+* Windows 永久只发布 MSI（standard 与 SOS），不再构建、上传或写入 Release/OSS manifest 任何 Windows EXE（含自解压/便携 EXE），禁止恢复 `windows-x86_64-exe-standard` 与 `windows-x86_64-exe-sos`。客户端与后端保留 EXE 相关运行时代码（更新器 EXE 分支、`src/management_agent/exe_*`、后端 EXE 识别等），用于兼容存量 EXE 设备，不得借此删除。
+* 发布构建最终产物固定为 5 个包：`windows-x86_64-msi-standard`、`windows-x86_64-msi-sos`、`macos-aarch64-dmg-standard`、`macos-aarch64-dmg-sos`、`android-aarch64-apk-standard`。发布脚本、Release 资产校验与 OSS manifest 的目标集合必须与此一致；增减目标必须先得到明确确认。
 * macOS 包签名必须保持成功构建 run `36898758124` 和 `36859858472` 使用的既有方法，不得借构建修复重构或替换签名链：
   * 无证书构建依次执行 `codesign --force --sign - "$app/Contents/MacOS/service"`、`codesign --force --sign - "$app"`、`codesign --verify --deep --strict --verbose=2 "$app"`，不得启用 hardened runtime；
   * 正式证书构建继续使用 `.github/scripts/sign-macos-app.sh` 原有 `sign_args`，仅真实 identity 添加 `--options runtime --timestamp`，保持现有 entitlements、DMG 签名和公证流程；
@@ -79,7 +81,7 @@
   * 缺少可靠恢复手段的破坏性用例记 BLOCKED，不得以未执行代替通过。
 * **端到端测试（E2E）**：桌面端用户流程必须覆盖启动、首页栏目、连接入口、更新检查、下载校验、安装失败回滚和旧版本继续可用。E2E 必须使用构建出的实际程序或安装包，不得只调用内部函数代替。
 * **Flutter 桌面验收**：涉及 `flutter/lib/` 的改动必须至少运行对应 widget 测试；涉及桌面导航、栏目、窗口或平台桥接时，必须增加 `integration_test` 或等价桌面驱动测试，并在 Windows、Linux 或 macOS 至少一个真实桌面目标上运行。
-* **安装包验收**：涉及版本、构建元数据、更新器或打包脚本时，必须验证 Windows EXE、Windows MSI、Linux AppImage 中至少一个可生成包；更新器协议改动必须覆盖三种包的 manifest 选择逻辑，能运行的平台要做实际启动冒烟测试。
+* **安装包验收**：涉及版本、构建元数据、更新器或打包脚本时，必须验证 Windows MSI、Linux AppImage 中至少一个可生成包（Windows EXE 已停止发布，不能以生成 EXE 代替）；更新器协议改动必须覆盖 Windows MSI、macOS DMG、Android APK 发布包的 manifest 选择逻辑，并继续覆盖存量 Windows EXE 设备的 manifest 选择与兼容逻辑（包括 manifest 不再包含 EXE 目标时的行为），能运行的平台要做实际启动冒烟测试。
 
 测试覆盖要求：
 

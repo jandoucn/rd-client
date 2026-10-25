@@ -5,12 +5,21 @@ import sys
 from pathlib import Path
 
 
-ALLOWED_SUFFIXES = {".apk", ".appimage", ".deb", ".dmg", ".exe", ".msi", ".rpm"}
+ALLOWED_SUFFIXES = {".apk", ".appimage", ".deb", ".dmg", ".msi", ".rpm"}
+FORBIDDEN_SUFFIXES = {".exe"}
 
 
 def validate(root: Path, required_editions: set[str] | None = None) -> list[Path]:
     if not root.is_dir():
         raise ValueError(f"release asset directory does not exist: {root}")
+
+    forbidden = sorted(
+        path.name
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in FORBIDDEN_SUFFIXES
+    )
+    if forbidden:
+        raise ValueError(f"EXE release asset is not allowed: {', '.join(forbidden)}")
 
     assets = sorted(
         path

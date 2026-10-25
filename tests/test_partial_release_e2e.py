@@ -16,7 +16,7 @@ def load_script(name, path):
 
 
 class PartialReleaseE2ETest(unittest.TestCase):
-    def test_android_only_produces_complete_release_and_one_upload_six_copies(self):
+    def test_android_only_produces_complete_release_and_one_upload_four_copies(self):
         assembler = load_script(
             "assemble_release_snapshot_e2e",
             ROOT / ".github/scripts/assemble-release-snapshot.py",
@@ -101,10 +101,14 @@ class PartialReleaseE2ETest(unittest.TestCase):
                 "rustdesk/stable/new/",
             )
 
-            self.assertEqual(len(snapshot["targets"]), 7)
-            self.assertEqual(len(list(output.glob("rustdesk-*"))), 7)
+            self.assertEqual(len(snapshot["targets"]), 5)
+            self.assertEqual(len(list(output.glob("rustdesk-*"))), 5)
             self.assertEqual(sum(op[0] == "upload" for op in operations), 1)
-            self.assertEqual(sum(op[0] == "copy" for op in operations), 6)
+            self.assertEqual(sum(op[0] == "copy" for op in operations), 4)
+            self.assertFalse(any("-exe" in key for key in snapshot["targets"]))
+            self.assertEqual(list(output.glob("*.exe")), [])
+            resolved = publisher.resolve_release_assets(output, "1.5.1", snapshot)
+            self.assertEqual(set(resolved), publisher.EXPECTED_TARGETS)
             self.assertNotIn("android-aarch64-apk-sos", snapshot["targets"])
             self.assertEqual(
                 snapshot["targets"]["android-aarch64-apk-standard"]["build_seq"],

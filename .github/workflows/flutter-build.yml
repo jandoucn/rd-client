@@ -425,18 +425,6 @@ jobs:
           pip3 install requests argparse
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./rustdesk/
 
-      - name: Build self-extracted executable
-        shell: bash
-        if: env.UPLOAD_ARTIFACT == 'true'
-        run: |
-          sed -i '/dpiAware/d' res/manifest.xml
-          pushd ./libs/portable
-          pip3 install -r requirements.txt
-          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
-          popd
-          mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-windows-${{ matrix.job.arch }}.exe
-
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
         with:
@@ -452,6 +440,7 @@ jobs:
         # is x64 / ARM64; the produced Package.msi is globbed since its bin/<platform>/ dir varies.
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
+          New-Item -ItemType Directory -Force -Path ./SignOutput | Out-Null
           pushd ./res/msi
           python preprocess.py --arp --edition "${{ env.EDITION }}" -d ../../rustdesk
           nuget restore msi.sln
@@ -509,7 +498,7 @@ jobs:
           name: rustdesk-unsigned-msi-template-${{ matrix.job.arch }}
           path: ./msi-template
 
-      - name: Sign rustdesk self-extracted file
+      - name: Sign rustdesk MSI file
         if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
         shell: bash
         run: |
@@ -524,7 +513,6 @@ jobs:
           name: ${{ inputs.release-name != '' && inputs.release-name || env.TAG_NAME }}
           files: |
             ./SignOutput/rustdesk-*.msi
-            ./SignOutput/rustdesk-*.exe
 
       - name: Stage Windows release assets
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -533,7 +521,6 @@ jobs:
           name: release-assets-${{ env.EDITION }}-windows-${{ matrix.job.arch }}
           path: |
             ./SignOutput/rustdesk-*.msi
-            ./SignOutput/rustdesk-*.exe
           if-no-files-found: error
 
   # The fallback for the flutter version, we use Sciter for 32bit Windows.

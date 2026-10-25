@@ -28,13 +28,11 @@ COMPATIBLE_TAG_PATTERNS = (
     re.compile(r"^(?P<compact_date>\d{8})-(?P<sequence>\d+)$"),
 )
 TARGET_SUFFIXES = {
-    "windows-x86_64-exe": ("windows-x86_64.exe",),
     "windows-x86_64-msi": ("windows-x86_64.msi",),
     "macos-aarch64-dmg": ("macos-aarch64.dmg", "aarch64.dmg"),
     "android-aarch64-apk": ("android-aarch64-signed.apk", "android-aarch64.apk"),
 }
 TARGET_EDITIONS = {
-    "windows-x86_64-exe": ("standard", "sos"),
     "windows-x86_64-msi": ("standard", "sos"),
     "macos-aarch64-dmg": ("standard", "sos"),
     "android-aarch64-apk": ("standard",),
