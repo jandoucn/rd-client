@@ -2,8 +2,9 @@
 
 import argparse
 import json
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -13,6 +14,15 @@ TAG_PATTERN = re.compile(
     r"(?P<sequence>\d{2})$"
 )
 MAX_ANDROID_VERSION_CODE = 2_100_000_000
+
+# 构建序号按北京时间归日：同一自然日内的构建从 01 起递增。用 UTC 会在北京时间
+# 08:00 之前把构建记到前一天。
+BEIJING_OFFSET_HOURS = 8
+
+
+def beijing_build_date(now=None):
+    moment = (now or datetime.now(timezone.utc)) + timedelta(hours=BEIJING_OFFSET_HOURS)
+    return moment.strftime("%Y%m%d")
 
 
 def _normalized_build_date(value):
@@ -103,7 +113,9 @@ def _write_json(path, value):
 
 def _resolve(args):
     metadata = json.loads(args.metadata.read_text())
-    build_date = args.build_date or str(metadata["build_number"]).split(".", 1)[0]
+    # 构建日期按当天北京时间取，不沿用 version.json 里上一次的日期；否则隔天
+    # 发版会把新构建记到旧日期下，序号也无法从 01 重新开始。
+    build_date = args.build_date or beijing_build_date()
     tags = args.tags_file.read_text().splitlines()
     compact_date = _normalized_build_date(build_date)
     inferred_previous_code = infer_previous_android_version_code(compact_date, tags)
