@@ -256,6 +256,88 @@ fn current_product_code() -> Result<String, DeliveryError> {
     Err(DeliveryError::RegisteredSourceMismatch)
 }
 
+/// An MSI major upgrade installs a new product code, so an approval kept from the
+/// build it replaced can never match the registered source again (MSI answers 1605),
+/// and because a present approval is never replaced, first install stayed refused.
+/// Parsed as strictly as `existing()`, so a file it would call malformed is kept.
+fn approval_superseded(bytes: &[u8], installed_code: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Approval {
+        schema: u32,
+        product_code: String,
+        #[allow(dead_code)]
+        manifest: serde_json::Value,
+    }
+    serde_json::from_slice::<Approval>(bytes)
+        .is_ok_and(|old| old.schema == 1 && !old.product_code.eq_ignore_ascii_case(installed_code))
+}
+
+const DISCARD_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const DISCARD_GUARD_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+
+fn locally_gated(agent: &Path) -> bool {
+    ["disable-agent", "disable-recovery", "maintenance.json"]
+        .iter()
+        .any(|name| {
+            !matches!(
+                std::fs::symlink_metadata(agent.join("state").join(name)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+}
+
+fn discard_superseded_at<G>(
+    agent: &Path,
+    mut guard: impl FnMut() -> std::io::Result<Option<G>>,
+    installed_code: impl FnOnce() -> Result<String, DeliveryError>,
+    read: impl FnOnce(&Path) -> Result<Vec<u8>, DeliveryError>,
+    wait: std::time::Duration,
+    retry: std::time::Duration,
+) -> Result<bool, DeliveryError> {
+    let path = agent.join("release-cache/first-install.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(DeliveryError::UntrustedPath),
+        Ok(_) => {}
+    }
+    if locally_gated(agent) {
+        return Ok(false);
+    }
+    // The product code is not guarded by the install lock (msiexec does not take it),
+    // so it is read before waiting for the lock rather than while holding it.
+    let code = installed_code()?;
+    let deadline = std::time::Instant::now() + wait;
+    let _guard = loop {
+        match guard() {
+            Ok(Some(held)) => break held,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(retry),
+            _ => return Err(DeliveryError::Busy),
+        }
+    };
+    if locally_gated(agent) || !approval_superseded(&read(&path)?, &code) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).map_err(|_| DeliveryError::Busy)?;
+    Ok(true)
+}
+
+#[cfg(not(test))]
+pub fn discard_superseded_approval() -> Result<bool, DeliveryError> {
+    discard_superseded_at(
+        Path::new(AGENT),
+        install_guard::InstallGuard::try_acquire,
+        current_product_code,
+        |path| {
+            workspace::verify_file(path).map_err(|_| DeliveryError::UntrustedPath)?;
+            let (_held, bytes) = read_locked(path, LIMIT, false)?;
+            Ok(bytes)
+        },
+        DISCARD_GUARD_WAIT,
+        DISCARD_GUARD_RETRY,
+    )
+}
+
 #[cfg(not(test))]
 pub fn coordinate_current_installation() -> Result<CoordinationOutcome, DeliveryError> {
     let agent = Path::new(AGENT);
@@ -760,5 +842,214 @@ mod approval_scope_tests {
             |_| panic!("nothing is delivered for a non-MSI target"),
         );
         assert_eq!(outcome, Err(DeliveryError::TargetMismatch));
+    }
+
+    // MSI 大版本升级会换新的 ProductCode。升级前留下的审批绑定旧码，
+    // 查询注册源只会得到 1605，又因已有审批从不替换，首装救援就永远停在这里。
+    #[test]
+    fn an_approval_for_a_replaced_product_code_is_superseded() {
+        let old = br#"{"schema":1,"product_code":"{11111111-1111-1111-1111-111111111111}","manifest":{}}"#;
+        assert!(approval_superseded(
+            old,
+            "{22222222-2222-2222-2222-222222222222}"
+        ));
+    }
+
+    #[test]
+    fn an_approval_for_the_installed_product_code_is_kept() {
+        let current = br#"{"schema":1,"product_code":"{ABCDEFAB-1111-1111-1111-111111111111}","manifest":{}}"#;
+        assert!(!approval_superseded(
+            current,
+            "{abcdefab-1111-1111-1111-111111111111}"
+        ));
+    }
+
+    const OLD_CODE: &str = "{11111111-1111-1111-1111-111111111111}";
+    const NEW_CODE: &str = "{22222222-2222-2222-2222-222222222222}";
+
+    fn discard_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rd-discard-approval-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("release-cache")).unwrap();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::write(
+            root.join("release-cache/first-install.json"),
+            format!(r#"{{"schema":1,"product_code":"{OLD_CODE}","manifest":{{}}}}"#),
+        )
+        .unwrap();
+        root
+    }
+
+    fn discard(
+        root: &std::path::Path,
+        guard: impl FnMut() -> std::io::Result<Option<u8>>,
+        code: impl FnOnce() -> Result<String, DeliveryError>,
+    ) -> Result<bool, DeliveryError> {
+        discard_superseded_at(
+            root,
+            guard,
+            code,
+            |path| std::fs::read(path).map_err(|_| DeliveryError::UntrustedPath),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(5),
+        )
+    }
+
+    fn approval_kept(root: &std::path::Path) -> bool {
+        root.join("release-cache/first-install.json").exists()
+    }
+
+    #[test]
+    fn a_superseded_approval_is_removed() {
+        let root = discard_root("removed");
+        assert_eq!(
+            discard(&root, || Ok(Some(1)), || Ok(NEW_CODE.into())),
+            Ok(true)
+        );
+        assert!(!approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_approval_for_the_installed_product_is_not_removed() {
+        let root = discard_root("current");
+        assert_eq!(
+            discard(&root, || Ok(Some(1)), || Ok(OLD_CODE.into())),
+            Ok(false)
+        );
+        assert!(approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_done_without_an_approval() {
+        let root = discard_root("absent");
+        std::fs::remove_file(root.join("release-cache/first-install.json")).unwrap();
+        assert_eq!(
+            discard(
+                &root,
+                || panic!("no lock is needed"),
+                || panic!("no query is needed")
+            ),
+            Ok(false)
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 本地禁用、停用恢复和维护状态优先于任何清理。
+    #[test]
+    fn a_local_gate_keeps_the_approval() {
+        for gate in ["disable-agent", "disable-recovery", "maintenance.json"] {
+            let root = discard_root("gate");
+            std::fs::write(root.join("state").join(gate), b"").unwrap();
+            assert_eq!(
+                discard(&root, || Ok(Some(1)), || Ok(NEW_CODE.into())),
+                Ok(false)
+            );
+            assert!(approval_kept(&root), "{gate}");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    // 和首装准备一样会撞上同一轮周期任务里其他线程的毫秒级持锁，必须等一会儿再判忙。
+    #[test]
+    fn a_briefly_held_guard_is_waited_for() {
+        let root = discard_root("brief");
+        let calls = std::cell::Cell::new(0);
+        let result = discard(
+            &root,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(if calls.get() < 3 { None } else { Some(1) })
+            },
+            || Ok(NEW_CODE.into()),
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(calls.get(), 3);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_guard_held_past_the_window_keeps_the_approval() {
+        let root = discard_root("busy");
+        assert_eq!(
+            discard(&root, || Ok(None), || Ok(NEW_CODE.into())),
+            Err(DeliveryError::Busy)
+        );
+        assert!(approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failing_guard_keeps_the_approval() {
+        let root = discard_root("guard-error");
+        let calls = std::cell::Cell::new(0);
+        let result = discard(
+            &root,
+            || {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::other("denied"))
+            },
+            || Ok(NEW_CODE.into()),
+        );
+        assert_eq!(result, Err(DeliveryError::Busy));
+        assert_eq!(calls.get(), 1);
+        assert!(approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // MSI 事务进行中查不到唯一的已安装产品时，不能据此删审批。
+    #[test]
+    fn an_unknown_installed_product_keeps_the_approval() {
+        let root = discard_root("no-code");
+        assert_eq!(
+            discard(
+                &root,
+                || Ok(Some(1)),
+                || Err(DeliveryError::RegisteredSourceMismatch)
+            ),
+            Err(DeliveryError::RegisteredSourceMismatch)
+        );
+        assert!(approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_approval_is_kept() {
+        let root = discard_root("unreadable");
+        let result = discard_superseded_at(
+            &root,
+            || Ok(Some(1u8)),
+            || Ok(NEW_CODE.into()),
+            |_| Err(DeliveryError::UntrustedPath),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(5),
+        );
+        assert_eq!(result, Err(DeliveryError::UntrustedPath));
+        assert!(approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 读不懂的审批不能当作过期删掉，交给原有流程照旧报 malformed。
+    #[test]
+    fn a_malformed_approval_is_never_treated_as_superseded() {
+        assert!(!approval_superseded(
+            b"not json",
+            "{22222222-2222-2222-2222-222222222222}"
+        ));
+        assert!(!approval_superseded(
+            br#"{"schema":1}"#,
+            "{22222222-2222-2222-2222-222222222222}"
+        ));
+        assert!(!approval_superseded(
+            br#"{"schema":2,"product_code":"{11111111-1111-1111-1111-111111111111}","manifest":{}}"#,
+            "{22222222-2222-2222-2222-222222222222}"
+        ));
+        assert!(!approval_superseded(
+            br#"{"schema":1,"product_code":"{11111111-1111-1111-1111-111111111111}","manifest":{},"extra":1}"#,
+            "{22222222-2222-2222-2222-222222222222}"
+        ));
     }
 }

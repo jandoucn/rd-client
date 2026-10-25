@@ -297,6 +297,38 @@ fn reclaim_staging(stage: &Path) -> Result<(), String> {
     std::fs::remove_dir_all(stage).map_err(|_| "first installation staging not reclaimed".into())
 }
 
+/// Approval delivery refuses to run while `first-install-staging` exists, and only
+/// `prepare` reclaimed it, after an approval was present. A leftover from a failed
+/// attempt whose approval was later discarded therefore blocked delivery for good.
+/// `prepare` only runs on this worker thread after this check, so without an
+/// approval nothing here is using the directory; the guard keeps other processes'
+/// install transactions out while it is removed.
+fn reclaim_orphaned_staging(layout: &Layout) -> Result<bool, String> {
+    let sidecar = layout.agent.join("release-cache/first-install.json");
+    let stage = layout.destination.join("first-install-staging");
+    let gated = || -> Result<bool, String> {
+        for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
+            if !absent(&layout.agent.join("state").join(name))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    if !absent(&sidecar)? || absent(&stage)? || gated()? {
+        return Ok(false);
+    }
+    let _guard = acquire_guard_patiently(
+        super::InstallGuard::try_acquire,
+        FIRST_INSTALL_GUARD_WAIT,
+        FIRST_INSTALL_GUARD_RETRY,
+    )?;
+    if !absent(&sidecar)? || absent(&stage)? || gated()? {
+        return Ok(false);
+    }
+    reclaim_staging(&stage)?;
+    Ok(true)
+}
+
 fn waiting() -> serde_json::Value {
     serde_json::json!({"state":"unavailable","error_code":"waiting_approval","ready":false})
 }
@@ -991,6 +1023,10 @@ fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope
             if last.is_some_and(|time:Instant|time.elapsed()<Duration::from_secs(300)){continue;}last=Some(Instant::now());
             let result=(||{let layout=fixed_layout()?;if !absent(&layout.destination.join("current"))?{return Ok(());}
                 #[cfg(not(test))]
+                if let Err(error)=super::super::first_install_approval_delivery::discard_superseded_approval(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation superseded approval check unavailable: {error:?}");}
+                #[cfg(not(test))]
+                if let Err(error)=reclaim_orphaned_staging(&layout){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation orphaned staging not reclaimed: {error}");}
+                #[cfg(not(test))]
                 if absent(&layout.agent.join("release-cache/first-install.json"))? {
                     if let Err(error)=super::super::first_install_approval_delivery::coordinate_current_installation(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation approval unavailable: {error:?}");}
                 }
@@ -1036,6 +1072,94 @@ pub struct WorkerScope {
 #[cfg(test)]
 pub fn start_scoped_fixture(scope: WorkerScope) -> std::io::Result<Worker> {
     start_checked(None, Some(scope))
+}
+
+#[cfg(test)]
+mod orphaned_staging_tests {
+    use super::{super::fixture, reclaim_orphaned_staging};
+    use std::path::PathBuf;
+
+    fn root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rd-orphaned-staging-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("rescue/first-install-staging/image")).unwrap();
+        std::fs::write(root.join("rescue/first-install-staging/extract.log"), b"x").unwrap();
+        root
+    }
+
+    // 审批投递只要看到 first-install-staging 就报 Busy，而回收它的 prepare
+    // 又要先有审批；失败遗留的 staging 因此把首装救援永久卡死。
+    #[test]
+    fn a_leftover_staging_without_approval_is_reclaimed() {
+        let root = root("reclaim");
+        assert_eq!(reclaim_orphaned_staging(&fixture(&root)), Ok(true));
+        assert!(!root.join("rescue/first-install-staging").exists());
+        assert!(root.join("rescue").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 有审批时 staging 归 prepare 管，这里不能动它。
+    #[test]
+    fn a_staging_with_an_approval_is_left_to_prepare() {
+        let root = root("approved");
+        std::fs::create_dir_all(root.join("release-cache")).unwrap();
+        std::fs::write(root.join("release-cache/first-install.json"), b"{}").unwrap();
+        assert_eq!(reclaim_orphaned_staging(&fixture(&root)), Ok(false));
+        assert!(root
+            .join("rescue/first-install-staging/extract.log")
+            .exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 本地禁用、停用恢复和维护状态优先于任何清理。
+    #[test]
+    fn a_local_gate_keeps_the_staging() {
+        for gate in ["disable-agent", "disable-recovery", "maintenance.json"] {
+            let root = root("gate");
+            std::fs::create_dir_all(root.join("state")).unwrap();
+            std::fs::write(root.join("state").join(gate), b"").unwrap();
+            assert_eq!(reclaim_orphaned_staging(&fixture(&root)), Ok(false));
+            assert!(
+                root.join("rescue/first-install-staging/extract.log")
+                    .exists(),
+                "{gate}"
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    // staging 被换成联接点时拒绝回收，联接点指向的内容必须原样保留。
+    #[test]
+    fn a_reparse_point_staging_is_refused_and_its_target_kept() {
+        let root = root("reparse");
+        // mklink does not accept forward slashes.
+        let stage = root.join("rescue").join("first-install-staging");
+        std::fs::remove_dir_all(&stage).unwrap();
+        let target = root.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&stage)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert!(reclaim_orphaned_staging(&fixture(&root)).is_err());
+        assert!(target.join("keep.txt").exists());
+        std::fs::remove_dir(&stage).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn nothing_happens_without_a_staging() {
+        let root = root("absent");
+        std::fs::remove_dir_all(root.join("rescue/first-install-staging")).unwrap();
+        assert_eq!(reclaim_orphaned_staging(&fixture(&root)), Ok(false));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 #[cfg(test)]
