@@ -3,14 +3,14 @@ import 'package:flutter/material.dart';
 class DesktopUpdateCard extends StatelessWidget {
   final String version;
   final String installLabel;
-  final VoidCallback onInstall;
+  final VoidCallback? onInstall;
   final VoidCallback onClose;
 
   const DesktopUpdateCard({
     super.key,
     required this.version,
     required this.installLabel,
-    required this.onInstall,
+    this.onInstall,
     required this.onClose,
   });
 
@@ -39,18 +39,20 @@ class DesktopUpdateCard extends StatelessWidget {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-                const SizedBox(height: 20),
-                Center(
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: Colors.white),
-                      minimumSize: const Size(150, 40),
+                if (onInstall != null) ...[
+                  const SizedBox(height: 20),
+                  Center(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white),
+                        minimumSize: const Size(150, 40),
+                      ),
+                      onPressed: onInstall,
+                      child: Text(installLabel),
                     ),
-                    onPressed: onInstall,
-                    child: Text(installLabel),
                   ),
-                ),
+                ],
               ],
             ),
           ),

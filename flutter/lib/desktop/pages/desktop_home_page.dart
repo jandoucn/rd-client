@@ -514,13 +514,17 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   Widget buildHelpCards() {
     if (desktopUpdateCardVisible.value &&
         updateUiState.updateUrl.value.isNotEmpty) {
+      final installAllowed =
+          updateModeOffersInstall(updateUiState.mode.value);
       return DesktopUpdateCard(
         version: updateUiState.targetVersion.value,
         installLabel: translate('Install'),
-        onInstall: () {
-          desktopUpdateCardVisible.value = false;
-          handleUpdate(updateUiState.updateUrl.value);
-        },
+        onInstall: installAllowed
+            ? () {
+                desktopUpdateCardVisible.value = false;
+                handleUpdate(updateUiState.updateUrl.value);
+              }
+            : null,
         onClose: () => desktopUpdateCardVisible.value = false,
       );
     }

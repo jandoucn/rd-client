@@ -22,6 +22,7 @@ import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'common.dart';
@@ -476,8 +477,14 @@ class _AppState extends State<App> with WidgetsBindingObserver, WindowListener {
     _handleDesktopUpdateResult();
   }
 
-  Future<void> _showStartupUpdatePrompt(String url) async {
+  Future<void> _showStartupUpdatePrompt(String url, {String mode = ''}) async {
     if (!mounted || url.isEmpty || _startupPromptShowing) return;
+    if (!updateModeAllowsPrompt(mode)) return;
+    final action = updatePromptAction(
+      mode: mode,
+      allowAutoUpdate: mainGetBoolOptionSync(kOptionAllowAutoUpdate),
+    );
+    final installAllowed = updatePromptAllowsInstall(action);
     if (isDesktop) {
       desktopUpdateCardVisible.value = true;
       return;
@@ -490,7 +497,9 @@ class _AppState extends State<App> with WidgetsBindingObserver, WindowListener {
         context: dialogContext,
         builder: (context) => AlertDialog(
           title: Text(translate('Software update')),
-          content: Text(translate('A new version is available. Update now?')),
+          content: Text(installAllowed
+              ? translate('A new version is available. Update now?')
+              : translate('Update available')),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -498,12 +507,21 @@ class _AppState extends State<App> with WidgetsBindingObserver, WindowListener {
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text(translate('Update')),
+              child: Text(translate(installAllowed ? 'Update' : 'JumpLink')),
             ),
           ],
         ),
       );
-      if (accepted == true) handleUpdate(url);
+      if (accepted == true) {
+        if (installAllowed) {
+          handleUpdate(url);
+        } else {
+          await launchUrl(
+            Uri.parse(url),
+            mode: LaunchMode.externalApplication,
+          );
+        }
+      }
     } finally {
       _startupPromptShowing = false;
     }
@@ -522,6 +540,7 @@ class _AppState extends State<App> with WidgetsBindingObserver, WindowListener {
       autoUpdate: mainGetBoolOptionSync(kOptionAllowAutoUpdate),
       requestOrigin: updateUiState.requestOrigin.value,
       updateUrl: updateUiState.updateUrl.value,
+      mode: updateUiState.mode.value,
     )) {
       return;
     }
@@ -531,7 +550,12 @@ class _AppState extends State<App> with WidgetsBindingObserver, WindowListener {
       updateUiState.targetBuildSeq.value,
     ].join('|');
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _showStartupUpdatePrompt(updateUiState.updateUrl.value);
+      if (mounted) {
+        _showStartupUpdatePrompt(
+          updateUiState.updateUrl.value,
+          mode: updateUiState.mode.value,
+        );
+      }
     });
   }
 

@@ -4153,15 +4153,56 @@ bool shouldApplyUpdatePolicy({
 
 bool shouldCheckSoftwareUpdateOnStartup(String option) => option == 'Y';
 
+enum UpdatePromptAction { none, notify, download, autoInstall }
+
+// Mirrors the native policy decision so the desk never offers more than the
+// server allowed: an unknown mode is announced but never installed.
+UpdatePromptAction updatePromptAction({
+  required String mode,
+  required bool allowAutoUpdate,
+}) {
+  switch (mode.trim().toLowerCase()) {
+    case 'disabled':
+      return UpdatePromptAction.none;
+    case 'download':
+      return UpdatePromptAction.download;
+    case 'auto_install':
+      return allowAutoUpdate
+          ? UpdatePromptAction.autoInstall
+          : UpdatePromptAction.download;
+    default:
+      return UpdatePromptAction.notify;
+  }
+}
+
+bool updateModeAllowsPrompt(String mode) =>
+    updatePromptAction(mode: mode, allowAutoUpdate: false) !=
+    UpdatePromptAction.none;
+
+bool updatePromptAllowsInstall(UpdatePromptAction action) =>
+    action == UpdatePromptAction.download ||
+    action == UpdatePromptAction.autoInstall;
+
+bool updatePromptAutoInstalls(UpdatePromptAction action) =>
+    action == UpdatePromptAction.autoInstall;
+
+bool updateModeOffersInstall(String mode) => updatePromptAllowsInstall(
+    updatePromptAction(mode: mode, allowAutoUpdate: false));
+
+String effectiveUpdateUrl({required String mode, required String url}) =>
+    updateModeAllowsPrompt(mode) ? url : '';
+
 bool shouldShowStartupUpdatePrompt({
   required bool isDesktopMainWindow,
   required bool autoUpdate,
   required String requestOrigin,
   required String updateUrl,
+  String mode = '',
 }) {
   return isDesktopMainWindow &&
       !autoUpdate &&
       requestOrigin == 'startup' &&
+      updateModeAllowsPrompt(mode) &&
       updateUrl.isNotEmpty;
 }
 
@@ -4170,12 +4211,14 @@ bool shouldShowDesktopUpdatePrompt({
   required bool autoUpdate,
   required String requestOrigin,
   required String updateUrl,
+  String mode = '',
 }) {
   return windowVisible &&
       !autoUpdate &&
       (requestOrigin == 'command' ||
           requestOrigin == 'startup' ||
           requestOrigin == 'system') &&
+      updateModeAllowsPrompt(mode) &&
       updateUrl.isNotEmpty;
 }
 
@@ -4307,7 +4350,10 @@ Future<void> consumePendingAndroidUpdateReady() async {
 void handleCheckSoftwareUpdateFinish(Map<String, dynamic> evt) {
   updateUiState.applyCheckResult(evt);
   applyLocalUpdateCheckEvent(evt);
-  stateGlobal.updateUrl.value = updateUiState.updateUrl.value;
+  stateGlobal.updateUrl.value = effectiveUpdateUrl(
+    mode: updateUiState.mode.value,
+    url: updateUiState.updateUrl.value,
+  );
   stateGlobal.updateStatus.value = softwareUpdateCheckStatus(
     error: updateUiState.error.value,
     updateUrl: stateGlobal.updateUrl.value,
