@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 pub(crate) mod ordinary_update_receipts;
 
+// 记录尝试与 pending 安装只发生在 Windows 的 EXE 安装路径上。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[path = "updater/install_state.rs"]
 mod install_state;
 
@@ -413,31 +415,6 @@ fn update_command_matches_target(
     command_version == manifest_version && command_build_seq == manifest_build_seq
 }
 
-// The server's `mode` is the authority for whether an update may install itself.
-// A manual check only decides to run the check now, so it must not turn `notify`
-// into an install. The person at the desk asking to install is a separate,
-// explicit request, and it only lifts `download` to an install: `notify` still
-// never installs, and `disabled` still installs nothing at all.
-fn update_action_for(
-    response: &hbb_common::VersionCheckResponse,
-    local_auto_update: bool,
-    command: Option<&UpdateCommand>,
-    install_requested: bool,
-) -> UpdateAction {
-    if let Some(command) = command {
-        return match command.action {
-            UpdateCommandAction::Check => UpdateAction::Notify,
-            UpdateCommandAction::Install => UpdateAction::AutoInstall,
-        };
-    }
-    let action = decide_update_action(response, local_auto_update);
-    if install_requested && action == UpdateAction::Download {
-        UpdateAction::AutoInstall
-    } else {
-        action
-    }
-}
-
 fn update_now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -445,11 +422,9 @@ fn update_now_unix() -> i64 {
 // A launched installer that exits without replacing this build used to look like
 // a success, so a build that crashes on start was reinstalled forever. The
 // attempt is now recorded before the launch and confirmed after the restart.
-fn note_install_attempt(automatic: bool, version: &str, build_seq: u64) {
-    let now = update_now_unix();
-    if automatic {
-        install_state::record_auto_install_attempt(version, build_seq, now);
-    }
+#[cfg(target_os = "windows")]
+fn note_install_attempt(version: &str, build_seq: u64) {
+    install_state::record_auto_install_attempt(version, build_seq, update_now_unix());
 }
 
 // Called once per process before the update loop reads pending commands. The
@@ -501,46 +476,6 @@ fn resolve_pending_install() {
                 event.source.as_str(),
             );
         }
-    }
-}
-
-// The installer normally kills this process within seconds. If it is still alive
-// after the confirmation window, the installer exited without replacing the
-// build, and the update counts as failed instead of started.
-#[cfg(target_os = "windows")]
-fn spawn_install_confirmation_watchdog(event: PendingUpdateEvent) {
-    let deadline =
-        update_now_unix().saturating_add(install_state::INSTALL_CONFIRM_TIMEOUT.as_secs() as i64);
-    let spawned = std::thread::Builder::new()
-        .name("update-install-confirm".to_owned())
-        .spawn(move || {
-            std::thread::sleep(install_state::INSTALL_CONFIRM_TIMEOUT);
-            let still_old = install_state::install_confirmation(
-                &event.version,
-                event.build_seq,
-                crate::VERSION,
-                crate::BUILD_SEQ,
-                update_now_unix(),
-                deadline,
-            ) == install_state::InstallConfirmation::Failed;
-            if !still_old {
-                return;
-            }
-            log::error!(
-                "Update to {} did not replace the running build {}",
-                event.version,
-                crate::VERSION
-            );
-            install_state::clear_pending(&event.transaction_id);
-            report_update_event(
-                "failed",
-                &event.version,
-                event.build_seq,
-                event.source.as_str(),
-            );
-        });
-    if let Err(err) = spawned {
-        log::warn!("Failed to start install confirmation watchdog: {err}");
     }
 }
 
@@ -1370,6 +1305,10 @@ fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
     // 上一次安装是否真的生效，只有重启后的这里才能判断：安装器会终止旧进程，
     // 终态上报来不及发出。失败会在此计入熔断，避免一个装不上的版本被反复拉起。
     resolve_pending_install();
+    let swept = remove_stale_update_staging_dirs(&std::env::temp_dir(), STALE_UPDATE_STAGING_AGE);
+    if swept > 0 {
+        log::info!("Removed {swept} stale update staging directories");
+    }
     let started_at = Instant::now();
     let mut startup_check_pending = true;
     let mut last_check_time = None;
@@ -1707,26 +1646,12 @@ fn install_command_satisfied(
     !hbb_common::is_newer_version(version, build_seq, running_version, running_build_seq)
 }
 
-/// 只有同时满足「运行的就是目标版本」和「这条命令确由本机发起并已交给安装器」，
-/// 才能断定安装已完成。缺了后者，一条与本机签名清单不符、本机从未执行过的命令
-/// 会被记成安装成功，跳过目标与签名校验。
-fn install_command_already_applied(
-    command: &UpdateCommand,
-    running_version: &str,
-    running_build_seq: u64,
-    launched_by_this_install: bool,
-) -> bool {
-    launched_by_this_install
-        && install_command_satisfied(command, running_version, running_build_seq)
-}
-
+// 运行版本已达到命令目标即判完成，不再要求本机留有 pending 安装记录：
+// 重启后 resolve_pending_install 会先确认并清掉 pending，之后才处理重放的命令，
+// 那时记录必然已不存在；带外安装同样没有记录。两种情况若回去检查更新只会得到
+// no_update，命令就永远停在 installing。
 fn check_update_for_command(command: &UpdateCommand) -> ResultType<UpdateCommandRunOutcome> {
-    if install_command_already_applied(
-        command,
-        crate::VERSION,
-        crate::BUILD_SEQ,
-        install_state::pending_install_owns_command(&command.command_id),
-    ) {
+    if install_command_satisfied(command, crate::VERSION, crate::BUILD_SEQ) {
         return Ok(UpdateCommandRunOutcome::Installed);
     }
     check_update_request(false, Some(command), "command")
@@ -1863,6 +1788,9 @@ fn check_update_request_with_action(
     }
     // 只有真正会拉安装器的路径才受尝试次数与安装租约约束：检查、下载、
     // 提示都不碰本机安装，不该被上一次安装的失败记录挡住。
+    if should_install && install_requested {
+        install_state::clear_auto_install_attempts();
+    }
     let _install_lease = if should_install {
         if !install_state::auto_install_allowed(version, target_build_seq, update_now_unix()) {
             log::warn!(
@@ -2275,6 +2203,8 @@ fn verify_detached_signature(data: &[u8], signature: &[u8], public_key: &[u8]) -
 }
 
 const UPDATE_DOWNLOAD_DIR_PREFIX: &str = ".rustdesk-update-";
+// 远大于任何一次下载加安装的耗时，不会碰到正在使用的暂存目录。
+const STALE_UPDATE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 struct UpdateDownloadStaging {
     dir: PathBuf,
@@ -2324,6 +2254,37 @@ impl UpdateDownloadStaging {
         self.keep = true;
         self.file.clone()
     }
+}
+
+/// 清理超过 `max_age` 的更新暂存目录。正常情况下暂存目录会随 `UpdateDownloadStaging`
+/// 析构或安装后删除；安装器在拉起瞬间崩溃，或安装成功后旧进程已被替换时，
+/// 目录都会遗留下来。只动带固定前缀的目录，不跟随符号链接。
+fn remove_stale_update_staging_dirs(temp: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let is_staging = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(UPDATE_DOWNLOAD_DIR_PREFIX));
+        if !is_staging {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if metadata.is_dir() && old_enough && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 impl Drop for UpdateDownloadStaging {
@@ -2779,6 +2740,9 @@ fn update_new_version(
                     ));
                     None
                 };
+                // 先记尝试再拉起：拉起这一步本身崩溃时（D30），进程来不及做任何事，
+                // 只有提前落盘的计数能让重启后的熔断看到这次失败。
+                note_install_attempt(version, build_seq);
                 let update_launched = match crate::platform::launch_privileged_process(
                     session_id,
                     &format!("{} {}", p, pending_args),
@@ -3310,8 +3274,8 @@ mod tests {
     use super::wait_for_mac_schedule_change;
     use super::UpdateCommand;
     use super::{
-        get_download_file_from_url, install_command_already_applied, install_command_satisfied,
-        release_notice_should_check, scheduled_update_delay, update_filename_from_url,
+        get_download_file_from_url, install_command_satisfied, release_notice_should_check,
+        remove_stale_update_staging_dirs, scheduled_update_delay, update_filename_from_url,
         verify_detached_signature, UpdateCommandAction, UpdateDownloadStaging,
     };
     use std::time::Duration;
@@ -3364,50 +3328,6 @@ mod tests {
             &install_command(Some("1.5.4"), Some(2026102404)),
             "1.5.4",
             2026102402,
-        ));
-    }
-
-    // 目标版本相符但本机从未发起过这次安装，说明这条命令不是本机装的。
-    // 此时必须继续走目标与签名校验，不能直接记成安装完成。
-    #[test]
-    fn an_install_command_this_machine_never_launched_is_not_already_applied() {
-        assert!(!install_command_already_applied(
-            &install_command(Some("1.5.4"), Some(2026102402)),
-            "1.5.4",
-            2026102402,
-            false,
-        ));
-    }
-
-    // 本机发起过、且运行的已经是目标版本，才判为已完成。
-    #[test]
-    fn an_install_command_this_machine_launched_is_already_applied() {
-        assert!(install_command_already_applied(
-            &install_command(Some("1.5.4"), Some(2026102402)),
-            "1.5.4",
-            2026102402,
-            true,
-        ));
-    }
-
-    // 本机发起过但运行版本没跟上，说明安装没生效，必须继续走检查路径。
-    #[test]
-    fn an_install_command_this_machine_launched_but_not_effective_is_not_applied() {
-        assert!(!install_command_already_applied(
-            &install_command(Some("1.5.4"), Some(2026102404)),
-            "1.5.4",
-            2026102402,
-            true,
-        ));
-    }
-
-    // 检查更新命令即使目标版本相符、即使本机有同名记录，也不能被短路。
-    #[test]
-    fn a_check_command_is_never_already_applied() {
-        let mut command = install_command(Some("1.5.4"), Some(2026102402));
-        command.action = UpdateCommandAction::Check;
-        assert!(!install_command_already_applied(
-            &command, "1.5.4", 2026102402, true,
         ));
     }
 
@@ -3543,6 +3463,44 @@ mod tests {
         drop(second);
         assert!(!first_dir.exists());
         assert!(!second_dir.exists());
+    }
+
+    // D30 的循环每轮都新建一个暂存目录却在拉起安装器时崩掉，清理永远执行不到：
+    // win10-gs 实测 C:\Windows\TEMP 下堆积 437 个，每个约 29MB。
+    #[test]
+    fn stale_update_staging_dirs_are_removed_and_others_are_kept() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-staging-sweep-{}",
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let stale = root.join(".rustdesk-update-aaaa");
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        std::fs::write(stale.join("rustdesk.exe"), b"x").expect("payload");
+        let unrelated = root.join("keep-me");
+        std::fs::create_dir_all(&unrelated).expect("unrelated dir");
+        let plain_file = root.join(".rustdesk-update-file");
+        std::fs::write(&plain_file, b"x").expect("plain file");
+
+        assert_eq!(
+            remove_stale_update_staging_dirs(&root, Duration::from_secs(24 * 60 * 60)),
+            0,
+            "fresh directories must survive"
+        );
+        assert!(stale.is_dir());
+
+        assert_eq!(remove_stale_update_staging_dirs(&root, Duration::ZERO), 1);
+        assert!(!stale.exists());
+        assert!(
+            unrelated.is_dir(),
+            "only update staging dirs may be removed"
+        );
+        assert!(
+            plain_file.is_file(),
+            "a plain file with the prefix is not a staging dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

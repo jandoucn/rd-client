@@ -61,30 +61,6 @@ pub enum InstallConfirmation {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutoInstallGate {
-    /// 可以再拉起一次安装器，并记一次尝试。
-    Attempt,
-    /// 已经用尽尝试次数，等冷却期或显式重试。
-    Suppressed,
-}
-
-/// 自动安装的闸门。用户手动点「立即安装」和后台命令都不受限：它们本身就是一次
-/// 明确的请求，只受 `mode` 约束。
-pub fn auto_install_gate(
-    automatic: bool,
-    state: &AutoInstallState,
-    version: &str,
-    build_seq: u64,
-    now: i64,
-) -> AutoInstallGate {
-    if !automatic || state.allows_attempt(version, build_seq, now) {
-        AutoInstallGate::Attempt
-    } else {
-        AutoInstallGate::Suppressed
-    }
-}
-
 impl AutoInstallState {
     /// 目标版本换了就不再沿用旧计数；同一目标达到上限后只等冷却期过去。
     pub fn allows_attempt(&self, version: &str, build_seq: u64, now: i64) -> bool {
@@ -200,20 +176,7 @@ pub fn clear_pending(transaction_id: &str) {
 
 static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-/// 这条命令是不是本机发起、并且已经被安装器接管的那个。
-///
-/// 安装命令在安装过程中会终止本进程，所以重启后重新执行同一条命令时，「运行的
-/// 已经是目标版本」既可能是安装成功（本机有它留下的 pending 记录），也可能是后台
-/// 下发了一条与本机签名清单不符的命令（本机什么都没做过）。只有前者可以判成完成，
-/// 否则会跳过目标和签名校验，把一条错命令记成安装成功。
-pub fn pending_install_owns_command(command_id: &str) -> bool {
-    let Some(pending) = load().pending else {
-        return false;
-    };
-    pending.event.command_id.as_deref() == Some(command_id)
-}
-
-/// 记下即将交给安装器的这次安装，作为重启后判断「是本机装的」的依据。
+/// 记下已交给安装器的这次安装，重启后据此确认安装是否生效。
 pub fn store_pending_install_command(event: &PendingUpdateEvent, now: i64) {
     store_pending(event, INSTALL_CONFIRM_TIMEOUT, now);
 }
