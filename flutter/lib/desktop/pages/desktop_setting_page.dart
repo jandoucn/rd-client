@@ -72,6 +72,13 @@ ManualUpdateResultKind manualUpdateResultKind({
   return ManualUpdateResultKind.upToDate;
 }
 
+// 设置 - 安全里的「密码」整卡与「ID / 更改 ID」在 Windows 和 macOS 上只隐藏界面。
+// 密码方式（默认同时使用两种密码）、一次性密码长度、数字一次性密码、固定密码等
+// 仍由配置、远程策略和命令行生效；SOS 版本来就整页隐藏设置，不受影响。
+bool hidesSecurityPasswordAndIdCards(
+        {required bool windows, required bool macos}) =>
+    windows || macos;
+
 class DesktopSettingPage extends StatefulWidget {
   final SettingsTabKey initialTabkey;
   static final List<SettingsTabKey> tabKeys = [
@@ -985,6 +992,8 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final hideSecurityCards =
+        hidesSecurityPasswordAndIdCards(windows: isWindows, macos: isMacOS);
     return SingleChildScrollView(
         controller: scrollController,
         child: Column(
@@ -997,9 +1006,9 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               block: locked,
               child: Column(children: [
                 permissions(context),
-                password(context),
+                if (!hideSecurityCards) password(context),
                 _Card(title: '2FA', children: [tfa()]),
-                if (!isChangeIdDisabled())
+                if (!isChangeIdDisabled() && !hideSecurityCards)
                   _Card(title: 'ID', children: [changeId()]),
                 more(context),
               ]),
