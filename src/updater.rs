@@ -1951,6 +1951,13 @@ fn check_update_request_with_action(
     })
 }
 
+/// 更新事件里带上的安装包身份，格式与检查更新一致（如 `windows-x86_64-msi-standard`），
+/// 让后台更新记录能区分 EXE / MSI 和 standard / SOS。取不到时不带，后台会按设备
+/// 最近上报的身份补全。
+fn update_event_target_key() -> Option<String> {
+    current_update_target_key().ok()
+}
+
 pub fn current_update_target_key() -> ResultType<String> {
     current_update_target().map(|(target_key, _)| target_key)
 }
@@ -2433,6 +2440,7 @@ fn report_update_command_event(command: &UpdateCommand, status: &str, error_code
         "to_build_seq": command.target_build_seq,
         "error_code": error_code,
         "source": "none",
+        "target_key": update_event_target_key(),
     });
     let Ok(body) = serde_json::to_vec(&payload) else {
         log::warn!("Failed to serialize update command event");
@@ -2538,6 +2546,7 @@ fn report_update_event_with_origin_and_error(
         "to_build_seq": build_seq,
         "error_code": error_code,
         "source": source,
+        "target_key": update_event_target_key(),
     });
     let Ok(body) = serde_json::to_vec(&payload) else {
         log::warn!("Failed to serialize update event");
@@ -3275,8 +3284,9 @@ mod tests {
     use super::UpdateCommand;
     use super::{
         get_download_file_from_url, install_command_satisfied, release_notice_should_check,
-        remove_stale_update_staging_dirs, scheduled_update_delay, update_filename_from_url,
-        verify_detached_signature, UpdateCommandAction, UpdateDownloadStaging,
+        remove_stale_update_staging_dirs, scheduled_update_delay, update_event_target_key,
+        update_filename_from_url, verify_detached_signature, UpdateCommandAction,
+        UpdateDownloadStaging,
     };
     use std::time::Duration;
 
@@ -3501,6 +3511,22 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // 更新记录要能看出装的是哪个安装包。事件里的 edition 是编译常量，分不出
+    // standard / SOS，所以单独带上与检查更新同格式的 target_key。
+    #[test]
+    fn update_events_carry_the_installed_package_target_key() {
+        let key = update_event_target_key().expect("target key on a supported platform");
+        let parts: Vec<&str> = key.splitn(4, '-').collect();
+        assert_eq!(parts.len(), 4, "{key}");
+        assert_eq!(parts[0], std::env::consts::OS, "{key}");
+        assert_eq!(parts[1], std::env::consts::ARCH, "{key}");
+        assert!(
+            ["exe", "msi", "dmg", "appimage", "apk"].contains(&parts[2]),
+            "{key}"
+        );
+        assert!(!parts[3].is_empty(), "{key}");
     }
 
     #[test]
