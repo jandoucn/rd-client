@@ -671,6 +671,7 @@ fn known_client_manifests(layout: &Layout) -> Result<Vec<super::DirectoryBackup>
     Ok(known)
 }
 
+#[cfg_attr(not(test), allow(unused_variables))]
 fn fallback_dir(layout: &Layout, key: &str) -> PathBuf {
     let edition = if key.ends_with("-sos") {
         "sos"
