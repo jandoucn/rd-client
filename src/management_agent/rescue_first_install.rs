@@ -1,4 +1,5 @@
 use super::{msi_metadata, package_gate, read, workspace, write_new, Artifact, Bundle, Layout};
+use hbb_common::log::warn;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -559,22 +560,104 @@ fn fallback_compatible(
     key: &str,
     client: &super::DirectoryBackup,
 ) -> Result<(), String> {
-    let fallback = Path::new(r"C:\ProgramData\RustDesk\Client")
-        .join(if key.ends_with("-sos") {
-            "sos"
-        } else {
-            "standard"
-        })
-        .join("RustDesk");
-    #[cfg(test)]
-    let fallback = if layout.agent != Path::new(AGENT) {
-        layout.agent.join("fallback")
-    } else {
-        fallback
-    };
-    let _ = layout;
-    super::r3_existing_fallback(client, &fallback).map(|_| ())
+    let known = known_client_manifests(layout);
+    fallback_compatible_for(&known, &fallback_dir(layout, key), client)
 }
+/// 升级轮换时，现有保底目录是旧救援包发布的副本，用新包清单去比对必然不同。
+/// 旧救援包自己记录了当时的清单，只有它才说明这个目录是不是我们自己放的；对不上才保留。
+fn fallback_superseded(known: &[super::DirectoryBackup], fallback: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(fallback) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("R3 fallback unreadable".into()),
+        Ok(_) => {}
+    }
+    Ok(known
+        .iter()
+        .any(|bundle| bundle.matches_directory(fallback).unwrap_or(false)))
+}
+
+fn fallback_compatible_for(
+    known: &[super::DirectoryBackup],
+    fallback: &Path,
+    client: &super::DirectoryBackup,
+) -> Result<(), String> {
+    if fallback_superseded(known, fallback)? {
+        return Ok(());
+    }
+    super::r3_existing_fallback(client, fallback).map(|_| ())
+}
+
+/// 旧救援包留下的保底目录随轮换一起换成新版。先复制到旁边并逐文件核对，
+/// 再两次目录改名完成替换；改名失败时把原目录改回来，不留半换状态。
+fn refresh_fallback(
+    fallback: &Path,
+    source: &Path,
+    expected: &super::DirectoryBackup,
+) -> Result<(), String> {
+    let parent = fallback
+        .parent()
+        .ok_or("first installation fallback parent absent")?;
+    workspace::verify(parent)?;
+    let working = parent.join("RustDesk.new");
+    let retired = parent.join("RustDesk.old");
+    for path in [&working, &retired] {
+        if !absent(path)? {
+            reclaim_staging(path)?;
+        }
+    }
+    let copied = super::directory_backup::capture(source, &working)?;
+    if copied != *expected {
+        return Err("first installation fallback client changed during rotation".into());
+    }
+    let staged = working.join("files");
+    if absent(&staged)? {
+        return Err("first installation fallback staging missing".into());
+    }
+    std::fs::rename(fallback, &retired)
+        .map_err(|e| format!("first installation fallback not retired: {e}"))?;
+    if let Err(error) = std::fs::rename(&staged, fallback) {
+        let _ = std::fs::rename(&retired, fallback);
+        return Err(format!("first installation fallback not replaced: {error}"));
+    }
+    if !copied.matches_directory(fallback)? {
+        let _ = std::fs::remove_dir_all(fallback);
+        let _ = std::fs::rename(&retired, fallback);
+        return Err("first installation fallback replaced inventory mismatch".into());
+    }
+    let _ = std::fs::remove_dir_all(&retired);
+    let _ = std::fs::remove_dir_all(&working);
+    Ok(())
+}
+
+/// 保底目录可能由 `current` 或已轮换到 `previous` 的救援包发布；两处的清单都要拿来比对。
+fn known_client_manifests(layout: &Layout) -> Vec<super::DirectoryBackup> {
+    ["current", "previous"]
+        .into_iter()
+        .filter_map(|name| {
+            let bytes = read(
+                &layout.destination.join(name).join("client/manifest.json"),
+                8 * 1024 * 1024,
+                false,
+            )
+            .ok()?;
+            super::DirectoryBackup::decode(&bytes).ok()
+        })
+        .collect()
+}
+
+fn fallback_dir(layout: &Layout, key: &str) -> PathBuf {
+    let edition = if key.ends_with("-sos") {
+        "sos"
+    } else {
+        "standard"
+    };
+    #[cfg(test)]
+    if layout.agent != Path::new(AGENT) {
+        return layout.agent.join("fallback");
+    }
+    super::fallback_path(edition)
+}
+
 fn fallback_blocked(error: String) -> serde_json::Value {
     serde_json::json!({"state":"degraded","rescue_readiness":"degraded","ready":false,"published":false,"blocked_reason":"existing_fallback_incompatible","error_code":"existing_fallback_incompatible","error":error,"legacy_route_preserved":true})
 }
@@ -1161,6 +1244,9 @@ fn prepare(
     if !rotating && !absent(&layout.destination.join("previous"))? {
         return Err("first installation previous appeared; staging preserved".into());
     }
+    let fallback = fallback_dir(layout, key);
+    let known = known_client_manifests(layout);
+    let refresh = rotating && fallback_superseded(&known, &fallback)?;
     if let Err(error) = fallback_compatible(layout, key, &client) {
         return Ok(fallback_blocked(error));
     }
@@ -1175,8 +1261,21 @@ fn prepare(
     } else {
         super::publish(&stage, &current)?;
     }
+    // 保底目录换来换去会让旧包清单永远对不上，轮换成功后顺带把它换成同一版。
+    let mut refreshed = false;
+    if refresh {
+        if let Err(error) = refresh_fallback(&fallback, &layout.client, &client) {
+            hbb_common::throttled_log!(
+                Duration::from_secs(300),
+                warn,
+                "first installation fallback not refreshed: {error}"
+            );
+        } else {
+            refreshed = true;
+        }
+    }
     Ok(
-        serde_json::json!({"rescue_readiness":"degraded","source_kind":"installed_msi","source_transaction":null,"source_reference":bundle.source_reference,"client":"verified","offline_package":"verified","credentials":"verified","agent_backup":"verified","bootstrap_backup":"verified"}),
+        serde_json::json!({"rescue_readiness":"degraded","source_kind":"installed_msi","source_transaction":null,"source_reference":bundle.source_reference,"fallback_refreshed":refreshed,"client":"verified","offline_package":"verified","credentials":"verified","agent_backup":"verified","bootstrap_backup":"verified"}),
     )
 }
 
@@ -1522,6 +1621,131 @@ mod rotation_tests {
             existing_bundle_action(1, 5, "r", true, 5, "r"),
             ExistingBundle::Preserve
         );
+    }
+
+    // 2603 实测：升级后轮换用新包清单校验上一版留下的保底目录，必然不一致，
+    // 救援包停在旧构建、R3 也无法恢复。上一版救援包记录的清单才对得上，应视为自家旧副本。
+    #[test]
+    fn a_fallback_from_the_previous_bundle_is_superseded_not_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-superseded-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        let fallback = root.join("fallback");
+        workspace::create(&fallback).unwrap();
+        std::fs::write(fallback.join("RustDesk.exe"), b"previous build").unwrap();
+        let previous =
+            super::super::directory_backup::capture(&fallback, &root.join("previous-manifest"))
+                .unwrap();
+
+        assert_eq!(
+            super::fallback_superseded(&[previous.clone()], &fallback),
+            Ok(true)
+        );
+        assert!(super::fallback_compatible_for(&[previous.clone()], &fallback, &previous).is_ok());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 保底目录不是上一版救援包放的（用户自备、被改过、或根本没有上一版），必须保留不覆盖。
+    #[test]
+    fn an_unknown_fallback_is_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-unknown-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        let fallback = root.join("fallback");
+        workspace::create(&fallback).unwrap();
+        std::fs::write(fallback.join("RustDesk.exe"), b"previous build").unwrap();
+        let previous =
+            super::super::directory_backup::capture(&fallback, &root.join("previous-manifest"))
+                .unwrap();
+
+        std::fs::write(fallback.join("RustDesk.exe"), b"user replaced").unwrap();
+        assert_eq!(
+            super::fallback_superseded(&[previous.clone()], &fallback),
+            Ok(false)
+        );
+        std::fs::remove_file(fallback.join("RustDesk.exe")).unwrap();
+        std::fs::write(fallback.join("extra.dll"), b"user file").unwrap();
+        assert_eq!(
+            super::fallback_superseded(&[previous.clone()], &fallback),
+            Ok(false)
+        );
+        assert_eq!(super::fallback_superseded(&[], &fallback), Ok(false));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 保底目录不存在时不需要任何判定，直接放行（首发安装就是这种情况）。
+    #[test]
+    fn an_absent_fallback_needs_no_decision() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-absent-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        assert_eq!(
+            super::fallback_superseded(&[], &root.join("missing")),
+            Ok(false)
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 保底目录换成新版：内容逐文件核对一致，旧的换下来的目录不留在磁盘上。
+    #[test]
+    fn a_superseded_fallback_is_replaced_in_place() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-refresh-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        let fallback = root.join("fallback");
+        let source = root.join("client");
+        for (dir, body) in [(&fallback, &b"old build"[..]), (&source, &b"new build"[..])] {
+            workspace::create(dir).unwrap();
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            std::fs::write(dir.join("RustDesk.exe"), body).unwrap();
+            std::fs::write(dir.join("data/plugin.dll"), body).unwrap();
+        }
+        let expected = super::super::directory_backup::capture(&source, &root.join("expected"))
+            .unwrap();
+
+        super::refresh_fallback(&fallback, &source, &expected).unwrap();
+
+        assert!(expected.matches_directory(&fallback).unwrap());
+        assert!(!root.join("RustDesk.new").exists());
+        assert!(!root.join("RustDesk.old").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 新客户端与救援包记录不一致时不动现有保底目录：报告错误，原目录与内容保持不变。
+    #[test]
+    fn a_changed_client_keeps_the_existing_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-kept-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        let fallback = root.join("fallback");
+        let source = root.join("client");
+        for (dir, body) in [(&fallback, &b"old build"[..]), (&source, &b"new build"[..])] {
+            workspace::create(dir).unwrap();
+            std::fs::write(dir.join("RustDesk.exe"), body).unwrap();
+        }
+        let expected = super::super::directory_backup::capture(&source, &root.join("expected"))
+            .unwrap();
+        std::fs::write(source.join("RustDesk.exe"), b"changed after approval").unwrap();
+
+        assert!(super::refresh_fallback(&fallback, &source, &expected).is_err());
+
+        assert_eq!(
+            std::fs::read(fallback.join("RustDesk.exe")).unwrap(),
+            b"old build"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     struct Fixture {

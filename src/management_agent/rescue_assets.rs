@@ -1703,13 +1703,14 @@ pub(super) fn r3_verified(
     } else {
         "standard"
     };
-    Ok((
-        inventory,
-        bundle.build_seq,
-        Path::new(r"C:\ProgramData\RustDesk\Client")
-            .join(edition)
-            .join("RustDesk"),
-    ))
+    Ok((inventory, bundle.build_seq, fallback_path(edition)))
+}
+
+/// 保底客户端目录：标准版与 SOS 各自一份，位置由 edition 决定。
+pub(super) fn fallback_path(edition: &str) -> PathBuf {
+    Path::new(r"C:\ProgramData\RustDesk\Client")
+        .join(edition)
+        .join("RustDesk")
 }
 
 pub(super) fn r3_cycle_allowed() -> Result<bool, String> {
