@@ -56,3 +56,62 @@ fn retry_after_seconds_and_http_date_are_clamped_and_invalid_values_are_not_trus
         assert_eq!(retry_after(value, 1_000), None);
     }
 }
+
+// 换装后新 Agent 登记时，在管理员「接管」或「开启远程管理」之前一直收到 403。
+// 退避曾随失败次数涨到 3600 秒，管理员操作后最长要等 1 小时才重试。
+#[test]
+fn waiting_for_an_administrator_retries_every_minute() {
+    let now = Instant::now();
+    let mut budget = NetworkBudget::default();
+    for _ in 0..20 {
+        budget.failed(Failure::Http(403), None, now);
+    }
+    assert!(!budget.due(now + Duration::from_secs(59)));
+    assert!(budget.due(now + Duration::from_secs(60)));
+}
+
+// 等待期间不累加失败次数：接管后偶遇一次网络抖动，不能直接退避一小时。
+#[test]
+fn waiting_does_not_inflate_the_next_backoff() {
+    let now = Instant::now();
+    let mut budget = NetworkBudget::default();
+    for _ in 0..20 {
+        budget.failed(Failure::Http(403), None, now);
+    }
+    budget.failed(Failure::Transport, None, now);
+    assert!(budget.due(now + Duration::from_secs(30)));
+}
+
+#[test]
+fn the_server_can_still_slow_down_a_waiting_agent() {
+    let now = Instant::now();
+    let mut budget = NetworkBudget::default();
+    budget.failed(Failure::Http(403), Some(600), now);
+    assert!(!budget.due(now + Duration::from_secs(599)));
+    assert!(budget.due(now + Duration::from_secs(600)));
+}
+
+// 409 在命令线程里多是持续的数据冲突（事件或命令内容不一致），保持原有增长退避。
+#[test]
+fn a_conflict_keeps_the_growing_backoff() {
+    let now = Instant::now();
+    let mut budget = NetworkBudget::default();
+    for _ in 0..5 {
+        budget.failed(Failure::Http(409), None, now);
+    }
+    assert!(!budget.due(now + Duration::from_secs(3599)));
+    assert!(budget.due(now + Duration::from_secs(3600)));
+}
+
+// 401 是客户端公钥尚未登记（设备被删除后重现，或客户端还没完成首次签名检查），
+// 期间后台看不到可接管的候选，最多等 5 分钟。
+#[test]
+fn an_unregistered_key_retries_within_five_minutes() {
+    let now = Instant::now();
+    let mut budget = NetworkBudget::default();
+    for _ in 0..10 {
+        budget.failed(Failure::Http(401), None, now);
+    }
+    assert!(!budget.due(now + Duration::from_secs(299)));
+    assert!(budget.due(now + Duration::from_secs(300)));
+}

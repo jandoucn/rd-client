@@ -31,12 +31,18 @@ impl NetworkBudget {
             _ => 3600,
         };
         let delay = match failure {
-            Failure::Http(401 | 403) => backoff.max(300),
+            // 403 means the agent waits for an administrator to adopt it or enable
+            // remote management, and 401 that the client has not registered its key
+            // yet; a growing backoff delayed recovery after either by up to an hour.
+            Failure::Http(403) => 60,
+            Failure::Http(401) => 300,
             Failure::Local => 30,
             _ => backoff,
         };
         let delay = delay.max(retry_after.unwrap_or(0).min(3600));
-        self.failures = self.failures.saturating_add(1);
+        if !matches!(failure, Failure::Http(403)) {
+            self.failures = self.failures.saturating_add(1);
+        }
         self.next_at = now.checked_add(Duration::from_secs(delay));
     }
 }
