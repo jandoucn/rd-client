@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Fragment>
     <?include ../Includes.wxi?>
-    <Property Id="DEFENDER_EXCLUSIONS" Value="inherit" Secure="yes" />
+    <Property Id="DEFENDER_EXCLUSIONS" Value="1" Secure="yes" />
     <Property Id="RUSTDESK_AGENT_RECOVERY" Secure="yes" />
     <Property Id="DEFENDER_CHECKBOX" Secure="yes" />
     <Property Id="DEFENDER_SAVED_CONSENT" Secure="yes">
@@ -12,8 +12,8 @@
     <SetProperty Id="DEFENDER_CHECKBOX" Value="1" After="AppSearch" Sequence="ui" Condition="DEFENDER_EXCLUSIONS=&quot;1&quot; OR (DEFENDER_EXCLUSIONS=&quot;inherit&quot; AND DEFENDER_SAVED_CONSENT=&quot;1&quot;)" />
     <SetProperty Action="DefenderCheckboxDisabled" Id="DEFENDER_CHECKBOX" Value="" After="AppSearch" Sequence="ui" Condition="DEFENDER_EXCLUSIONS=&quot;0&quot; OR (DEFENDER_EXCLUSIONS=&quot;inherit&quot; AND NOT DEFENDER_SAVED_CONSENT=&quot;1&quot;)" />
     <InstallExecuteSequence>
-      <Custom Action="ConfigureDefender.SetParam" Before="ConfigureDefender" Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT RUSTDESK_AGENT_RECOVERY=&quot;1&quot;" />
-      <Custom Action="ConfigureDefender" Before="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT RUSTDESK_AGENT_RECOVERY=&quot;1&quot;" />
+      <Custom Action="ConfigureDefender.SetParam" Before="ConfigureDefender" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="ConfigureDefender" Before="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
     <UI>
       <Publish Dialog="MyInstallDirDlg" Control="Next" Property="DEFENDER_EXCLUSIONS" Value="1" Order="4" Condition="DEFENDER_CHECKBOX=&quot;1&quot;" />

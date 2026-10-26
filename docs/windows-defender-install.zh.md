@@ -30,9 +30,9 @@ msiexec /i 客户端.msi /qn /norestart DEFENDER_EXCLUSIONS=0
 msiexec /i 客户端.msi /qn /norestart
 ```
 
-MSI 缺省 `inherit`，保存选择优先于没有明确参数的升级请求。交互安装时用户在目录页面的选择成为本次明确选择。非法值不执行配置并记录错误；不把配置错误当作主产品安装失败。
+MSI 缺省 `1`（20261026.2 起）：交互安装时目录页的 Defender 勾选框默认勾选，用户取消即为本次明确选择 `0`；没有明确参数的静默安装与升级（更新器的后台升级、Agent 发起的新装与修复）默认配置 Defender，并把 Consent 写为 `1`。显式传 `DEFENDER_EXCLUSIONS=0` 仍可不配置；`inherit` 仍可显式传入以沿用保存的选择。非法值不执行配置并记录错误；不把配置错误当作主产品安装失败。
 
-同机 standard/SOS 当前共用 agent 和同一 Defender 选择，不能并行安装。旧版本没有 Consent 时，新静默升级不会替用户同意。恢复安装使用专用标记跳过配置，普通升级仍遵循 Consent。
+同机 standard/SOS 当前共用 agent 和同一 Defender 选择，不能并行安装。此前保存过 `Consent=0`（多为旧版勾选框默认不勾所致）的机器，在没有明确参数的静默升级中会被重新配置，这是 20261026.2 起的预期行为。
 
 ## 精确范围与顺序
 
@@ -43,7 +43,7 @@ MSI 缺省 `inherit`，保存选择优先于没有明确参数的升级请求。
 | EXE 首装 | 现有提权 runner 中，正常卸载处理后、最终目录复制前 | 最终主/agent EXE；下载/解包的安装器此前已启动，无法追溯保护 |
 | EXE 正常升级 | 新目标包 `--update` 提权 runner，服务停止/文件替换前 | 最终主/agent EXE，已下载包及解包目录不在范围 |
 | MSI 首装/升级/修复 | deferred、Impersonate=no、InstallFiles 前 | 已计算目标路径；MSI 本身及已解压的 CA DLL 不在范围 |
-| agent 保底安装 | `RUSTDESK_AGENT_RECOVERY=1` 跳过 MSI 排除配置；EXE 保底提取不走普通安装器 | 本版不自动添加保底客户端路径，也不改变保存的普通安装选择 |
+| agent 发起的 MSI 安装（含保底安装） | 带 `RUSTDESK_AGENT_RECOVERY=1`，20261026.2 起同样在 InstallFiles 前配置；EXE 保底提取不走普通安装器 | 保底安装时最终目录为 agent 的 `Client` 目录；配置最多约 65 秒，期间服务已停、文件尚未替换 |
 
 执行逻辑为 `res/defender-exclusions.ps1`，Rust EXE 安装器和 MSI CA 编译嵌入同一份内容，不从网络获取脚本。EXE 在受保护 BAT 旁分段解码临时文件，避免 CMD 单行长度限制；MSI 通过原生 CreateProcess 启动 Windows PowerShell，不经 CMD 解析用户路径。
 
