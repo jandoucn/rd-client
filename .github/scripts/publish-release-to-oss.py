@@ -635,8 +635,7 @@ def main():
             args.stable_manifest_url,
         )
 
-        retained = cleanup_complete_releases(bucket, list_keys, args.prefix, 5)
-        print(json.dumps({"tag": args.tag, "uploaded": len(uploaded), "retained": retained}))
+        print(json.dumps({"tag": args.tag, "uploaded": len(uploaded)}))
     except Exception as exc:
         cleanup_allowed = prefix_preexisted_complete is False and failed_release_cleanup_allowed(
             UrlHttpClient(),

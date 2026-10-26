@@ -232,6 +232,12 @@ class PublishReleaseToOssTest(unittest.TestCase):
             ],
         )
 
+    def test_successful_publish_keeps_every_earlier_release(self):
+        # Devices still on an old build need its package as the agent rollback source.
+        source = inspect.getsource(self.publisher.main)
+
+        self.assertNotIn("cleanup_complete_releases(", source)
+
     def test_publish_failure_checks_active_manifest_before_cleanup(self):
         source = inspect.getsource(self.publisher.main)
 
