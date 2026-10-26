@@ -324,6 +324,11 @@ pub fn snapshot(agent: &Path, installation: &str, key: &str) -> serde_json::Valu
         time,
         Some("yan-release-2026"),
     );
+    mark_build_mismatch(
+        &mut result,
+        bundle_build(&agent.join("rescue/current")),
+        agent_build(),
+    );
     if result["error_code"] == "bundle_missing" {
         if let Ok(bytes) = read(&agent.join("first-install-status/last-check.json"), 32768) {
             if let Ok(report) = serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -340,6 +345,27 @@ pub fn snapshot(agent: &Path, installation: &str, key: &str) -> serde_json::Valu
         }
     }
     result
+}
+
+fn agent_build() -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(include_str!("../../version.json")).ok()?["build_seq"]
+        .as_u64()
+}
+fn bundle_build(bundle: &Path) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(&read(&bundle.join("bundle.json"), 65536).ok()?)
+        .ok()?["build_seq"]
+        .as_u64()
+}
+/// A client updater upgrade replaces the installed MSI but not the rescue bundle, which
+/// still verifies on its own; restoring it would bring back the old build (and its old
+/// MSI product code), so it must not be reported as usable.
+fn mark_build_mismatch(result: &mut serde_json::Value, bundle: Option<u64>, agent: Option<u64>) {
+    if let (Some(bundle), Some(agent)) = (bundle, agent) {
+        if bundle != agent && result["error_code"].is_null() {
+            result["state"] = "unavailable".into();
+            result["error_code"] = "bundle_build_mismatch".into();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +502,56 @@ mod projection_tests {
         assert!(local_repair_component(None).is_none());
         let projected = projection("unavailable", "unverified", Some("bundle_missing"), None);
         assert!(projected["components"].get("local_repair").is_none());
+    }
+}
+
+#[cfg(test)]
+mod build_mismatch_tests {
+    use super::*;
+
+    fn clean() -> serde_json::Value {
+        serde_json::json!({"state":"degraded","freshness":"fresh","error_code":null})
+    }
+
+    // 客户端更新器升级 MSI 后救援包仍是旧构建，状态却报 fresh 且无错误，
+    // 后台显示「可自行恢复」，实际 R3 只能恢复出旧版、R4 直接拒绝。
+    #[test]
+    fn an_older_bundle_is_reported_as_a_build_mismatch() {
+        let mut result = clean();
+        mark_build_mismatch(&mut result, Some(2026102503), Some(2026102601));
+        assert_eq!(result["state"], "unavailable");
+        assert_eq!(result["error_code"], "bundle_build_mismatch");
+    }
+
+    #[test]
+    fn a_matching_bundle_is_left_alone() {
+        let mut result = clean();
+        mark_build_mismatch(&mut result, Some(2026102601), Some(2026102601));
+        assert_eq!(result, clean());
+    }
+
+    // 原结论已有错误时保留原错误，不被覆盖。
+    #[test]
+    fn an_existing_error_is_not_overwritten() {
+        let mut result = serde_json::json!({"state":"unavailable","error_code":"bundle_missing"});
+        mark_build_mismatch(&mut result, Some(1), Some(2));
+        assert_eq!(result["error_code"], "bundle_missing");
+    }
+
+    // 读不到构建号时不臆断。
+    #[test]
+    fn an_unknown_build_is_not_reported() {
+        for (bundle, agent) in [(None, Some(2)), (Some(1), None), (None, None)] {
+            let mut result = clean();
+            mark_build_mismatch(&mut result, bundle, agent);
+            assert_eq!(result, clean());
+        }
+    }
+
+    #[test]
+    fn the_agent_build_comes_from_version_json() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../version.json")).unwrap();
+        assert_eq!(agent_build(), expected["build_seq"].as_u64());
     }
 }

@@ -576,7 +576,7 @@ CASE-ID 中的四包升级应分别展开为 `AG-UPGRADE-STD-EXE-001`、`AG-UPGR
 2. R1：停止主服务，等待自动启动/重启。
 3. R2：在 win10-gs 上删除服务或改为确定不存在的测试 binpath，等待修复；不指向真实第三方程序。成功判据是 SCM `Running`。
 4. R3：破坏正常安装但保留可信完整保底客户端，验证降级启动。只识别主安装目录或 `RustDesk.exe` 缺失；目录与文件都在、内容被替换时不会切换。仅 MSI 包具备该路径。
-5. R4：断网并破坏主/保底客户端，使用本地签名离线包恢复。仅 MSI 包具备该路径。
+5. R4：断网并破坏主/保底客户端，用救援包内的 MSI 本地修复。仅 MSI 包具备该路径。前提是 Windows Installer 已登记的 MSI 源（ProductCode 与包名）和本机 Agent 哈希都与救援包一致：客户端更新器升级 MSI 后旧救援包的 ProductCode 已不在机器上，修复会报 `installed MSI source query failed: 1605`；20261026.2 起首装线程会在 Agent 构建号高于救援包时自动轮换救援包，轮换完成前救援状态报 `bundle_build_mismatch`。
 6. R5：恢复网络但让 API 失败、下载主路径失败、镜像路径成功。已知限制：自动路径只取 `target.primary`，不读镜像；有 `rescue\current` bundle 时自动 R5 整体不运行。按现码该用例预期 `FAIL`。
 7. R6：使主/保底/包资产不可用，但保留 agent、bootstrap、身份及证据，验证退避与错误可见性。已实现的是有界退避（30/120/300 秒后固定 3600 秒）与 `service_recovery_error`，没有熔断态、冷却期和告警事件。连 agent 全删属于不能自恢复的边界，不能要求仍上报。
 

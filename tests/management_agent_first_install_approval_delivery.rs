@@ -390,17 +390,16 @@ fn t01_producer_stopped_missing_state_and_rescue_preserve_inputs() {
         b"existing rescue",
     )
     .unwrap();
+    // 已有救援包时也要能为当前构建签发审批：客户端更新器升级 MSI 后，旧救援包
+    // 只能靠首装流程按新审批轮换。投递只写审批文件，现有救援包原样保留。
     let before = f.preserved();
-    assert_eq!(
-        deliver_at(f.request(), f.layout()),
-        Err(DeliveryError::Busy)
-    );
+    assert_eq!(deliver_at(f.request(), f.layout()), Ok(()));
     assert!(f.preserved() == before, "identity/state/config preserved");
     assert_eq!(
         std::fs::read(f.root.join("rescue/current/bundle.json")).unwrap(),
         b"existing rescue"
     );
-    assert!(!f.root.join("release-cache/first-install.json").exists());
+    assert!(f.root.join("release-cache/first-install.json").exists());
 }
 
 fn acl_stage(stage: &str) {

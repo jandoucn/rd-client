@@ -534,10 +534,11 @@ fn gates(
         Some(v) if matches!(v.as_str(), Some("" | "N")) => {}
         _ => return Err(DeliveryError::LocallyBlocked),
     }
-    // Delivery does not interpret or mutate another installation transaction.
+    // Delivery does not interpret or mutate another installation transaction. An
+    // existing rescue/current is allowed: after a client updater upgrade it is rotated
+    // by first install, which needs an approval for the new build.
     for path in [
         agent.join("transactions"),
-        agent.join("rescue/current"),
         agent.join("rescue/staging"),
         agent.join("rescue/first-install-staging"),
     ] {
@@ -545,11 +546,7 @@ fn gates(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) if path == agent.join("transactions") => {
                 let _held = hold_directory(&path)?;
-                if std::fs::read_dir(&path)
-                    .map_err(|_| DeliveryError::Busy)?
-                    .next()
-                    .is_some()
-                {
+                if !transactions_finished(&path)? {
                     return Err(DeliveryError::Busy);
                 }
             }
@@ -557,6 +554,57 @@ fn gates(
         }
     }
     Ok(())
+}
+
+/// Finished agent transactions stay on disk; only an unfinished transaction or an
+/// unpublished rescue rotation means another installation is in progress. Matches the
+/// first-install worker's own transaction gate.
+fn transaction_finished(transaction: &[u8], rotation: Option<&[u8]>) -> bool {
+    let phase = |bytes: &[u8]| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|value| value["phase"].as_str().map(str::to_owned))
+    };
+    matches!(
+        phase(transaction).as_deref(),
+        Some("committed" | "rolled_back")
+    ) && rotation.map_or(true, |bytes| phase(bytes).as_deref() == Some("published"))
+}
+
+fn transactions_finished(directory: &Path) -> Result<bool, DeliveryError> {
+    let read = |path: &Path, limit: u64| -> Result<Vec<u8>, DeliveryError> {
+        workspace::verify_file(path).map_err(|_| DeliveryError::Busy)?;
+        let mut bytes = Vec::new();
+        File::open(path)
+            .map_err(|_| DeliveryError::Busy)?
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| DeliveryError::Busy)?;
+        if bytes.len() as u64 > limit {
+            return Err(DeliveryError::Busy);
+        }
+        Ok(bytes)
+    };
+    for (count, entry) in std::fs::read_dir(directory)
+        .map_err(|_| DeliveryError::Busy)?
+        .enumerate()
+    {
+        if count >= 64 {
+            return Ok(false);
+        }
+        let path = entry.map_err(|_| DeliveryError::Busy)?.path();
+        workspace::verify(&path).map_err(|_| DeliveryError::Busy)?;
+        let transaction = read(&path.join("transaction.json"), 65536)?;
+        let rotation = match std::fs::symlink_metadata(path.join("rotation.json")) {
+            Ok(_) => Some(read(&path.join("rotation.json"), 4096)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(DeliveryError::Busy),
+        };
+        if !transaction_finished(&transaction, rotation.as_deref()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn valid_identity(bytes: &[u8]) -> Result<(), DeliveryError> {
@@ -1030,6 +1078,31 @@ mod approval_scope_tests {
         assert_eq!(result, Err(DeliveryError::UntrustedPath));
         assert!(approval_kept(&root));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 跑过 Agent 事务或 R4 修复的设备，transactions 下会留着已结束的事务目录。
+    // 「非空即忙」让这些设备永远拿不到新审批；只有未结束的事务或未发布的轮换才算忙。
+    #[test]
+    fn only_an_unfinished_transaction_blocks_delivery() {
+        assert!(transaction_finished(br#"{"phase":"committed"}"#, None));
+        assert!(transaction_finished(br#"{"phase":"rolled_back"}"#, None));
+        assert!(transaction_finished(
+            br#"{"phase":"committed"}"#,
+            Some(br#"{"phase":"published"}"#)
+        ));
+        assert!(!transaction_finished(
+            br#"{"phase":"committed"}"#,
+            Some(br#"{"phase":"old_moved"}"#)
+        ));
+        for phase in ["planned", "applying", "rolling_back", "rollback_failed"] {
+            let tx = format!(r#"{{"phase":"{phase}"}}"#);
+            assert!(!transaction_finished(tx.as_bytes(), None), "{phase}");
+        }
+        assert!(!transaction_finished(b"not json", None));
+        assert!(!transaction_finished(
+            br#"{"phase":"committed"}"#,
+            Some(b"bad")
+        ));
     }
 
     // 读不懂的审批不能当作过期删掉，交给原有流程照旧报 malformed。

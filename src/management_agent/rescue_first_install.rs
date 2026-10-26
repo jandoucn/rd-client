@@ -329,6 +329,220 @@ fn reclaim_orphaned_staging(layout: &Layout) -> Result<bool, String> {
     Ok(true)
 }
 
+const ROTATION: &str = "first-install-rotation";
+
+#[derive(Debug, PartialEq)]
+enum ExistingBundle {
+    Keep,
+    Preserve,
+    Rotate,
+}
+
+/// A client updater upgrade installs a newer MSI without touching `rescue/current`,
+/// which then restores the old build and its old product code. An older bundle of
+/// the same identity is rotated; anything else keeps the previous behaviour.
+fn existing_bundle_action(
+    old_schema: u32,
+    old_build: u64,
+    old_reference: &str,
+    identity_matches: bool,
+    build: u64,
+    reference: &str,
+) -> ExistingBundle {
+    if !identity_matches {
+        ExistingBundle::Preserve
+    } else if old_build < build {
+        ExistingBundle::Rotate
+    } else if old_schema == 2 && old_reference == reference {
+        ExistingBundle::Keep
+    } else {
+        ExistingBundle::Preserve
+    }
+}
+
+fn current_superseded(bundle_build: Option<u64>, agent_build: Option<u64>, key: &str) -> bool {
+    matches!(
+        key,
+        "windows-x86_64-msi-standard" | "windows-x86_64-msi-sos"
+    ) && matches!((bundle_build, agent_build), (Some(bundle), Some(agent)) if bundle < agent)
+}
+
+fn agent_build() -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(include_str!("../../version.json")).ok()?["build_seq"]
+        .as_u64()
+}
+
+fn json_field(path: &Path, identity: bool, field: &str) -> Option<serde_json::Value> {
+    let value =
+        serde_json::from_slice::<serde_json::Value>(&read(path, 65536, identity).ok()?).ok()?;
+    value.get(field).cloned()
+}
+
+fn current_needs_rotation(layout: &Layout) -> bool {
+    let key = json_field(&layout.agent.join("state/agent.json"), true, "target_key");
+    let bundle = json_field(
+        &layout.destination.join("current/bundle.json"),
+        false,
+        "build_seq",
+    );
+    current_superseded(
+        bundle.and_then(|value| value.as_u64()),
+        agent_build(),
+        key.as_ref()
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    )
+}
+
+#[cfg(not(test))]
+fn finish_interrupted_rotation(layout: &Layout) -> Result<bool, String> {
+    let rotation = layout.agent.join(ROTATION);
+    if absent(&rotation)? {
+        return Ok(false);
+    }
+    let state = layout.agent.join("state/agent.json");
+    let installation = json_field(&state, true, "agent_installation_id")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("first installation identity missing")?;
+    let key = json_field(&state, true, "target_key")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("first installation target missing")?;
+    let _guard = acquire_guard_patiently(
+        super::InstallGuard::try_acquire,
+        FIRST_INSTALL_GUARD_WAIT,
+        FIRST_INSTALL_GUARD_RETRY,
+    )?;
+    if locally_gated(&layout.agent)? {
+        return Ok(false);
+    }
+    // The receipt binds the exact bundle.json digests of all three images, and they were
+    // fully checked (identity, downgrade) before it was written, so verify is enough here.
+    finish_pending_rotation(&layout.destination, &rotation, |path| {
+        super::verify(path, &installation, &key, None).map(|_| ())
+    })
+}
+
+/// Publishes a first-install staging over an existing bundle through the shared
+/// receipt-driven rotation: current becomes previous, an older previous is retired
+/// with the rotation directory. The directory is created before anything moves so
+/// an interruption at any point is finished by `finish_pending_rotation`.
+fn rotate_staged(
+    destination: &Path,
+    rotation: &Path,
+    stage: &Path,
+    validate: impl Fn(&Path) -> Result<(), String>,
+    fault: Option<&str>,
+) -> Result<(), String> {
+    use super::rescue_rotation::{digest, rotate};
+    if !absent(rotation)? {
+        return Err("first installation rotation pending".into());
+    }
+    let old = digest(&destination.join("current"))?
+        .ok_or("first installation rotation source missing")?;
+    let previous = digest(&destination.join("previous"))?;
+    let staging = destination.join("staging");
+    if !absent(&staging)? {
+        return Err("first installation occupied assets preserved".into());
+    }
+    workspace::create(rotation)?;
+    std::fs::rename(stage, &staging)
+        .map_err(|e| format!("first installation staging not moved: {e}"))?;
+    let new = digest(&staging)?.ok_or("first installation staged metadata absent")?;
+    rotate(
+        destination,
+        rotation,
+        &old,
+        &new,
+        previous.as_deref(),
+        validate,
+        fault,
+    )?;
+    clean_rotation(rotation)
+}
+
+/// The receipt goes first: a partial delete (for example a file held by an antivirus
+/// scan) then leaves a directory without receipt, which the next cleanup removes,
+/// instead of a receipt whose retired archive no longer verifies.
+fn clean_rotation(rotation: &Path) -> Result<(), String> {
+    match std::fs::remove_file(rotation.join("rotation.json")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "first installation rotation receipt not cleared: {e}"
+            ))
+        }
+        _ => {}
+    }
+    std::fs::remove_dir_all(rotation)
+        .map_err(|e| format!("first installation rotation not cleaned: {e}"))
+}
+
+fn locally_gated(agent: &Path) -> Result<bool, String> {
+    for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
+        if !absent(&agent.join("state").join(name))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Finishes a rotation left by an interruption. Without a receipt nothing has moved
+/// yet, so the staging it had claimed is reclaimed and current stays as it was.
+fn finish_pending_rotation(
+    destination: &Path,
+    rotation: &Path,
+    validate: impl Fn(&Path) -> Result<(), String>,
+) -> Result<bool, String> {
+    use super::rescue_rotation::{binding, rotate};
+    if absent(rotation)? {
+        return Ok(false);
+    }
+    match binding(rotation)? {
+        Some((old, new, previous)) => rotate(
+            destination,
+            rotation,
+            &old,
+            &new,
+            previous.as_deref(),
+            validate,
+            None,
+        )?,
+        None => {
+            let staging = destination.join("staging");
+            if !absent(&staging)? {
+                // An agent transaction rotation also stages into rescue/staging; only
+                // this flow's own installed-MSI bundle is reclaimed.
+                let kind = json_field(&staging.join("bundle.json"), false, "source_kind");
+                if kind.as_ref().and_then(|value| value.as_str()) != Some("installed_msi") {
+                    return Err("first installation rotation staging not owned".into());
+                }
+                reclaim_staging(&staging)?;
+            }
+        }
+    }
+    clean_rotation(rotation)?;
+    Ok(true)
+}
+
+fn rotation_compatible(
+    path: &Path,
+    installation: &str,
+    key: &str,
+    build: u64,
+    identity_sha256: &str,
+    public: Option<&[u8]>,
+) -> Result<(), String> {
+    super::verify(path, installation, key, public)?;
+    let bundle: Bundle = serde_json::from_slice(&read(&path.join("bundle.json"), 65536, false)?)
+        .map_err(|_| "first installation rotation bundle malformed")?;
+    if bundle.build_seq > build {
+        return Err("first installation rotation downgrade refused".into());
+    }
+    if bundle.identity_sha256 != identity_sha256 {
+        return Err("first installation rotation identity mismatch".into());
+    }
+    Ok(())
+}
+
 fn waiting() -> serde_json::Value {
     serde_json::json!({"state":"unavailable","error_code":"waiting_approval","ready":false})
 }
@@ -779,20 +993,31 @@ fn prepare(
     super::valid_identity(&identity)?;
     let config = read(&layout.config, 65536, true)?;
     let current = layout.destination.join("current");
+    let mut rotating = false;
     if !absent(&current)? {
         let value = super::verify(&current, installation, key, public)?;
         let old: Bundle =
             serde_json::from_slice(&read(&current.join("bundle.json"), 65536, false)?)
                 .map_err(|_| "first installation bundle malformed")?;
-        if old.schema != 2
-            || old.source_reference != reference
-            || old.identity_sha256 != hex::encode(Sha256::digest(&identity))
-        {
-            return Err("first installation existing bundle preserved".into());
+        match existing_bundle_action(
+            old.schema,
+            old.build_seq,
+            &old.source_reference,
+            old.identity_sha256 == hex::encode(Sha256::digest(&identity)),
+            build,
+            &reference,
+        ) {
+            ExistingBundle::Keep => return Ok(value),
+            ExistingBundle::Preserve => {
+                return Err("first installation existing bundle preserved".into())
+            }
+            ExistingBundle::Rotate => rotating = true,
         }
-        return Ok(value);
     }
-    if !absent(&layout.destination.join("previous"))?
+    if rotating && !absent(&layout.agent.join(ROTATION))? {
+        return Err("first installation rotation pending".into());
+    }
+    if (!rotating && !absent(&layout.destination.join("previous"))?)
         || !absent(&layout.destination.join("staging"))?
     {
         return Err("first installation occupied assets preserved".into());
@@ -915,7 +1140,7 @@ fn prepare(
         bootstrap_manifest,
         identity: super::describe(&stage, "identity.dpapi", 131072)?,
         config: super::describe(&stage, "config.dpapi", 131072)?,
-        identity_sha256,
+        identity_sha256: identity_sha256.clone(),
         config_sha256: hex::encode(Sha256::digest(&config)),
     };
     write_new(
@@ -933,13 +1158,23 @@ fn prepare(
     {
         return Err("first installation live source changed; staging preserved".into());
     }
-    if !absent(&layout.destination.join("previous"))? {
+    if !rotating && !absent(&layout.destination.join("previous"))? {
         return Err("first installation previous appeared; staging preserved".into());
     }
     if let Err(error) = fallback_compatible(layout, key, &client) {
         return Ok(fallback_blocked(error));
     }
-    super::publish(&stage, &current)?;
+    if rotating {
+        rotate_staged(
+            &layout.destination,
+            &layout.agent.join(ROTATION),
+            &stage,
+            |path| rotation_compatible(path, installation, key, build, &identity_sha256, public),
+            None,
+        )?;
+    } else {
+        super::publish(&stage, &current)?;
+    }
     Ok(
         serde_json::json!({"rescue_readiness":"degraded","source_kind":"installed_msi","source_transaction":null,"source_reference":bundle.source_reference,"client":"verified","offline_package":"verified","credentials":"verified","agent_backup":"verified","bootstrap_backup":"verified"}),
     )
@@ -1021,7 +1256,10 @@ fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope
         let mut last=None;
         for () in receiver{
             if last.is_some_and(|time:Instant|time.elapsed()<Duration::from_secs(300)){continue;}last=Some(Instant::now());
-            let result=(||{let layout=fixed_layout()?;if !absent(&layout.destination.join("current"))?{return Ok(());}
+            let result=(||{let layout=fixed_layout()?;
+                #[cfg(not(test))]
+                if let Err(error)=finish_interrupted_rotation(&layout){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation rotation not finished: {error}");}
+                if !absent(&layout.destination.join("current"))? && !current_needs_rotation(&layout){return Ok(());}
                 #[cfg(not(test))]
                 if let Err(error)=super::super::first_install_approval_delivery::discard_superseded_approval(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation superseded approval check unavailable: {error:?}");}
                 #[cfg(not(test))]
@@ -1212,5 +1450,245 @@ mod guard_wait_tests {
             Err("first installation guard unavailable".to_owned())
         );
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::{
+        current_superseded, existing_bundle_action, finish_pending_rotation, locally_gated,
+        rotate_staged, workspace, ExistingBundle,
+    };
+    use std::path::{Path, PathBuf};
+
+    // 客户端更新器升级 MSI 后救援包一直停在旧构建：首装线程一看到 current 就退出。
+    #[test]
+    fn only_an_older_msi_bundle_is_superseded() {
+        let msi = "windows-x86_64-msi-standard";
+        assert!(current_superseded(Some(2026102503), Some(2026102601), msi));
+        assert!(current_superseded(
+            Some(1),
+            Some(2),
+            "windows-x86_64-msi-sos"
+        ));
+        assert!(!current_superseded(Some(2), Some(2), msi));
+        assert!(!current_superseded(Some(3), Some(2), msi));
+        assert!(!current_superseded(
+            Some(1),
+            Some(2),
+            "windows-x86_64-exe-standard"
+        ));
+        assert!(!current_superseded(None, Some(2), msi));
+        assert!(!current_superseded(Some(1), None, msi));
+    }
+
+    // 构建号相等（或救援包更新、读不到构建号）时，首装线程在投递审批、丢弃旧审批
+    // 之前就退出，行为与引入轮换前完全一致。
+    #[test]
+    fn an_up_to_date_bundle_keeps_the_worker_idle() {
+        for key in ["windows-x86_64-msi-standard", "windows-x86_64-msi-sos"] {
+            assert!(!current_superseded(Some(2026102601), Some(2026102601), key));
+            assert!(!current_superseded(Some(2026102602), Some(2026102601), key));
+            assert!(!current_superseded(None, Some(2026102601), key));
+        }
+    }
+
+    #[test]
+    fn an_existing_bundle_is_kept_rotated_or_preserved() {
+        let keep = existing_bundle_action(2, 5, "r", true, 5, "r");
+        assert_eq!(keep, ExistingBundle::Keep);
+        assert_eq!(
+            existing_bundle_action(2, 4, "old", true, 5, "r"),
+            ExistingBundle::Rotate
+        );
+        assert_eq!(
+            existing_bundle_action(1, 4, "old", true, 5, "r"),
+            ExistingBundle::Rotate
+        );
+        // 身份不一致、降级、同构建不同来源、同构建旧格式：都保留原包，不替换。
+        assert_eq!(
+            existing_bundle_action(2, 4, "old", false, 5, "r"),
+            ExistingBundle::Preserve
+        );
+        assert_eq!(
+            existing_bundle_action(2, 6, "new", true, 5, "r"),
+            ExistingBundle::Preserve
+        );
+        assert_eq!(
+            existing_bundle_action(2, 5, "other", true, 5, "r"),
+            ExistingBundle::Preserve
+        );
+        assert_eq!(
+            existing_bundle_action(1, 5, "r", true, 5, "r"),
+            ExistingBundle::Preserve
+        );
+    }
+
+    struct Fixture {
+        root: PathBuf,
+    }
+    impl Fixture {
+        fn new(previous: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rd-rescue-rotation-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            workspace::create(&root).unwrap();
+            workspace::create(&root.join("rescue")).unwrap();
+            let f = Self { root };
+            f.bundle(&f.dest().join("current"), 1);
+            if previous {
+                f.bundle(&f.dest().join("previous"), 0);
+            }
+            f.bundle(&f.dest().join("first-install-staging"), 2);
+            f
+        }
+        fn dest(&self) -> PathBuf {
+            self.root.join("rescue")
+        }
+        fn rotation(&self) -> PathBuf {
+            self.root.join("first-install-rotation")
+        }
+        fn bundle(&self, path: &Path, build: u64) {
+            workspace::create(path).unwrap();
+            std::fs::write(
+                path.join("bundle.json"),
+                format!(r#"{{"schema":2,"source_kind":"installed_msi","build_seq":{build}}}"#),
+            )
+            .unwrap();
+        }
+        fn build(&self, name: &str) -> Option<u64> {
+            let bytes = std::fs::read(self.dest().join(name).join("bundle.json")).ok()?;
+            serde_json::from_slice::<serde_json::Value>(&bytes).ok()?["build_seq"].as_u64()
+        }
+        fn stage(&self) -> PathBuf {
+            self.dest().join("first-install-staging")
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn a_staged_bundle_replaces_current_and_keeps_it_as_previous() {
+        let f = Fixture::new(false);
+        rotate_staged(&f.dest(), &f.rotation(), &f.stage(), |_| Ok(()), None).unwrap();
+        assert_eq!(f.build("current"), Some(2));
+        assert_eq!(f.build("previous"), Some(1));
+        assert!(!f.stage().exists() && !f.dest().join("staging").exists());
+        assert!(!f.rotation().exists());
+    }
+
+    #[test]
+    fn an_older_previous_is_retired_with_the_rotation() {
+        let f = Fixture::new(true);
+        rotate_staged(&f.dest(), &f.rotation(), &f.stage(), |_| Ok(()), None).unwrap();
+        assert_eq!(f.build("current"), Some(2));
+        assert_eq!(f.build("previous"), Some(1));
+        assert!(!f.rotation().exists());
+    }
+
+    // 校验不通过时不动现有救援包，暂存由收尾回收，不留下阻塞后续轮换的残留。
+    #[test]
+    fn a_refused_bundle_leaves_current_untouched() {
+        let f = Fixture::new(false);
+        let refused = rotate_staged(
+            &f.dest(),
+            &f.rotation(),
+            &f.stage(),
+            |_| Err("refused".into()),
+            None,
+        );
+        assert!(refused.is_err());
+        assert_eq!(f.build("current"), Some(1));
+        assert!(finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).unwrap());
+        assert_eq!(f.build("current"), Some(1));
+        assert!(!f.dest().join("staging").exists() && !f.rotation().exists());
+    }
+
+    // 中途掉电或进程被结束：下次收尾按回执续做到底。
+    #[test]
+    fn an_interrupted_rotation_is_finished_from_its_receipt() {
+        for fault in [
+            "after_previous_move",
+            "after_current_move",
+            "after_publish_move",
+        ] {
+            let f = Fixture::new(true);
+            let result = rotate_staged(
+                &f.dest(),
+                &f.rotation(),
+                &f.stage(),
+                |_| Ok(()),
+                Some(fault),
+            );
+            assert!(result.is_err(), "{fault}");
+            assert!(
+                finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).unwrap(),
+                "{fault}"
+            );
+            assert_eq!(f.build("current"), Some(2), "{fault}");
+            assert_eq!(f.build("previous"), Some(1), "{fault}");
+            assert!(!f.rotation().exists(), "{fault}");
+        }
+    }
+
+    #[test]
+    fn a_pending_rotation_blocks_a_new_one() {
+        let f = Fixture::new(false);
+        workspace::create(&f.rotation()).unwrap();
+        assert!(rotate_staged(&f.dest(), &f.rotation(), &f.stage(), |_| Ok(()), None).is_err());
+        assert_eq!(f.build("current"), Some(1));
+        assert_eq!(f.build("first-install-staging"), Some(2));
+    }
+
+    // 没有回执时 rescue/staging 可能属于 Agent 事务轮换：只回收首装自己的暂存。
+    #[test]
+    fn a_staging_without_receipt_is_reclaimed_only_when_it_is_ours() {
+        let f = Fixture::new(false);
+        workspace::create(&f.rotation()).unwrap();
+        let staging = f.dest().join("staging");
+        workspace::create(&staging).unwrap();
+        std::fs::write(
+            staging.join("bundle.json"),
+            br#"{"schema":1,"build_seq":2}"#,
+        )
+        .unwrap();
+        assert!(finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).is_err());
+        assert!(staging.join("bundle.json").exists());
+        assert_eq!(f.build("current"), Some(1));
+        std::fs::write(
+            staging.join("bundle.json"),
+            br#"{"schema":2,"source_kind":"installed_msi","build_seq":2}"#,
+        )
+        .unwrap();
+        assert!(finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).unwrap());
+        assert!(!staging.exists() && !f.rotation().exists());
+        assert_eq!(f.build("current"), Some(1));
+    }
+
+    // 本地禁用、停用恢复和维护状态下，收尾也不移动或删除任何救援资产。
+    #[test]
+    fn a_local_gate_is_reported_for_rotation_cleanup() {
+        for gate in ["disable-agent", "disable-recovery", "maintenance.json"] {
+            let root = std::env::temp_dir().join(format!(
+                "rd-rotation-gate-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(root.join("state")).unwrap();
+            assert!(!locally_gated(&root).unwrap());
+            std::fs::write(root.join("state").join(gate), b"").unwrap();
+            assert!(locally_gated(&root).unwrap(), "{gate}");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn nothing_is_pending_without_a_rotation_directory() {
+        let f = Fixture::new(false);
+        assert!(!finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).unwrap());
+        assert_eq!(f.build("current"), Some(1));
     }
 }
