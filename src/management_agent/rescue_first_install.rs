@@ -1,5 +1,4 @@
 use super::{msi_metadata, package_gate, read, workspace, write_new, Artifact, Bundle, Layout};
-use hbb_common::log::warn;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -560,7 +559,7 @@ fn fallback_compatible(
     key: &str,
     client: &super::DirectoryBackup,
 ) -> Result<(), String> {
-    let known = known_client_manifests(layout);
+    let known = known_client_manifests(layout)?;
     fallback_compatible_for(&known, &fallback_dir(layout, key), client)
 }
 /// 升级轮换时，现有保底目录是旧救援包发布的副本，用新包清单去比对必然不同。
@@ -600,9 +599,17 @@ fn refresh_fallback(
     workspace::verify(parent)?;
     let working = parent.join("RustDesk.new");
     let retired = parent.join("RustDesk.old");
-    for path in [&working, &retired] {
-        if !absent(path)? {
-            reclaim_staging(path)?;
+    if !absent(&working)? {
+        reclaim_staging(&working)?;
+    }
+    // 上一次替换在「原目录已改名、新副本未就位」时中断，RustDesk.old 就是保底目录的唯一
+    // 副本；这时直接删掉它等于把保底客户端弄丢，先把目录改回来再继续。
+    if !absent(&retired)? {
+        if absent(fallback)? {
+            std::fs::rename(&retired, fallback)
+                .map_err(|e| format!("first installation fallback not restored: {e}"))?;
+        } else {
+            reclaim_staging(&retired)?;
         }
     }
     let copied = super::directory_backup::capture(source, &working)?;
@@ -616,13 +623,29 @@ fn refresh_fallback(
     std::fs::rename(fallback, &retired)
         .map_err(|e| format!("first installation fallback not retired: {e}"))?;
     if let Err(error) = std::fs::rename(&staged, fallback) {
-        let _ = std::fs::rename(&retired, fallback);
-        return Err(format!("first installation fallback not replaced: {error}"));
+        return Err(match std::fs::rename(&retired, fallback) {
+            Ok(()) => format!("first installation fallback not replaced: {error}"),
+            Err(restore) => format!(
+                "first installation fallback not replaced: {error}; old directory not restored: {restore}"
+            ),
+        });
     }
-    if !copied.matches_directory(fallback)? {
-        let _ = std::fs::remove_dir_all(fallback);
-        let _ = std::fs::rename(&retired, fallback);
-        return Err("first installation fallback replaced inventory mismatch".into());
+    // 核对失败也要把原目录换回来；这里用 match 而不是 `?`，否则核对出错会直接返回，
+    // 让新副本留在原位、原目录滞留在 RustDesk.old。
+    let verified = copied.matches_directory(fallback);
+    if !matches!(verified, Ok(true)) {
+        let restored =
+            std::fs::remove_dir_all(fallback).and_then(|()| std::fs::rename(&retired, fallback));
+        let detail = match verified {
+            Ok(_) => "inventory mismatch".to_owned(),
+            Err(error) => format!("inventory unreadable: {error}"),
+        };
+        return Err(match restored {
+            Ok(()) => format!("first installation fallback replaced {detail}"),
+            Err(restore) => format!(
+                "first installation fallback replaced {detail}; old directory not restored: {restore}"
+            ),
+        });
     }
     let _ = std::fs::remove_dir_all(&retired);
     let _ = std::fs::remove_dir_all(&working);
@@ -630,19 +653,22 @@ fn refresh_fallback(
 }
 
 /// 保底目录可能由 `current` 或已轮换到 `previous` 的救援包发布；两处的清单都要拿来比对。
-fn known_client_manifests(layout: &Layout) -> Vec<super::DirectoryBackup> {
-    ["current", "previous"]
-        .into_iter()
-        .filter_map(|name| {
-            let bytes = read(
-                &layout.destination.join(name).join("client/manifest.json"),
-                8 * 1024 * 1024,
-                false,
-            )
-            .ok()?;
-            super::DirectoryBackup::decode(&bytes).ok()
-        })
-        .collect()
+/// 清单不存在就跳过，但存在却读不出、解不开时必须报错：那说明我们无法判断目录归属，
+/// 静默跳过会让保底目录永远停在「不是我们的」，轮换每次都白白失败。
+fn known_client_manifests(layout: &Layout) -> Result<Vec<super::DirectoryBackup>, String> {
+    let mut known = Vec::new();
+    for name in ["current", "previous"] {
+        let path = layout.destination.join(name).join("client/manifest.json");
+        if absent(&path)? {
+            continue;
+        }
+        let bytes = read(&path, 8 * 1024 * 1024, false)?;
+        known.push(
+            super::DirectoryBackup::decode(&bytes)
+                .map_err(|e| format!("{name} client manifest unusable: {e}"))?,
+        );
+    }
+    Ok(known)
 }
 
 fn fallback_dir(layout: &Layout, key: &str) -> PathBuf {
@@ -1245,9 +1271,10 @@ fn prepare(
         return Err("first installation previous appeared; staging preserved".into());
     }
     let fallback = fallback_dir(layout, key);
-    let known = known_client_manifests(layout);
+    let known = known_client_manifests(layout)?;
+    // 这里只判定一次：保底目录的整目录哈希不便宜，而它在轮换前后都一样。
     let refresh = rotating && fallback_superseded(&known, &fallback)?;
-    if let Err(error) = fallback_compatible(layout, key, &client) {
+    if let Err(error) = fallback_compatible_for(&known, &fallback, &client) {
         return Ok(fallback_blocked(error));
     }
     if rotating {
@@ -1710,13 +1737,41 @@ mod rotation_tests {
             std::fs::write(dir.join("RustDesk.exe"), body).unwrap();
             std::fs::write(dir.join("data/plugin.dll"), body).unwrap();
         }
-        let expected = super::super::directory_backup::capture(&source, &root.join("expected"))
-            .unwrap();
+        let expected =
+            super::super::directory_backup::capture(&source, &root.join("expected")).unwrap();
 
         super::refresh_fallback(&fallback, &source, &expected).unwrap();
 
         assert!(expected.matches_directory(&fallback).unwrap());
         assert!(!root.join("RustDesk.new").exists());
+        assert!(!root.join("RustDesk.old").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 上一次替换在「原目录已改名、新副本未就位」时中断：RustDesk.old 是保底目录的唯一
+    // 副本，必须改回来，不能被当成垃圾删掉。
+    #[test]
+    fn an_interrupted_replacement_restores_the_retired_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "rd-fallback-resume-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        workspace::create(&root).unwrap();
+        let fallback = root.join("fallback");
+        let source = root.join("client");
+        for (dir, body) in [
+            (&root.join("RustDesk.old"), &b"old build"[..]),
+            (&source, &b"new build"[..]),
+        ] {
+            workspace::create(dir).unwrap();
+            std::fs::write(dir.join("RustDesk.exe"), body).unwrap();
+        }
+        let expected =
+            super::super::directory_backup::capture(&source, &root.join("expected")).unwrap();
+
+        super::refresh_fallback(&fallback, &source, &expected).unwrap();
+
+        assert!(expected.matches_directory(&fallback).unwrap());
         assert!(!root.join("RustDesk.old").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1735,8 +1790,8 @@ mod rotation_tests {
             workspace::create(dir).unwrap();
             std::fs::write(dir.join("RustDesk.exe"), body).unwrap();
         }
-        let expected = super::super::directory_backup::capture(&source, &root.join("expected"))
-            .unwrap();
+        let expected =
+            super::super::directory_backup::capture(&source, &root.join("expected")).unwrap();
         std::fs::write(source.join("RustDesk.exe"), b"changed after approval").unwrap();
 
         assert!(super::refresh_fallback(&fallback, &source, &expected).is_err());
