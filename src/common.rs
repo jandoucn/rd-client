@@ -1084,6 +1084,11 @@ fn add_runtime_inventory_fields(out: &mut serde_json::Value) {
     out["last_update_status"] = json!(last_update_status);
     out["last_update_error"] = json!(LAST_UPDATE_ERROR.lock().unwrap().clone());
     out["last_update_source"] = json!(last_update_source);
+    #[cfg(not(target_os = "ios"))]
+    if let Ok((target_key, package_kind)) = crate::updater::current_update_target() {
+        out["target_key"] = json!(target_key);
+        out["package_kind"] = json!(package_kind);
+    }
     out["schema_version"] = json!(1);
     out["capabilities"] = json!(["heartbeat", "sysinfo", "software_update"]);
     out["extensions"] = json!({});
@@ -4319,5 +4324,26 @@ mod tests {
     #[tokio::test]
     async fn test_ipv6_route_probe_does_not_wait_on_the_network() {
         assert!(hbb_common::timeout(1_000, test_bind_ipv6()).await.is_ok());
+    }
+}
+
+#[cfg(all(test, not(target_os = "ios")))]
+mod sysinfo_package_identity_tests {
+    // 换装（如 EXE 改 MSI）后，后台只在客户端做版本检查时才更新安装包类型，
+    // 在那之前一直按旧类型计算更新目标，LHY 因此被算成只能升到 2502。
+    #[test]
+    fn sysinfo_reports_the_current_package_identity() {
+        let info = super::get_sysinfo();
+        match crate::updater::current_update_target() {
+            Ok((target_key, package_kind)) => {
+                assert_eq!(info["target_key"], target_key);
+                assert_eq!(info["package_kind"], package_kind);
+            }
+            // 未安装时（如开发机上的便携运行）不上报，后台保留原值而不是被清空。
+            Err(_) => {
+                assert!(info.get("target_key").is_none());
+                assert!(info.get("package_kind").is_none());
+            }
+        }
     }
 }
