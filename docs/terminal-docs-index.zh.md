@@ -13,3 +13,5 @@
 | `scripts/win10-gs/README.zh.md` | 真机编译/替换脚本 |
 
 rd-api 侧：`docs/terminal-rd-api-progress.zh.md`、`docs/terminal-security-review.zh.md`、`docs/terminal-cross-session-board.zh.md`。
+
+| 复核入口（转发用） | `docs/ops-console-session-review.zh.md` |
