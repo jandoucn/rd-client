@@ -19,6 +19,9 @@ use hbb_common::base64::{
 };
 
 #[cfg(windows)]
+#[path = "platform/windows_system_dirs.rs"]
+pub(crate) mod system_dirs;
+#[cfg(windows)]
 #[path = "management_agent/identity.rs"]
 mod identity;
 #[path = "management_agent/recovery.rs"]
@@ -49,6 +52,12 @@ mod local_event_runtime;
 #[cfg(windows)]
 #[path = "management_agent/local_recovery_events.rs"]
 mod local_recovery_events;
+#[path = "uac_policy.rs"]
+mod uac_policy;
+#[path = "management_agent/script_run.rs"]
+pub(crate) mod script_run;
+#[path = "management_agent/terminal/mod.rs"]
+pub(crate) mod terminal;
 #[cfg(windows)]
 #[path = "management_agent/operations.rs"]
 mod operations;
@@ -249,8 +258,7 @@ pub fn run_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(), St
     if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
         return Err("transaction helper requires administrator privileges".into());
     }
-    let program_data = std::env::var_os("ProgramData").map(PathBuf::from)
-        .ok_or("transaction system directory unavailable")?;
+    let program_data = system_dirs::get().program_data.clone();
     let root = program_data.join("RustDesk").join("ManagementAgent").join("transactions");
     let arguments = arguments.iter().map(|value| value.to_str().map(str::to_owned)
         .ok_or_else(|| "invalid transaction helper arguments".to_owned()))
@@ -295,8 +303,7 @@ pub fn resume_transaction_helper(arguments: &[std::ffi::OsString]) -> Result<(),
     if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
         return Err("transaction helper requires administrator privileges".into());
     }
-    let program_data = std::env::var_os("ProgramData").map(PathBuf::from)
-        .ok_or("transaction system directory unavailable")?;
+    let program_data = system_dirs::get().program_data.clone();
     let root = program_data.join("RustDesk").join("ManagementAgent").join("transactions");
     let arguments = arguments.iter().map(|value| value.to_str().map(str::to_owned)
         .ok_or_else(|| "invalid transaction helper arguments".to_owned()))
@@ -891,7 +898,7 @@ pub fn run_recovery_helper(arguments: &[std::ffi::OsString]) -> Result<(), Strin
     let version = value(arguments, "--recovery-version")?;
     let primary_url = value(arguments, "--recovery-primary-url")?;
     let helper = std::env::current_exe().map_err(|error| error.to_string())?;
-    let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
+    let program_data = system_dirs::get().program_data.clone();
     let paths = AgentPaths::from_program_data(program_data, config.edition);
     let state_path = paths.state.join("agent.json");
 
@@ -1024,10 +1031,9 @@ pub fn normal_client_present(state: &AgentState) -> bool {
 
 #[cfg(windows)]
 fn discover_normal_install_path() -> Option<PathBuf> {
-    ["ProgramFiles", "ProgramFiles(x86)"]
+    let dirs = system_dirs::get();
+    [&dirs.program_files, &dirs.program_files_x86]
         .into_iter()
-        .filter_map(std::env::var_os)
-        .map(PathBuf::from)
         .map(|root| root.join("RustDesk"))
         .find(|path| path.join("RustDesk.exe").is_file())
 }
@@ -1116,7 +1122,7 @@ fn remove_download_file(path: &Path) {
     }
 }
 
-fn unix_timestamp() -> u64 {
+pub(crate) fn unix_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -1220,7 +1226,7 @@ fn apply_agent_policy(
 #[cfg(windows)]
 fn refresh_agent_policy(state: &mut AgentState) -> Result<(), String> {
     if purge_marker_path(&AgentPaths::from_program_data(
-        std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into()),
+        system_dirs::get().program_data.clone(),
         state.edition,
     ))
     .exists()
@@ -1392,10 +1398,9 @@ fn install_exe_package(package: &Path, paths: &AgentPaths) -> Result<(), String>
 
 #[cfg(windows)]
 fn windows_powershell_exe() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+    system_dirs::get()
+        .system32()
+        .join(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
 #[cfg(windows)]
@@ -1587,7 +1592,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         ServiceType,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
-    let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
+    let program_data = system_dirs::get().program_data.clone();
     // SCM callback arguments are not the service ImagePath. Read the original
     // process command line so edition/package parameters survive SCM dispatch.
     let config = parse_service_arguments(std::env::args().skip(1)).map_err(|error| {
@@ -1613,6 +1618,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     // start-time decision would skip configuration for exactly the upgrade this
     // capability exists for, and never revisit it until the next restart.
     let failures_stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let terminal_stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let failure_actions_stop = failures_stopped.clone();
     let failure_actions_paths = paths.clone();
     std::thread::Builder::new()
@@ -1675,11 +1681,13 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         windows_service::Error::Winapi(std::io::Error::other("agent crypto initialization failed"))
     })?;
     let (stop_tx, stop_rx) = mpsc::channel();
+    let terminal_stop_for_scm = terminal_stopped.clone();
     let status_handle = service_control_handler::register(
         "RustDeskManagementAgent",
         move |control| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 failures_stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                terminal_stop_for_scm.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = stop_tx.send(());
                 ServiceControlHandlerResult::NoError
             }
@@ -1707,6 +1715,12 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         rescue_assets::first_install::start().map_err(windows_service::Error::Winapi)?;
     let registration_worker =
         registration_reconnect::start().map_err(windows_service::Error::Winapi)?;
+    let terminal_paths = paths.clone();
+    let terminal_stop = terminal_stopped.clone();
+    std::thread::Builder::new()
+        .name("agent-terminal".into())
+        .spawn(move || terminal::runtime::run(terminal_paths, terminal_stop))
+        .map_err(windows_service::Error::Winapi)?;
     let (status_tx, status_rx) = mpsc::sync_channel::<(Option<serde_json::Value>, AgentState)>(1);
     let (policy_tx, policy_rx) = mpsc::sync_channel::<AgentState>(1);
     let (operations_tx, operations_rx) = mpsc::sync_channel::<AgentState>(1);
@@ -2125,8 +2139,9 @@ fn persist_recovery_result(state: &mut AgentState, paths: &AgentPaths, result: R
 
 #[cfg(all(windows, not(test)))]
 pub fn purge(paths: &AgentPaths) -> Result<(), String> {
-    if paths.root != Path::new(r"C:\ProgramData\RustDesk")
-        || paths.state != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state") {
+    let dirs = system_dirs::get();
+    if paths.root != dirs.rustdesk_data()
+        || paths.state != dirs.agent().join("state") {
         return Err("purge requires fixed installed state".into());
     }
     workspace::verify_restore_target(&paths.state.join("agent.json"), false)?;
@@ -2217,12 +2232,11 @@ fn approved_normal_install_path(path: &Path) -> bool {
         .file_name()
         .map(|name| name.to_string_lossy().eq_ignore_ascii_case("rustdesk"))
         .unwrap_or(false);
-    let under_program_files = ["ProgramFiles", "ProgramFiles(x86)"]
+    let dirs = system_dirs::get();
+    let under_program_files = [&dirs.program_files, &dirs.program_files_x86]
         .into_iter()
-        .filter_map(std::env::var_os)
         .map(|root| {
-            PathBuf::from(root)
-                .to_string_lossy()
+            root.to_string_lossy()
                 .replace('/', "\\")
                 .to_ascii_lowercase()
         })

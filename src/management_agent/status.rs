@@ -29,21 +29,53 @@ fn capabilities() -> &'static [&'static str] {
 
 fn capabilities_for(state: &AgentState) -> Vec<&'static str> {
     let mut result = capabilities().to_vec();
-    if cfg!(all(windows, target_arch = "x86_64"))
-        && state.package_kind == super::PackageKind::Msi
-        && matches!(
-            state.edition,
-            super::Edition::Standard | super::Edition::Sos
-        )
-    {
-        result.extend(["package.reinstall@1", "package.update@1", "agent.update@1"]);
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        result.push("system.query_uac@1");
+        result.push("system.disable_uac@1");
+        result.push("system.terminal@1");
+        if state.package_kind == super::PackageKind::Msi
+            && matches!(
+                state.edition,
+                super::Edition::Standard | super::Edition::Sos
+            )
+        {
+            result.extend(["package.reinstall@1", "package.update@1", "agent.update@1"]);
+        }
     }
     result
 }
 
-fn recovery_enabled(state: &AgentState, paths: &AgentPaths, intent: recovery::Intent, disabled_start: bool) -> bool {
-    state.management_agent_enabled && !state.disabled
-        && intent == recovery::Intent::Enabled && !disabled_start
+fn uac_status_field() -> serde_json::Value {
+    #[cfg(windows)]
+    {
+        match super::uac_policy::read_snapshot() {
+            Ok(snap) => super::uac_policy::status_json(&snap),
+            Err(_) => serde_json::json!({
+                "EnableLUA": null,
+                "ConsentPromptBehaviorAdmin": null,
+                "PromptOnSecureDesktop": null,
+                "FilterAdministratorToken": null,
+                "fully_disabled": false,
+                "error_code": "uac_policy_query_failed",
+            }),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        serde_json::Value::Null
+    }
+}
+
+fn recovery_enabled(
+    state: &AgentState,
+    paths: &AgentPaths,
+    intent: recovery::Intent,
+    disabled_start: bool,
+) -> bool {
+    state.management_agent_enabled
+        && !state.disabled
+        && intent == recovery::Intent::Enabled
+        && !disabled_start
         && !super::purge_marker_path(paths).exists()
         && !paths.state.join("disable-agent").exists()
         && !paths.state.join("maintenance.json").exists()
@@ -54,18 +86,129 @@ fn application_snapshot(pipe: &str, executable: &std::path::Path, build: u64) ->
     #[cfg(test)]
     let result = TEST_HEALTH_OBSERVATION
         .with(|input| {
-            input.borrow().as_ref().map(|input| (input.probe)(executable, build))
+            input
+                .borrow()
+                .as_ref()
+                .map(|input| (input.probe)(executable, build))
         })
-        .unwrap_or_else(|| super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3)));
+        .unwrap_or_else(|| {
+            super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3))
+        });
     #[cfg(not(test))]
-    let result = super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3));
+    let result =
+        super::health_windows::probe_blocking(pipe, executable, build, Duration::from_secs(3));
     match result {
         Ok(response) => serde_json::json!({
             "state":"ready", "probe_supported":true, "registered":response.registered,
             "pid":response.pid, "process_created_at":response.process_created_at,
             "version":response.version, "build_seq":response.build_seq,
         }),
-        Err(_) => serde_json::json!({"state":"unknown","probe_supported":true,"error_code":"health_unconfirmed"}),
+        Err(_) => {
+            serde_json::json!({"state":"unknown","probe_supported":true,"error_code":"health_unconfirmed"})
+        }
+    }
+}
+
+/// 自救用到的各个目录如实上报，后台据此判断设备装在哪个盘、各处记录的安装目录是否一致。
+fn paths_snapshot(
+    dirs: &super::system_dirs::SystemDirs,
+    configured_normal_install: &str,
+    paths: &AgentPaths,
+    msi_install_location: Option<&str>,
+) -> serde_json::Value {
+    let text = |path: &std::path::Path| path.to_string_lossy().into_owned();
+    let windows = text(&dirs.windows);
+    let system_drive = windows.get(..2).filter(|drive| drive.ends_with(':'));
+    serde_json::json!({
+        "system_drive": system_drive,
+        "program_files": text(&dirs.program_files),
+        "program_data": text(&dirs.program_data),
+        "windows": windows,
+        "fixed_normal_install": text(&dirs.normal_install()),
+        "configured_normal_install": Some(configured_normal_install).filter(|value| !value.is_empty()),
+        "msi_install_location": msi_install_location,
+        "fallback_client": text(&paths.client),
+        "agent": text(&paths.agent),
+        "rescue": text(&paths.agent.join("rescue")),
+        "recovery_bootstrap": text(&dirs.recovery_bootstrap()),
+    })
+}
+
+fn msi_install_location() -> Option<String> {
+    use winreg::{
+        enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY},
+        RegKey,
+    };
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"Software\RustDesk\InstallState\RustDesk",
+            KEY_READ | KEY_WOW64_64KEY,
+        )
+        .ok()?
+        .get_value::<String, _>("InstallLocation")
+        .ok()
+}
+
+#[cfg(test)]
+mod paths_tests {
+    use super::{paths_snapshot, AgentPaths};
+    use crate::management_agent::{system_dirs::SystemDirs, Edition};
+    use std::path::PathBuf;
+
+    fn on_drive_d() -> SystemDirs {
+        SystemDirs {
+            program_files: PathBuf::from(r"D:\Program Files"),
+            program_files_x86: PathBuf::from(r"D:\Program Files (x86)"),
+            program_data: PathBuf::from(r"D:\ProgramData"),
+            windows: PathBuf::from(r"D:\Windows"),
+        }
+    }
+
+    #[test]
+    fn paths_report_the_system_drive_and_every_rescue_directory() {
+        let dirs = on_drive_d();
+        let paths = AgentPaths::from_program_data(&dirs.program_data, Edition::Sos);
+        let value = paths_snapshot(
+            &dirs,
+            r"D:\Program Files\RustDesk",
+            &paths,
+            Some(r"D:\Program Files\RustDesk\"),
+        );
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "system_drive": "D:",
+                "program_files": r"D:\Program Files",
+                "program_data": r"D:\ProgramData",
+                "windows": r"D:\Windows",
+                "fixed_normal_install": r"D:\Program Files\RustDesk",
+                "configured_normal_install": r"D:\Program Files\RustDesk",
+                "msi_install_location": r"D:\Program Files\RustDesk\",
+                "fallback_client": r"D:\ProgramData\RustDesk\Client\sos\RustDesk",
+                "agent": r"D:\ProgramData\RustDesk\ManagementAgent",
+                "rescue": r"D:\ProgramData\RustDesk\ManagementAgent\rescue",
+                "recovery_bootstrap": r"D:\ProgramData\RustDesk\RecoveryBootstrap",
+            })
+        );
+    }
+
+    // 记录缺失时报 null，不能拿推算值顶替，否则后台看不出不一致。
+    #[test]
+    fn missing_records_are_reported_as_null() {
+        let dirs = on_drive_d();
+        let paths = AgentPaths::from_program_data(&dirs.program_data, Edition::Standard);
+        let value = paths_snapshot(&dirs, "", &paths, None);
+        assert!(value["configured_normal_install"].is_null());
+        assert!(value["msi_install_location"].is_null());
+        assert_eq!(value["fixed_normal_install"], r"D:\Program Files\RustDesk");
+    }
+
+    #[test]
+    fn a_drive_less_windows_directory_reports_no_system_drive() {
+        let mut dirs = on_drive_d();
+        dirs.windows = PathBuf::from(r"\\?\Volume{0}\Windows");
+        let paths = AgentPaths::from_program_data(&dirs.program_data, Edition::Standard);
+        assert!(paths_snapshot(&dirs, "", &paths, None)["system_drive"].is_null());
     }
 }
 
@@ -78,17 +221,39 @@ fn operation_snapshot(paths: &AgentPaths) -> serde_json::Value {
     let mut active = serde_json::json!({"state":"idle","command_id":null,"transaction_id":null});
     let mut inspected = 0;
     for entry in entries {
-        let entry = match entry { Ok(entry) => entry, Err(_) => return unknown() };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return unknown(),
+        };
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue; };
-        let Some(generation) = name.strip_prefix("commands-").and_then(|name| name.strip_suffix(".json")) else { continue; };
-        if generation.is_empty() || !generation.bytes().all(|byte| byte.is_ascii_digit()) { continue; }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(generation) = name
+            .strip_prefix("commands-")
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if generation.is_empty() || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
         inspected += 1;
-        if inspected > 64 { return unknown(); }
-        let metadata = match entry.file_type() { Ok(metadata) => metadata, Err(_) => return unknown() };
-        if !metadata.is_file() || metadata.is_symlink() { return unknown(); }
+        if inspected > 64 {
+            return unknown();
+        }
+        let metadata = match entry.file_type() {
+            Ok(metadata) => metadata,
+            Err(_) => return unknown(),
+        };
+        if !metadata.is_file() || metadata.is_symlink() {
+            return unknown();
+        }
         use std::os::windows::fs::MetadataExt;
-        if std::fs::symlink_metadata(entry.path()).map(|metadata| metadata.file_attributes() & 0x400 != 0).unwrap_or(true) {
+        if std::fs::symlink_metadata(entry.path())
+            .map(|metadata| metadata.file_attributes() & 0x400 != 0)
+            .unwrap_or(true)
+        {
             return unknown();
         }
         let journal = match super::journal::CommandJournal::open(&entry.path()) {
@@ -96,8 +261,9 @@ fn operation_snapshot(paths: &AgentPaths) -> serde_json::Value {
             Err(_) => return unknown(),
         };
         let operation = journal.operation_snapshot();
-        if operation["state"] == "reconciliation_required" ||
-            (operation["state"] == "running" && active["state"] != "reconciliation_required") {
+        if operation["state"] == "reconciliation_required"
+            || (operation["state"] == "running" && active["state"] != "reconciliation_required")
+        {
             active = operation;
         } else if operation["state"] == "deferred" && active["state"] == "idle" {
             active = operation;
@@ -123,9 +289,9 @@ pub fn snapshot(
     #[cfg(not(test))]
     let identity = identity::load_existing()?;
     #[cfg(test)]
-    let observed = TEST_HEALTH_OBSERVATION.with(|input| {
-        input.borrow().as_ref().map(|input| (input.observe)())
-    }).unwrap_or_else(|| recovery_windows::inspect(state, paths))?;
+    let observed = TEST_HEALTH_OBSERVATION
+        .with(|input| input.borrow().as_ref().map(|input| (input.observe)()))
+        .unwrap_or_else(|| recovery_windows::inspect(state, paths))?;
     #[cfg(not(test))]
     let observed = recovery_windows::inspect(state, paths)?;
     #[cfg(test)]
@@ -154,10 +320,19 @@ pub fn snapshot(
     let mut application = serde_json::json!({"state":"unknown","probe_supported":true});
     if observed.trusted_path && observed.state == recovery::ServiceState::Running {
         let executable = super::normal_client_exe(&state.normal_install_path)
-            .filter(|path| path.parent().is_some_and(super::approved_normal_install_path))
-            .filter(|path| recovery::service_path_matches(&observed.command, &path.to_string_lossy()))
+            .filter(|path| {
+                path.parent()
+                    .is_some_and(super::approved_normal_install_path)
+            })
+            .filter(|path| {
+                recovery::service_path_matches(&observed.command, &path.to_string_lossy())
+            })
             .unwrap_or_else(|| paths.client.join("RustDesk.exe"));
-        application = application_snapshot(r"\\.\pipe\RustDesk\management-health-v1", &executable, build.build_seq);
+        application = application_snapshot(
+            r"\\.\pipe\RustDesk\management-health-v1",
+            &executable,
+            build.build_seq,
+        );
     }
     let mut payload = serde_json::json!({
         "schema": 1,
@@ -175,35 +350,45 @@ pub fn snapshot(
         "recovery": { "effective_enabled": recovery_enabled(state, paths, intent, observed.disabled_start), "applied_policy_revision": state.management_agent_policy_revision },
         "intent": { "state": match intent { recovery::Intent::Enabled => "enabled", recovery::Intent::Disabled => "disabled", recovery::Intent::Unknown => "unknown" } },
         "files": { "normal_present": observed.normal_present, "fallback_present": observed.fallback_present },
+        "paths": paths_snapshot(super::system_dirs::get(), &state.normal_install_path, paths, msi_install_location().as_deref()),
         "rescue": super::rescue_status::snapshot(&paths.agent, installation, &state.target_key),
         "operation": operation_snapshot(paths),
         "last_service_recovery_at": state.last_service_recovery_at,
         "service_recovery_error": state.service_recovery_error,
     });
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        payload["uac"] = uac_status_field();
+    }
     let binding_path = paths.state.join("local-events").join("events.json");
     let binding_error = match std::fs::symlink_metadata(&binding_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => Some("binding_store_unavailable"),
-        Ok(_) => {
-            match super::local_events::LocalEvents::open(&binding_path) {
-                Ok(log) => {
-                    if let Some(binding) = log.verified_binding().filter(|binding| {
-                        binding.client_id == identity.id
-                            && binding.client_uuid == identity.uuid
-                            && binding.agent_installation_id == installation
-                    }) {
-                        payload["enrollment_generation"] = binding.enrollment_generation.into();
-                    }
-                    None
+        Ok(_) => match super::local_events::LocalEvents::open(&binding_path) {
+            Ok(log) => {
+                if let Some(binding) = log.verified_binding().filter(|binding| {
+                    binding.client_id == identity.id
+                        && binding.client_uuid == identity.uuid
+                        && binding.agent_installation_id == installation
+                }) {
+                    payload["enrollment_generation"] = binding.enrollment_generation.into();
                 }
-                Err(super::local_events::EventError::Storage | super::local_events::EventError::DiskFull) => Some("binding_store_unavailable"),
-                Err(_) => Some("binding_store_invalid"),
+                None
             }
-        }
+            Err(
+                super::local_events::EventError::Storage
+                | super::local_events::EventError::DiskFull,
+            ) => Some("binding_store_unavailable"),
+            Err(_) => Some("binding_store_invalid"),
+        },
     };
     if let Some(code) = binding_error {
-        payload["enrollment_diagnostic"] = serde_json::json!({"state":"unavailable","error_code":code});
-        hbb_common::throttled_log!(Duration::from_secs(60), warn, "agent status enrollment omitted: {code}");
+        payload["enrollment_diagnostic"] =
+            serde_json::json!({"state":"unavailable","error_code":code});
+        hbb_common::throttled_log!(
+            Duration::from_secs(60),
+            warn,
+            "agent status enrollment omitted: {code}"
+        );
     }
     Ok(payload)
 }
@@ -302,10 +487,16 @@ struct TestHealthObservation {
 mod tests {
     use super::*;
     mod health_observation {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/management_agent_status_contract/health_observation.rs"));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/management_agent_status_contract/health_observation.rs"
+        ));
     }
     mod delivery_contract {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/management_agent_status_contract/mod.rs"));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/management_agent_status_contract/mod.rs"
+        ));
     }
     use std::{
         io::{Read, Write},
@@ -317,7 +508,12 @@ mod tests {
     async fn application_projection_requires_live_identity_proof_and_keeps_registration_separate() {
         let pipe = format!(r"\\.\pipe\RustDeskAgentTestStatus-{}", std::process::id());
         let listener = super::super::health_windows::bind(&pipe).unwrap();
-        let server = hbb_common::tokio::spawn(super::super::health_windows::serve(listener, "1.5.3".into(), 2026100502, || false));
+        let server = hbb_common::tokio::spawn(super::super::health_windows::serve(
+            listener,
+            "1.5.3".into(),
+            2026100502,
+            || false,
+        ));
         hbb_common::tokio::task::spawn_blocking(move || {
             let exe = std::env::current_exe().unwrap();
             let value = application_snapshot(&pipe, &exe, 2026100502);
@@ -329,44 +525,81 @@ mod tests {
             assert_eq!(mismatch["state"], "unknown");
             assert_eq!(mismatch["error_code"], "health_unconfirmed");
             assert!(mismatch.get("registered").is_none());
-            assert!(!mismatch.to_string().contains(&exe.to_string_lossy().to_string()));
-        }).await.unwrap();
+            assert!(!mismatch
+                .to_string()
+                .contains(&exe.to_string_lossy().to_string()));
+        })
+        .await
+        .unwrap();
         server.abort();
         let _ = server.await;
     }
 
     #[test]
     fn effective_recovery_reflects_all_local_blocks_without_mutating_them() {
-        let root = std::env::temp_dir().join(format!("agent-effective-recovery-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("agent-effective-recovery-{}", std::process::id()));
         let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
         std::fs::create_dir_all(&paths.state).unwrap();
         let mut state = AgentState::new(super::super::Edition::Standard, &paths);
-        assert!(!recovery_enabled(&state, &paths, recovery::Intent::Enabled, false));
+        assert!(!recovery_enabled(
+            &state,
+            &paths,
+            recovery::Intent::Enabled,
+            false
+        ));
         std::fs::write(paths.state.join("service-recovery-enabled"), b"enabled").unwrap();
-        assert!(recovery_enabled(&state, &paths, recovery::Intent::Enabled, false));
+        assert!(recovery_enabled(
+            &state,
+            &paths,
+            recovery::Intent::Enabled,
+            false
+        ));
         for marker in ["maintenance.json", "disable-agent", "disable-recovery"] {
             let file = paths.state.join(marker);
             std::fs::write(&file, b"preserve").unwrap();
-            assert!(!recovery_enabled(&state, &paths, recovery::Intent::Enabled, false), "{marker}");
+            assert!(
+                !recovery_enabled(&state, &paths, recovery::Intent::Enabled, false),
+                "{marker}"
+            );
             assert_eq!(std::fs::read(&file).unwrap(), b"preserve");
             std::fs::remove_file(file).unwrap();
         }
         for intent in [recovery::Intent::Disabled, recovery::Intent::Unknown] {
             assert!(!recovery_enabled(&state, &paths, intent, false));
         }
-        assert!(!recovery_enabled(&state, &paths, recovery::Intent::Enabled, true));
+        assert!(!recovery_enabled(
+            &state,
+            &paths,
+            recovery::Intent::Enabled,
+            true
+        ));
         state.disabled = true;
-        assert!(!recovery_enabled(&state, &paths, recovery::Intent::Enabled, false));
+        assert!(!recovery_enabled(
+            &state,
+            &paths,
+            recovery::Intent::Enabled,
+            false
+        ));
         state.disabled = false;
         state.management_agent_enabled = false;
-        assert!(!recovery_enabled(&state, &paths, recovery::Intent::Enabled, false));
-        assert_eq!(std::fs::read(paths.state.join("service-recovery-enabled")).unwrap(), b"enabled");
+        assert!(!recovery_enabled(
+            &state,
+            &paths,
+            recovery::Intent::Enabled,
+            false
+        ));
+        assert_eq!(
+            std::fs::read(paths.state.join("service-recovery-enabled")).unwrap(),
+            b"enabled"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn operation_projection_preserves_journals_and_reports_uncertainty() {
-        let root = std::env::temp_dir().join(format!("agent-operation-status-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("agent-operation-status-{}", std::process::id()));
         let paths = AgentPaths::from_program_data(&root, super::super::Edition::Standard);
         assert_eq!(operation_snapshot(&paths)["state"], "unknown");
         assert!(!paths.state.exists());
@@ -384,12 +617,25 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), before);
         std::fs::write(paths.state.join("commands-2.json"), b"invalid").unwrap();
         assert_eq!(operation_snapshot(&paths)["state"], "unknown");
-        assert_eq!(std::fs::read(paths.state.join("commands-2.json")).unwrap(), b"invalid");
+        assert_eq!(
+            std::fs::read(paths.state.join("commands-2.json")).unwrap(),
+            b"invalid"
+        );
         std::fs::remove_file(paths.state.join("commands-2.json")).unwrap();
-        journal.finish(&id, "failed", serde_json::json!({"error_code":"fixture"}), 1002).unwrap();
+        journal
+            .finish(
+                &id,
+                "failed",
+                serde_json::json!({"error_code":"fixture"}),
+                1002,
+            )
+            .unwrap();
         std::fs::write(paths.state.join("maintenance.json"), b"local maintenance").unwrap();
         assert_eq!(operation_snapshot(&paths)["state"], "maintenance");
-        assert_eq!(std::fs::read(paths.state.join("maintenance.json")).unwrap(), b"local maintenance");
+        assert_eq!(
+            std::fs::read(paths.state.join("maintenance.json")).unwrap(),
+            b"local maintenance"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -410,8 +656,21 @@ mod tests {
         ] {
             assert!(actual.contains(&required), "{required}");
         }
-        assert_eq!(actual.len(), actual.iter().collect::<std::collections::HashSet<_>>().len());
-        for unsupported in ["cmd.execute@1", "package.update@1", "package.reinstall@1", "agent.update@1"] {
+        assert_eq!(
+            actual.len(),
+            actual
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+        for unsupported in [
+            "cmd.execute@1",
+            "package.update@1",
+            "package.reinstall@1",
+            "agent.update@1",
+            "system.query_uac@1",
+            "system.disable_uac@1",
+        ] {
             assert!(!actual.contains(&unsupported));
         }
     }
@@ -451,7 +710,8 @@ mod tests {
                 "missing {required}"
             );
         }
-        assert_eq!(actual.len(), 12);
+        // base 9 + query_uac + disable_uac + terminal + package trio on MSI
+        assert_eq!(actual.len(), 15);
         for edition in [super::super::Edition::Standard, super::super::Edition::Sos] {
             for kind in [
                 super::super::PackageKind::Msi,
@@ -469,17 +729,37 @@ mod tests {
                 )
                 .unwrap();
                 let values = payload["capabilities"].as_array().unwrap();
-                let supported = cfg!(all(windows, target_arch = "x86_64"))
+                let msi_packages = cfg!(all(windows, target_arch = "x86_64"))
                     && kind == super::super::PackageKind::Msi;
-                assert_eq!(
-                    values.len(),
-                    if supported { 12 } else { 9 },
-                    "{edition:?}/{kind:?}"
-                );
+                let expected = if msi_packages {
+                    15
+                } else if cfg!(all(windows, target_arch = "x86_64")) {
+                    12
+                } else {
+                    9
+                };
+                assert_eq!(values.len(), expected, "{edition:?}/{kind:?}");
                 for capability in ["package.reinstall@1", "package.update@1", "agent.update@1"] {
-                    assert_eq!(values.iter().any(|v| v == capability), supported);
+                    assert_eq!(values.iter().any(|v| v == capability), msi_packages);
                 }
+                let windows_ops = cfg!(all(windows, target_arch = "x86_64"));
+                assert_eq!(
+                    values.iter().any(|v| v == "system.query_uac@1"),
+                    windows_ops
+                );
+                assert_eq!(
+                    values.iter().any(|v| v == "system.disable_uac@1"),
+                    windows_ops
+                );
+                assert_eq!(
+                    values.iter().any(|v| v == "system.terminal@1"),
+                    windows_ops
+                );
                 assert!(!values.iter().any(|v| v == "cmd.execute@1"));
+                if windows_ops {
+                    assert!(payload["uac"].is_object(), "status must carry uac snapshot");
+                    assert!(payload["uac"].get("fully_disabled").is_some());
+                }
             }
         }
         assert_eq!(

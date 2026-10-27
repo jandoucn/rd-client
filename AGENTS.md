@@ -30,7 +30,7 @@
 * Release 标题只使用对应 tag 名称；Release 正文和 tag 说明必须保持为空。版本变化只写在仓库内的 `release-notes.zh.md`，不得自动或手动灌入 GitHub Release。
 * 不要在提交说明里写英文句子。代码、路径、命令和 `RustDesk`、`SOS` 这类名称保持原样。
 * 不要改这些固定配置：固定密码 `asd123asd`，ID 服务器 `rd.yan.life`，API `https://rdapi.yan.life`，公钥 `WAVL+YUYZ6EXOqLCGZEq56VD2LalZc121gtVeXxpp78=`。standard 和 SOS 都同时启用固定密码和一次性密码，并默认打开全部远程权限。
-* Management Agent 属于本私人项目的远程维护通道。客户端默认声明并启用已实现的全部 agent 运维能力，包含状态上报、固定 RustDesk 服务检查/启动/重启/修复、恢复协调、固定对象校验、脱敏诊断和固定 API/下载/ID 网络探测；后续已实现的批准包修复、主程序升级和 agent 升级能力也默认纳入能力清单。API 绑定默认授予全部 agent 运维权限，不默认降级为仅观测；权限变更、实例绑定、命令、事务和事件必须保留审计。任何能力仍只能作用于固定 RustDesk 对象、批准且签名的发布包和固定域名，禁止任意脚本、任意路径、任意端口扫描、任意进程或任意环境变量执行。本地 `disable-recovery`、`disable-agent`、维护状态、用户明确停止意图、安装互斥、签名/哈希/身份校验和回滚门禁优先于远程命令，远程权限不得绕过这些本地约束。
+* Management Agent 属于本私人项目的远程维护通道。客户端默认声明并启用已实现的全部 agent 运维能力，包含状态上报、固定 RustDesk 服务检查/启动/重启/修复、恢复协调、固定对象校验、脱敏诊断和固定 API/下载/ID 网络探测；后续已实现的批准包修复、主程序升级和 agent 升级能力也默认纳入能力清单。API 绑定默认授予全部 agent 运维权限，不默认降级为仅观测；权限变更、实例绑定、命令、事务和事件必须保留审计。任何能力仍只能作用于固定 RustDesk 对象、批准且签名的发布包和固定域名，禁止任意脚本、任意路径、任意端口扫描、任意进程或任意环境变量执行。系统级授权例外有两处：SYSTEM 终端（见下文「SYSTEM 终端授权例外」一节）与本机 UAC 策略。UAC 策略（用户 2026-10-27 确认）：只允许 `system.query_uac` 读取、`system.disable_uac` 把 `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` 下 `EnableLUA`、`ConsentPromptBehaviorAdmin`、`PromptOnSecureDesktop`、`FilterAdministratorToken` 四个固定值写成 0，不得写其他注册表、不得恢复或重新打开 UAC、不得自动重启；写入同样受下面的本地门禁约束，被门禁拒绝时上报 `local_gate_refused`。本地 `disable-recovery`、`disable-agent`、维护状态、用户明确停止意图、安装互斥、签名/哈希/身份校验和回滚门禁优先于远程命令，远程权限不得绕过这些本地约束。
 * OSS 发布采用分离链路：GitHub Actions 上传必须使用 `oss-accelerate.aliyuncs.com`；客户端 `DOWNLOAD_BASE` 固定为 `https://download.yan.life`，其 CNAME 指向 `rustdesk-release.oss-cn-shanghai.aliyuncs.com`，不要因上传加速而改动客户端下载域名。
 * Android 发布必须始终使用固定长期签名证书。证书 SHA-256 指纹为 `71:11:D7:30:EC:A2:C7:98:47:41:53:04:59:DD:38:97:20:16:2F:7B:FE:B7:39:FA:96:8F:2E:D7:4E:6F:0B:D8`，GitHub Actions 使用 `ANDROID_SIGNING_KEY`、`ANDROID_ALIAS`、`ANDROID_KEY_STORE_PASSWORD`、`ANDROID_KEY_PASSWORD`。缺少任一签名配置时必须终止 Android 发布，禁止把 debug 或 unsigned APK 上传到 Release 或 OSS。不得更换证书；确需更换时必须先得到明确确认并制定已安装客户端迁移方案。
 * Android 永久只发布 standard APK，不存在 Android SOS 发布目标。Android 必须安装后使用；禁止构建、上传、写入 Release/OSS manifest 或恢复 `android-aarch64-apk-sos`。macOS 的 standard 与 SOS DMG 发布保持不变。
@@ -41,6 +41,18 @@
   * 正式证书构建继续使用 `.github/scripts/sign-macos-app.sh` 原有 `sign_args`，仅真实 identity 添加 `--options runtime --timestamp`，保持现有 entitlements、DMG 签名和公证流程；
   * 禁止增加 `--requirements`、designated requirement 校验、`PlistBuddy` 依赖或其他会改变现有应用签名身份和可运行性的参数；
   * 修改 macOS 签名相关 workflow 或脚本时，必须通过 `tests/test_macos_signing.py` 回归测试，并与上述成功 run 对应提交的签名命令逐项核对。
+
+## SYSTEM 终端授权例外（2026-10-27 用户决定）
+
+- SYSTEM 终端是 Management Agent「禁止任意脚本、任意路径、任意进程控制」的唯一授权例外：管理员可以在设备上以 SYSTEM 身份打开 PowerShell / pwsh / cmd 交互会话并执行任意命令、使用任意工作目录。协议以本仓库 `docs/terminal-protocol.zh.md` 为准，三方不得单方面修改字段。
+- 例外只适用于独立的终端 WebSocket 通道（浏览器 `/{admin_path}/api/terminal/ws`、设备 `/rd/update/v1/agent/terminal/ws`）。`/rd/update/v1/agent/commands` 命令通道及其它所有 Management Agent 命令仍然禁止任意执行，不得借终端通道扩大命令通道的能力。
+- 浏览器侧必须同时满足：全局管理员（`address_book_scope=all`）有效会话、CSRF 校验、同源请求。会话只属于创建它的管理员，其他管理员不得读写或附着。
+- 设备侧必须同时满足：设备签名与 nonce 防重放、`installation_id` 与 `generation` 绑定、Agent 在 status `capabilities` 中声明 `system.terminal@1`。未声明能力的设备不显示终端入口。
+- 本地门禁优先：`disable-agent`、维护状态、用户主动停止意图任一存在时拒绝 `open` 与 `input`，只允许 `attach` 和 `close` 以便清理已有会话。
+- 上限与超时：单管理员最多 8 个会话、单设备最多 4 个；空闲 30 分钟、最长存活 24 小时、握手 10 秒、单条消息 256 KB。终端会话不受命令 `timeout_seconds` 约束。
+- 审计写入 `agent_operations_audit`，只记录会话创建（管理员、设备、shell、行列数）、结束（原因、时长）和门禁拒绝；不得把终端输入或输出内容写入审计表、请求日志或任何持久化存储。
+- 终端 IO 由异步 broker 承载，PHP-FPM 只做短鉴权与审计写入，不得为终端会话持有 worker；broker 不直接访问 SQLite。终端连接不得挤占客户端更新策略流为签名设备保留的容量。
+- 客户端（Agent）侧补充，不改以上含义：终端命令与 PTY/会话逻辑放在 `src/management_agent/terminal/`，命令通道与门禁判定复用现有 `operations*` 的本地门禁入口（与 `system.disable_uac` 同一套 `disable-recovery`/`disable-agent`/维护/停止意图判定），命令层只做薄挂钩；会话输出缓冲只保留在 Agent 本机内存，会话结束即删，不落盘、不写日志。
 
 ## 构建修复约束
 
@@ -58,6 +70,13 @@
 * **Flutter**：`D:\build-env\flutter-3.24.5\bin\flutter.bat`（`FLUTTER_ROOT`）。GitHub CI 用 3.24.5 且需 `flutter_3.24.4_dropdown_menu_enableFilter.diff` 补丁与 rustdesk 自定义 engine，本地 UI 打包需照 `.github/workflows/flutter-build.yml` 的 windows job 处理。
 * **清理 target 时**：`target\debug` 若被上一次失败构建污染，必须彻底删干净（长路径用 `robocopy <空目录> <target\debug> /MIR` 再 `Remove-Item`），且在构建进程全部退出（`taskkill /f /im rustc.exe`、`cargo.exe`）后再删；脏的 proc-macro2 产物会导致 `syn` 报 `proc_macro2::extra::DelimSpan` 未解析。
 * **长任务**：SSH 非交互，脱离进程用 `schtasks /run` 跑 `.bat`/`.ps1`（普通进程写入日志会因 SSH 会话结束而中断）。中文输出经 SSH 会乱码，用 base64 传递输出。
+* **测试目录（2026-10-27 起）**：测试脚本、日志、备份、安装包和测试用 cargo 目标目录统一放 `D:\tmp\rdtest\<用途>\`，不要再在 D 盘根目录建目录。原 `D:\gate-src`、`D:\gate-target`、`D:\gate-logs`、`D:\verify` 等已迁到 `D:\tmp\rdtest\` 下同名目录，旧脚本里的这些路径要改成新位置（含 `RUSTDESK_LOCAL_EVENTS_ROOT`）。计划任务用完即删，`/sc once` 建的任务即使已经手动运行过，到点仍会再触发一次。
+* **PHP/HTTP 夹具测试环境**：这些变量只在测试脚本里临时 `set`，不写进机器级环境变量；不设时 `delivery_contract`、`signed_rust_command_roundtrip_*` 等用例会以「frozen API required」或「program not found」失败，不代表代码问题。
+  * `AGENT_TEST_PHP=D:\build-env\php\php.exe`
+  * `AGENT_TEST_PHP_INI=D:\build-env\php\php-test.ini`（已启用 pdo_sqlite、sqlite3、sodium、openssl、mbstring）
+  * `AGENT_TEST_API_ROOT=D:\github\rd-api`（冻结的后端副本，不要随意更新）
+* **破坏性实验室用例**：`RUSTDESK_LAB_HOST=YAN`（即本机 `COMPUTERNAME`）只在明确要跑的那几个测试套件前临时设置，跑完立即清空；不得设成机器级变量，也不得带着它跑整个 `cargo test`。这些用例会停止、删除 RustDesk 服务和清空安装目录，执行前按上面「Windows 真机测试」的备份、看门狗和恢复要求处理。未设置时这些用例以 `RUSTDESK_LAB_HOST must name this machine` 失败，属于预期。
+* **以 SYSTEM 运行计划任务时的缓存路径**：SYSTEM 的用户目录与 Administrator 不同，构建脚本里要显式指定 `PUB_CACHE=C:\Users\Administrator\AppData\Local\Pub\Cache` 和 `NUGET_PACKAGES=C:\Users\Administrator\.nuget\packages`。后者是必须的：`C:\RustDeskBuildTools\MSBuild\Current\Bin\MSBuild.exe` 是 32 位程序，访问 `C:\Windows\system32\config\systemprofile` 下的 nuget 缓存会被重定向到 SysWOW64，WiX 扩展被静默跳过，报 `WIX0200 ... WixUI`。pub 缓存若出现空的包目录（2026-10-21 有 16 个 Windows 插件包被清空过），`flutter analyze` 会报大量 `uri_does_not_exist`，删掉空目录后重新 `flutter pub get` 即可。
 * **代码同步（重要）**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master`，但 **win10-gs 上 `git pull` 不可用**：SSH 是非交互会话，Git 凭据管理器（wincredman）无法持久化，拉取会报 `could not read Username for 'https://github.com'`。正确做法是 **用 `termark upload` 把改动的源文件逐个覆盖到 `D:\github\rd-client` 对应路径，然后直接编译**。上传后 win10-gs 工作树相对其 HEAD 会显示为已修改，这是预期状态，不要试图在远端修复。推 master 不触发构建，只有打 tag 才触发 Flutter Tag Build。
 
 ## 测试与验收约束
