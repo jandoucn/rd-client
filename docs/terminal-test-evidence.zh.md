@@ -184,3 +184,45 @@ scripts/win10-gs/run-build.sh debug 'terminal::'
 curl -sS -o /dev/null -w '%{http_code}\n' https://rdapi.yan.life/yanolly/login
 curl -sS -o /dev/null -w '%{http_code}\n' https://rdapi.yan.life/yanolly/terminal
 ```
+
+
+---
+
+## 审计核对（2026-10-28 06:50）
+
+交叉核对人：api 会话。对照台账条目 ↔ 源码测试名 ↔ 文档证据 ↔ 现跑矩阵。
+
+### 结论摘要
+
+| 范围 | 结论 |
+|---|---|
+| 台账 v1 必做项（T1–T4、V1–V6、G1–G6，不含已否决 T5、已延期 T1.6/T1.7/V3） | **有对应测试名与文档证据，可视为交付完成** |
+| 现跑复核（本审计时刻） | Go broker OK；`terminal_*` Python 19 OK；Mac `terminal::` 66 OK；生产仍 0.1.56 |
+| 证据固化 | `docs/evidence/terminal-v{2,4,5}-out.txt` + evidence/record/usage/protocol **已在 git** |
+| 未闭合 | G7 AOCI；G8 半成品保留；G3 仓库级 Python 全量以 CI 为准未本机重跑；T4.2 无颜色/光标/清屏专项；V5 marker 回放在 last_seq 近顶端时可能无可补帧 |
+
+### 台账状态计数（审计时）
+
+- ✅ 完成：约 38（含 G3 诚实改写后仍算完成）
+- ⏭️ 明确延期 v2：T1.6、T1.7、V3
+- ⛔ 用户否决：T5.1、T5.2
+- ⚠️ 已知限制：G7、G8
+
+### 点名测试存在性抽查
+
+rd-api Go：`TestTerminalBrowserHandshakeRequiresSessionCSRFAndSameOrigin` 等 9 名 **均在** `stream-broker/terminal_test.go`。  
+rd-client：`fullscreen_tui_survives_large_resize_and_redraws`、`session_limit_rejects_fifth_but_not_fourth`、`each_gate_refuses_open*` 等 **均在** `src/management_agent/terminal/`。  
+Playwright：`tests/e2e/terminal.spec.py` 5 个 `test_*` 均在。
+
+### 证据文件
+
+| 文件 | git | 说明 |
+|---|---|---|
+| `docs/terminal-tdd-ledger.zh.md` | 是 | 唯一执行台账 |
+| `docs/terminal-test-evidence.zh.md` | 是 | 证据总册 |
+| `docs/terminal-test-record.zh.md` | 是 | 时间线 |
+| `docs/evidence/terminal-v2-out.txt` | 是 | V2 脱敏摘录 |
+| `docs/evidence/terminal-v4-out.txt` | 是 | V4 whoami SYSTEM 摘录 |
+| `docs/evidence/terminal-v5-out.txt` | 是 | V5 attach 后输入摘录 |
+| `rd-api/docs/terminal-security-review.zh.md` | 是 | api 安全审查 |
+| 生产 | 0.1.56 运行中 | `terminal_open` 审计曾写入（元数据 only） |

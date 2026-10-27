@@ -2,7 +2,7 @@
 
 > 本文件是本轮唯一执行台账。用户要求随时可见 TDD 进度：每完成一项立即改状态并写证据，不写「应该通过」。
 > 状态：⬜ 未开始 · 🟨 进行中 · ✅ 完成 · ⛔ 阻塞 · ⚠️ 已知限制
-> 最后更新：2026-10-28 06:35（测试记录/证据总册/时间线/脱敏摘录/文档索引已固化）
+> 最后更新：2026-10-28 06:50（审计：台账与代码/证据/现跑矩阵交叉核对；G3 去掉「全量」夸大）
 >
 > ✅ 治理已放行（用户 2026-10-27 确认）：「SYSTEM 终端授权例外」已写入 rd-client 与 rd-api 两个 AGENTS.md。T2 按协议走独立 WS（不接命令通道），见 overnight-notes 特殊情况 1。契约《实现澄清补丁 v1》见 `docs/terminal-protocol.zh.md` §10。
 >
@@ -86,7 +86,7 @@
 | # | 条目 | 层 | 状态 |
 |---|---|---|---|
 | T4.1 | 独立「终端」菜单，列出设备与已有会话，可新建 | E2E | ✅ `terminal.spec.py`：菜单可见、设备选择、打开标签；刷新后 detached 列表可「继续」 |
-| T4.2 | xterm.js 渲染：颜色、光标、清屏、全屏 TUI 正常 | E2E | ✅ 基础渲染与提示符/输出写入已覆盖；全屏 TUI 真机见 V2 |
+| T4.2 | xterm.js 渲染：颜色、光标、清屏、全屏 TUI 正常 | E2E | ✅ 基础渲染与提示符/输出写入已覆盖（E2E）；全屏 TUI/resize 真机见 V2。⚠️ **未单独做颜色/光标/清屏专项断言**，依赖 xterm 默认行为 + 输出可见 |
 | T4.3 | 键盘输入、复制粘贴、Ctrl+C 中断正常 | E2E | ✅ `test_open_type_interrupt_and_end_session`：whoami、粘贴 Get-Process、键盘 Ctrl+C + 按钮各一次 |
 | T4.4 | 窗口尺寸变化同步行列，不错位 | E2E | ✅ `test_reconnect_restores_missed_output_and_resize_syncs` 改 viewport 后 Agent 收到 resize |
 | T4.5 | 断线自动重连，重连后补齐断线期间输出 | E2E | ✅ 只掐浏览器 WS：状态「重连」→「已连接」，补齐 `while-away-output` |
@@ -118,7 +118,7 @@
 |---|---|---|
 | G1 | Mac：相关模块单元测试全通过 | ✅ `cargo test --bin rustdesk-management-agent -- terminal::` 66 passed |
 | G2 | win10-gs：`cargo test --locked` 相关目标通过、clippy 无新增 | ✅ build exit0；`terminal::` **71 passed**；现网 agent `3e588920…`（含 terminal 字符串），服务 Running；clippy 仅旧告警 |
-| G3 | 后端：PHP 单测 + Python 全量 + 前端 typecheck/lint/build | ✅ 终端相关 + CI test/publish 0.1.56 全绿；生产已升 |
+| G3 | 后端：PHP 单测 + Python 全量 + 前端 typecheck/lint/build | ✅ **终端相关子集**已绿（Go/Python terminal_* 19 + channel 12 + typecheck + Playwright 5/5）；CI test/publish 0.1.56 绿并生产已升。⚠️ **未在本轮单独重跑仓库级 Python 全量 575**，以 CI test job 为准 |
 | G4 | E2E：阶段四、五全部通过（桌面 + 390px） | ✅ 阶段四 `terminal.spec.py` 5/5；阶段五已否决 |
 | G5 | 文档：终端使用说明 + 安全边界说明 | ✅ usage + protocol + 台账 + evidence 总册 + test-record + evidence/ 摘录 + client 安全笔记 |
 | G6 | 代码审查：code-reviewer + security-reviewer | ✅ api：`rd-api/docs/terminal-security-review.zh.md`；client：`docs/terminal-client-security-notes.zh.md`（0 CRITICAL/HIGH） |
