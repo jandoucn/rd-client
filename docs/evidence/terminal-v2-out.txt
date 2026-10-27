@@ -1,0 +1,4 @@
+ PS C:\Windows\system32\config\systemprofile>  PPS C:\Windows\system32\config\systemprofile>
+PP$ > $s=$Host.UI.RawUI.WindowSize; Write-Output ("V2_COLS="+$s.Width+" V2_ROWS="+$s. > $s=$Host.UI.RawUI.WindowSize; Write-Output ("V2_COLS="+$s.Width+" V2_ROWS="+$s.Height) 
+V2_COLS=140 V2_ROWS=45
+PS C:\Windows\system32\config\systemprofile>  

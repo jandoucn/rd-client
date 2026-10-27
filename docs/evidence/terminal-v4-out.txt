@@ -1,0 +1,15 @@
+ PS C:\Windows\system32\config\systemprofile>  PPwhoami 
+PS C:\Windows\system32\config\systemprofile> whoami
+nt authority\system PS C:\Windows\system32\config\systemprofile> whoami
+nt authority\system
+PS C:\Windows\system32\config\systemprofile> [System.Security.Principal.WindowsIdentity]::GetCurrent
+NT AUTHORITY\SYSTEM 
+PS C:\Windows\system32\config\systemprofile> Write-Output '__V4_OK__' 
+__V4_OK__
+PS C:\Windows\system32\config\systemprofile>PS C:\Windows\system32\config\systemprofile> whoami
+nt authority\system
+PS C:\Windows\system32\config\systemprofile> [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+NT AUTHORITY\SYSTEM
+PS C:\Windows\system32\config\systemprofile> Write-Output '__V4_OK__'
+__V4_OK__
+PS C:\Windows\system32\config\systemprofile>

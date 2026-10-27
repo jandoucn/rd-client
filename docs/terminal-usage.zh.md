@@ -70,15 +70,15 @@
 
 ### 5.1 授权例外
 
-Management Agent 默认禁止「任意脚本 / 任意路径 / 任意进程」。  
-**SYSTEM 终端是唯一授权例外**：管理员可在已授权设备上交互执行任意命令、使用任意工作目录。
+Management Agent 默认禁止「未批准脚本 / 任意路径 / 任意进程」。  
+**SYSTEM 终端是唯一授权例外**：管理员可在已授权设备上交互执行会话内交互命令、使用任意工作目录。
 
 例外**只**存在于：
 
 - 浏览器 `/{admin}/api/terminal/ws`
 - 设备 `/rd/update/v1/agent/terminal/ws`
 
-`/rd/update/v1/agent/commands` 及其它 Agent 命令**仍然禁止**任意执行，不得借终端通道扩大命令通道能力。
+`/rd/update/v1/agent/commands` 及其它 Agent 命令**仍然禁止**未列入能力清单的执行，不得借终端通道扩大命令通道能力。
 
 ### 5.2 本地门禁优先
 

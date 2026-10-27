@@ -2,7 +2,7 @@
 
 > 本文件是本轮唯一执行台账。用户要求随时可见 TDD 进度：每完成一项立即改状态并写证据，不写「应该通过」。
 > 状态：⬜ 未开始 · 🟨 进行中 · ✅ 完成 · ⛔ 阻塞 · ⚠️ 已知限制
-> 最后更新：2026-10-28 06:30（证据总册/时间线已固化；V2/V4/V5/V6 生产绿；G7 AOCI 待 MCP）
+> 最后更新：2026-10-28 06:35（测试记录/证据总册/时间线/脱敏摘录/文档索引已固化）
 >
 > ✅ 治理已放行（用户 2026-10-27 确认）：「SYSTEM 终端授权例外」已写入 rd-client 与 rd-api 两个 AGENTS.md。T2 按协议走独立 WS（不接命令通道），见 overnight-notes 特殊情况 1。契约《实现澄清补丁 v1》见 `docs/terminal-protocol.zh.md` §10。
 >
@@ -12,7 +12,7 @@
 >
 > win10-gs 可复用脚本：`scripts/win10-gs/`（`sync-sources.sh` / `run-build.sh` / `build-agent.ps1` / `replace-agent.ps1` / `run-terminal-tests.ps1`）。
 >
-> 证据总册：`docs/terminal-test-evidence.zh.md`。时间线：`docs/terminal-test-record.zh.md`。脱敏摘录：`docs/evidence/terminal-v*.txt`。
+> 文档索引：`docs/terminal-docs-index.zh.md`。证据总册：`docs/terminal-test-evidence.zh.md`。时间线：`docs/terminal-test-record.zh.md`。脱敏摘录：`docs/evidence/terminal-v*.txt`。
 
 ## 0. 已确认的方案（用户 2026-10-27 拍板）
 
@@ -120,8 +120,8 @@
 | G2 | win10-gs：`cargo test --locked` 相关目标通过、clippy 无新增 | ✅ build exit0；`terminal::` **71 passed**；现网 agent `3e588920…`（含 terminal 字符串），服务 Running；clippy 仅旧告警 |
 | G3 | 后端：PHP 单测 + Python 全量 + 前端 typecheck/lint/build | ✅ 终端相关 + CI test/publish 0.1.56 全绿；生产已升 |
 | G4 | E2E：阶段四、五全部通过（桌面 + 390px） | ✅ 阶段四 `terminal.spec.py` 5/5；阶段五已否决 |
-| G5 | 文档：终端使用说明 + 安全边界说明 | ✅ `docs/terminal-usage.zh.md`（与 rd-api 同步）；协议/台账/overnight 已有 |
-| G6 | 代码审查：code-reviewer + security-reviewer | ✅ rd-api：`docs/terminal-security-review.zh.md`（0 CRITICAL/HIGH；M1/nginx 已修；M2 接受 follow-up） |
+| G5 | 文档：终端使用说明 + 安全边界说明 | ✅ usage + protocol + 台账 + evidence 总册 + test-record + evidence/ 摘录 + client 安全笔记 |
+| G6 | 代码审查：code-reviewer + security-reviewer | ✅ api：`rd-api/docs/terminal-security-review.zh.md`；client：`docs/terminal-client-security-notes.zh.md`（0 CRITICAL/HIGH） |
 | G7 | AOCI 对齐 | ⚠️ 本会话 aoci MCP handshake 失败（connection closed）；业务与台账已稳，AOCI 待 MCP 恢复后补一次 maintain |
 | G8 | 清理：删掉未完成的 `script_run.rs` 或明确保留 | ⚠️ 本轮**保留**不删（作业式半成品，收尾另定；不声明能力） |
 
