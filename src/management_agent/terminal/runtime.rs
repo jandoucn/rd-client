@@ -110,6 +110,20 @@ fn connect(
         TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|e| e.to_string())?
     };
     let _ = tcp.set_nodelay(true);
+    upgrade(request, tcp, CONNECT_TIMEOUT)
+}
+
+/// 在已连上的 TCP 上完成 TLS 与 WS 握手。握手期间读写都设超时：服务端接了连接却不回包时
+/// 报错并走重连，而不是让终端线程永久阻塞；握手后读超时改为轮询间隔、写恢复为阻塞。
+fn upgrade(
+    request: tungstenite::handshake::client::Request,
+    tcp: TcpStream,
+    timeout: Duration,
+) -> Result<Socket, String> {
+    tcp.set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
     let config = WebSocketConfig::default().max_message_size(Some(MAX_FRAME_BYTES));
     let (socket, response) =
         tungstenite::client_tls_with_config(request, tcp, Some(config), None)
@@ -117,12 +131,17 @@ fn connect(
     if response.status().as_u16() != 101 {
         return Err(format!("terminal ws upgrade status {}", response.status()));
     }
-    match socket.get_ref() {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(POLL_SLICE)),
-        MaybeTlsStream::NativeTls(stream) => stream.get_ref().set_read_timeout(Some(POLL_SLICE)),
-        _ => Ok(()),
+    let stream = match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => Some(stream),
+        MaybeTlsStream::NativeTls(stream) => Some(stream.get_ref()),
+        _ => None,
+    };
+    if let Some(stream) = stream {
+        stream
+            .set_read_timeout(Some(POLL_SLICE))
+            .and_then(|()| stream.set_write_timeout(None))
+            .map_err(|e| e.to_string())?;
     }
-    .map_err(|e| e.to_string())?;
     Ok(socket)
 }
 
@@ -151,11 +170,19 @@ fn pump(
     cursors: &mut Cursors,
     audit: &mut dyn FnMut(AuditEvent),
 ) -> Result<(), String> {
+    let settled = manager.settle_exited();
     let ids: Vec<String> = cursors.0.keys().cloned().collect();
     for id in ids {
         let last = cursors.0.get(&id).copied().unwrap_or(0);
-        let chunks = match manager.read(&id, last, transport::MAX_OUTPUT_CHUNK_BYTES * 8) {
-            Ok(chunks) => chunks,
+        let budget = transport::MAX_OUTPUT_CHUNK_BYTES * 8;
+        let read = |from| manager.read(&id, from, budget);
+        let pushed = if settled.contains(&id) {
+            transport::drain_all(last, read)
+        } else {
+            transport::next_push(last, read)
+        };
+        let batch = match pushed {
+            Ok(batch) => batch,
             Err(TerminalError::NotFound) => {
                 cursors.forget(&id);
                 continue;
@@ -165,23 +192,28 @@ fn pump(
                 continue;
             }
         };
-        for frame in transport::output_frames(&id, &chunks) {
+        if let Some(gap) = &batch.gap {
+            send(socket, &protocol::error(0, Some(&id), gap))?;
+        }
+        for frame in transport::output_frames(&id, &batch.chunks) {
             send(socket, &frame)?;
         }
-        if let Some(chunk) = chunks.last() {
-            cursors.0.insert(id.clone(), chunk.seq);
-        }
+        cursors.0.insert(id.clone(), batch.cursor);
     }
     for (id, code, event) in manager.drain_exited() {
         let last = cursors.0.get(&id).copied().unwrap_or(0);
-        send(socket, &protocol::exited(last + 2, &id, code, 0))?;
-        send(socket, &protocol::closed(0, &id, super::CloseReason::User))?;
+        for frame in transport::exit_frames(&id, last, code, &event) {
+            send(socket, &frame)?;
+        }
         cursors.forget(&id);
         audit(event);
     }
     for event in manager.reap_expired(Instant::now()) {
-        if let AuditEvent::SessionClosed { session_id, .. } = &event {
-            send(socket, &protocol::closed(0, session_id, super::CloseReason::Idle))?;
+        if let AuditEvent::SessionClosed {
+            session_id, reason, ..
+        } = &event
+        {
+            send(socket, &protocol::closed(0, session_id, *reason))?;
             cursors.forget(session_id);
         }
         audit(event);
@@ -342,5 +374,35 @@ pub fn run(paths: AgentPaths, stop: Arc<AtomicBool>) {
         while Instant::now() < until && !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn upgrade_gives_up_when_server_accepts_but_never_answers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(stream);
+        });
+        let request = format!("ws://{address}{}", transport::AGENT_WS_PATH)
+            .into_client_request()
+            .unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        let result = upgrade(request, tcp, Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "handshake blocked for {elapsed:?}"
+        );
+        server.join().unwrap();
     }
 }

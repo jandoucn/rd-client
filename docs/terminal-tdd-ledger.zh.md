@@ -2,7 +2,7 @@
 
 > 本文件是本轮唯一执行台账。用户要求随时可见 TDD 进度：每完成一项立即改状态并写证据，不写「应该通过」。
 > 状态：⬜ 未开始 · 🟨 进行中 · ✅ 完成 · ⛔ 阻塞 · ⚠️ 已知限制
-> 最后更新：2026-10-28 06:50（审计：台账与代码/证据/现跑矩阵交叉核对；G3 去掉「全量」夸大）
+> 最后更新：2026-10-28 08:40（审查修复：客户端尾部输出丢失、握手超时、到期原因与时长，见 §6）
 >
 > ✅ 治理已放行（用户 2026-10-27 确认）：「SYSTEM 终端授权例外」已写入 rd-client 与 rd-api 两个 AGENTS.md。T2 按协议走独立 WS（不接命令通道），见 overnight-notes 特殊情况 1。契约《实现澄清补丁 v1》见 `docs/terminal-protocol.zh.md` §10。
 >
@@ -134,3 +134,32 @@
 | WS 在现有 broker 上难接入 | 退路：WS 单独起一个 broker 进程，鉴权复用现有会话校验 |
 | helper 进程被第三方利用 | 只允许 Agent 拉起、只绑定本机固定管道、进程身份校验 |
 | 900 秒命令超时杀掉长会话 | 终端会话不走命令超时，改为独立的空闲超时 |
+
+## 6. 2026-10-28 审查修复（客户端 Agent）
+
+审查发现经代码核对与真机/生产复现后，按用户分工：客户端 `terminal/` 由本会话修复；前端与 broker 后续项交给「Terminal 相关改动审查」会话，**需用户在该会话确认后开工**。
+
+| # | 问题 | 证据（修复前） | 修复 | 状态 |
+|---|---|---|---|---|
+| R1 | shell 自行退出时尾部输出丢失：pump 每轮只读 64KB 就回收会话；conhost 尚未画进管道的最后一段在立即关闭伪控制台时被丢弃 | win10-gs 探针：cmd 输出约 295KB 后立即 `exit`，10 轮丢 1 轮；只加「先收齐再回收」后仍约 1/30 丢失 | `PtySession::finish_output`：先等输出静默 200ms（上限 2s）→ 关伪控制台 → 等读线程读完；`SessionManager::settle_exited` 收尾、`drain_exited` 只回收已收尾会话；`transport::drain_all` 一次推完剩余输出再发 `exited` | ✅ 红：`pump_order_delivers_tail_output_of_exiting_shell`（30 轮）3 次跑 2 次失败；绿：3×30 轮 0 丢失 |
+| R2 | WS 握手无读写超时：服务端接 TCP 不回包时终端线程永久阻塞、不再重连 | 代码核对 | 拆出 `runtime::upgrade`，握手期间 TCP 读写超时 10s，握手后恢复原读超时、写阻塞 | ✅ 红/绿：`upgrade_gives_up_when_server_accepts_but_never_answers`（win10-gs） |
+| R3 | 24h 到期 `closed.reason` 报 `idle` | 代码核对 | `reap_expired` 按 `Expiry` 映射：Idle→idle，MaxLifetime→error | ✅ `reap_reports_max_lifetime_as_error` |
+| R4 | `exited.duration_ms` 恒 0 | 代码核对 | `transport::exit_frames` 取审计事件时长 | ✅ `exit_frames_*` |
+| R5 | `next_push` 畸形缺口（oldest=0 或 ≤ 游标）可 panic/游标后退（另一会话独立审查 L5/L6） | 代码核对 | `oldest.saturating_sub(1).max(last)`，doc 更正 | ✅ `malformed_gap_never_moves_cursor_backwards` |
+| R6 | `drain_all` 后续轮次遇到缺口且重同步为空时丢掉缺口报告（代码审查 L1） | 代码审查 | 缺口与游标在空结果时也合并 | ✅ `drain_all_keeps_a_late_gap_even_when_resync_is_empty` |
+| H1 | 输出积压超过 4MB 环后 pump 永久卡住（另一会话修复 `transport::next_push`） | — | 由「Terminal 相关改动审查」会话完成 | ✅ 该会话 6 条用例 |
+
+测试回执：Mac `terminal::` 83/83；win10-gs `terminal::` 91/91（debug，未替换现网 agent）；Mac clippy 终端文件无告警。⚠️ win10-gs clippy 未能跑完：`rustdesk` lib 既有 16 个 deny 级错误（`src/platform/windows.rs`、`src/privacy_mode/win_virtual_display.rs`），与终端无关；另 `vcvars64.bat` 会把 `VCPKG_ROOT` 覆盖成 C 盘缺头文件的副本，clippy 需在 vcvars 之后重设。
+
+已知限制（代码审查确认，本轮不改）：
+- shell 自行退出时 pump 线程逐个收尾，每个约 200ms、最坏 2s 静默 + 2s 读线程；4 个会话同时退出最坏约 16s，期间其他会话的输入与输出暂停（心跳仍在 60s 判死线内）。
+- 读线程 2s 内未结束时仍按已收尾处理，之后到达的输出会丢。
+- 握手超时按单次读写计算，服务端持续慢速回包时整体握手可超过 10s。
+- 测试盲区：Unix 读端在子进程退出后本就不丢尾部，Mac 测不出 R1；R1、R2 的有效用例只在 Windows 编译运行。`pump_order` 用例复刻 pump 顺序而非调用 `runtime::pump`，pump 内的游标写回与帧发送接线无直接用例；`upgrade` 用例只覆盖明文 `ws://`，未覆盖 TLS 握手超时。
+
+未修（后续项，待用户分配）：
+- broker：outbox 无上限（已绑定设备可撑爆内存）、attach 补发与实时输出竞态（补发被前端去重丢弃）、慢浏览器阻塞同设备全部会话、鉴权只在握手时做一次（另一会话本轮正在修吊销复核与孤儿 shell）。
+- 前端：被「继续」顶替的旧标签仍可盲打（生产复现：输入在设备执行、旧标签看不到输出且仍显示已连接）；输入不分片（生产复现：170KB 粘贴被拒、200KB 无任何提示）；重连中「结束会话」不发送。
+- 脚本：`scripts/win10-gs/run-build.sh` 的 `int(data.get("exitCode") or 1)` 把成功的 0 当成 1，成功也返回 EXIT=1。
+- 工作区未提交的 `system.run` 接入命令通道（operations.rs / operations_runtime.rs）与 AGENTS「命令通道禁止任意执行」冲突，不属终端范围，勿随终端提交。
+

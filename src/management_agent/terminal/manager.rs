@@ -106,6 +106,12 @@ pub trait TerminalSlot: Send {
     fn exit_code(&self) -> Option<u32>;
     fn expiry(&self, policy: &SessionPolicy, now: Instant) -> Option<super::Expiry>;
     fn close(self: Box<Self>) -> Result<Option<u32>, TerminalError>;
+    /// shell 退出后把 PTY 里剩余的输出全部收进缓冲；阻塞、可重复调用。
+    fn finish_output(&self) {}
+    /// `finish_output` 是否已执行过；未执行前已退出的会话不回收，避免丢尾部输出。
+    fn output_settled(&self) -> bool {
+        true
+    }
 }
 
 struct Entry {
@@ -327,6 +333,7 @@ impl SessionManager {
         let exited: Vec<(String, u32)> = self
             .sessions
             .iter()
+            .filter(|(_, entry)| entry.slot.output_settled())
             .filter_map(|(id, entry)| entry.slot.exit_code().map(|code| (id.clone(), code)))
             .collect();
         exited
@@ -342,17 +349,37 @@ impl SessionManager {
             .collect()
     }
 
-    /// 回收空闲/超最长存活的会话，返回各自 SessionClosed(reason=idle)。
+    /// 对已退出的 shell 收齐剩余输出，返回这些会话号。调用方应先把它们的输出全部推完，
+    /// 再调用 [`Self::drain_exited`] 回收。
+    pub fn settle_exited(&self) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, entry)| entry.slot.exit_code().is_some())
+            .map(|(id, entry)| {
+                entry.slot.finish_output();
+                id.clone()
+            })
+            .collect()
+    }
+
+    /// 回收空闲/超最长存活的会话：空闲为 reason=idle，到达最长存活为 reason=error（协议 §7）。
     pub fn reap_expired(&mut self, now: Instant) -> Vec<AuditEvent> {
-        let expired: Vec<String> = self
+        let expired: Vec<(String, CloseReason)> = self
             .sessions
             .iter()
-            .filter(|(_, entry)| entry.slot.expiry(&self.policy, now).is_some())
-            .map(|(id, _)| id.clone())
+            .filter_map(|(id, entry)| {
+                entry.slot.expiry(&self.policy, now).map(|expiry| {
+                    let reason = match expiry {
+                        super::Expiry::Idle => CloseReason::Idle,
+                        super::Expiry::MaxLifetime => CloseReason::Error,
+                    };
+                    (id.clone(), reason)
+                })
+            })
             .collect();
         expired
             .into_iter()
-            .filter_map(|id| self.remove(&id, CloseReason::Idle).ok())
+            .filter_map(|(id, reason)| self.remove(&id, reason).ok())
             .collect()
     }
 
@@ -394,6 +421,9 @@ mod tests {
         exit: AtomicU32,
         exited: AtomicBool,
         expired: AtomicBool,
+        lifetime: AtomicBool,
+        unsettled: AtomicBool,
+        finished: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         writes: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     }
@@ -432,9 +462,18 @@ mod tests {
                 .then(|| self.exit.load(Ordering::SeqCst))
         }
         fn expiry(&self, _policy: &SessionPolicy, _now: Instant) -> Option<super::super::Expiry> {
+            if self.lifetime.load(Ordering::SeqCst) {
+                return Some(super::super::Expiry::MaxLifetime);
+            }
             self.expired
                 .load(Ordering::SeqCst)
                 .then_some(super::super::Expiry::Idle)
+        }
+        fn finish_output(&self) {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+        fn output_settled(&self) -> bool {
+            !self.unsettled.load(Ordering::SeqCst) || self.finished.load(Ordering::SeqCst)
         }
         fn close(self: Box<Self>) -> Result<Option<u32>, TerminalError> {
             self.closed.store(true, Ordering::SeqCst);
@@ -712,6 +751,62 @@ mod tests {
         assert!(closed.load(Ordering::SeqCst));
         assert_eq!(manager.len(), 1);
         assert!(manager.contains(&sid(2)));
+    }
+
+    #[test]
+    fn exited_session_is_not_drained_before_its_output_settles() {
+        let mut manager = SessionManager::default();
+        let request = req(&sid(1));
+        manager.admit_open(&request, GateState::default()).unwrap();
+        let (slot, closed) = FakeSlot::handle();
+        slot.exited.store(true, Ordering::SeqCst);
+        slot.unsettled.store(true, Ordering::SeqCst);
+        let finished = slot.finished.clone();
+        manager.register(request, slot);
+        assert!(manager.drain_exited().is_empty(), "输出未收齐前不能回收");
+        assert!(manager.contains(&sid(1)));
+        assert!(!closed.load(Ordering::SeqCst));
+        assert_eq!(manager.settle_exited(), vec![sid(1)]);
+        assert!(finished.load(Ordering::SeqCst));
+        assert_eq!(manager.drain_exited().len(), 1);
+        assert!(manager.is_empty());
+    }
+
+    #[test]
+    fn settle_exited_skips_running_sessions() {
+        let mut manager = SessionManager::default();
+        let request = req(&sid(1));
+        manager.admit_open(&request, GateState::default()).unwrap();
+        let (slot, _closed) = FakeSlot::handle();
+        slot.unsettled.store(true, Ordering::SeqCst);
+        let finished = slot.finished.clone();
+        manager.register(request, slot);
+        assert!(manager.settle_exited().is_empty());
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "仍在运行的会话不能关伪控制台"
+        );
+        assert!(manager.drain_exited().is_empty());
+    }
+
+    #[test]
+    fn reap_reports_max_lifetime_as_error() {
+        let mut manager = SessionManager::default();
+        let request = req(&sid(1));
+        manager.admit_open(&request, GateState::default()).unwrap();
+        let (slot, closed) = FakeSlot::handle();
+        slot.lifetime.store(true, Ordering::SeqCst);
+        manager.register(request, slot);
+        let reaped = manager.reap_expired(Instant::now());
+        assert_eq!(reaped.len(), 1);
+        assert!(matches!(
+            reaped[0],
+            AuditEvent::SessionClosed {
+                reason: CloseReason::Error,
+                ..
+            }
+        ));
+        assert!(closed.load(Ordering::SeqCst));
     }
 
     #[test]

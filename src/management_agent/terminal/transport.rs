@@ -206,6 +206,81 @@ pub fn output_frames(session_id: &str, chunks: &[super::OutputChunk]) -> Vec<Val
         .collect()
 }
 
+/// 一轮推送要发出的输出，以及推送后的读游标。
+#[derive(Debug, PartialEq, Eq)]
+pub struct PushBatch {
+    pub chunks: Vec<super::OutputChunk>,
+    /// 游标落在环形缓冲已丢弃的范围时，本轮要向服务端报告一次的缺口。
+    pub gap: Option<TerminalError>,
+    pub cursor: u64,
+}
+
+/// 读取游标 `last` 之后要推送的输出。
+///
+/// 输出产生得比推送快时，环形缓冲会把游标甩开。此时不能停在原地反复报缺口
+/// （会话会永久收不到输出），而是从最旧的保留块重新同步，并只报告这一次缺口。
+/// 重同步那一刻环又被甩开时，本轮不推输出，游标停在第一次缺口的最旧保留块之前，下一轮再续。
+/// 游标绝不后退。
+pub fn next_push(
+    last: u64,
+    mut read: impl FnMut(u64) -> Result<Vec<super::OutputChunk>, TerminalError>,
+) -> Result<PushBatch, TerminalError> {
+    let (chunks, gap, from) = match read(last) {
+        Ok(chunks) => (chunks, None, last),
+        Err(gap @ TerminalError::GapTooLarge { oldest, .. }) => {
+            let resume = oldest.saturating_sub(1).max(last);
+            match read(resume) {
+                Ok(chunks) => (chunks, Some(gap), resume),
+                Err(TerminalError::GapTooLarge { .. }) => (Vec::new(), Some(gap), resume),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let cursor = chunks.last().map_or(from, |chunk| chunk.seq);
+    Ok(PushBatch {
+        chunks,
+        gap,
+        cursor,
+    })
+}
+
+/// shell 已退出、输出已收齐时，把游标之后的输出一次读完（不受单轮预算限制）。
+/// 缺口只保留第一次的报告。
+pub fn drain_all(
+    last: u64,
+    mut read: impl FnMut(u64) -> Result<Vec<super::OutputChunk>, TerminalError>,
+) -> Result<PushBatch, TerminalError> {
+    let mut drained = next_push(last, &mut read)?;
+    loop {
+        let more = next_push(drained.cursor, &mut read)?;
+        drained.gap = drained.gap.or(more.gap);
+        if more.chunks.is_empty() {
+            drained.cursor = drained.cursor.max(more.cursor);
+            return Ok(drained);
+        }
+        drained.chunks.extend(more.chunks);
+        drained.cursor = more.cursor;
+    }
+}
+
+/// shell 自行退出后的收尾帧：`exited` 接在最后一个已推送块之后，时长取自审计事件。
+pub fn exit_frames(
+    session_id: &str,
+    last_chunk_seq: u64,
+    exit_code: u32,
+    event: &AuditEvent,
+) -> Vec<Value> {
+    let duration_ms = match event {
+        AuditEvent::SessionClosed { duration_ms, .. } => *duration_ms,
+        _ => 0,
+    };
+    vec![
+        protocol::exited(last_chunk_seq + 2, session_id, exit_code, duration_ms),
+        protocol::closed(0, session_id, CloseReason::User),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +699,229 @@ mod tests {
     #[test]
     fn pty_read_buffer_never_exceeds_the_documented_chunk_bound() {
         assert!(crate::management_agent::terminal::READ_BUFFER_BYTES <= MAX_OUTPUT_CHUNK_BYTES);
+    }
+
+    // ---- 推送读取：游标被环形缓冲甩开后的重同步（审查 H1） ----
+
+    fn ring_with(
+        count: usize,
+        size: usize,
+        pushes: usize,
+    ) -> crate::management_agent::terminal::OutputRing {
+        let capacity = count * (size + crate::management_agent::terminal::CHUNK_OVERHEAD);
+        let mut ring = crate::management_agent::terminal::OutputRing::new(capacity);
+        for _ in 0..pushes {
+            ring.push(&vec![b'x'; size]);
+        }
+        ring
+    }
+
+    fn batch_seqs(batch: &PushBatch) -> Vec<u64> {
+        batch.chunks.iter().map(|chunk| chunk.seq).collect()
+    }
+
+    #[test]
+    fn push_without_gap_advances_cursor_to_last_chunk() {
+        let ring = ring_with(4, 4, 3);
+        let batch = next_push(0, |from| ring.since(from, usize::MAX)).unwrap();
+        assert_eq!(batch_seqs(&batch), vec![1, 2, 3]);
+        assert_eq!(batch.gap, None);
+        assert_eq!(batch.cursor, 3);
+    }
+
+    #[test]
+    fn push_with_nothing_new_keeps_cursor() {
+        let ring = ring_with(4, 4, 3);
+        let batch = next_push(3, |from| ring.since(from, usize::MAX)).unwrap();
+        assert!(batch.chunks.is_empty());
+        assert_eq!(batch.gap, None);
+        assert_eq!(batch.cursor, 3);
+    }
+
+    #[test]
+    fn gap_resyncs_from_oldest_and_reports_once() {
+        // 容量 2 块，推 6 块：保留 5、6，游标停在 1
+        let ring = ring_with(2, 4, 6);
+        let batch = next_push(1, |from| ring.since(from, usize::MAX)).unwrap();
+        assert_eq!(
+            batch.gap,
+            Some(TerminalError::GapTooLarge {
+                requested: 1,
+                oldest: 5
+            })
+        );
+        assert_eq!(batch_seqs(&batch), vec![5, 6]);
+        assert_eq!(batch.cursor, 6);
+        let next = next_push(batch.cursor, |from| ring.since(from, usize::MAX)).unwrap();
+        assert_eq!(next.gap, None, "缺口只报一次");
+        assert!(next.chunks.is_empty());
+    }
+
+    #[test]
+    fn sustained_overflow_keeps_delivering_new_output() {
+        // 模拟 pump：每轮最多推 1 块，读线程每轮写入 3 块，环只留 2 块。
+        // 修复前游标一旦落后就永久卡住、不再推送任何输出。
+        let capacity = 2 * (4 + crate::management_agent::terminal::CHUNK_OVERHEAD);
+        let mut ring = crate::management_agent::terminal::OutputRing::new(capacity);
+        let mut cursor = 0;
+        let mut delivered = Vec::new();
+        let mut gaps = 0;
+        for _ in 0..20 {
+            for _ in 0..3 {
+                ring.push(b"abcd");
+            }
+            let batch = next_push(cursor, |from| ring.since(from, 1)).unwrap();
+            if batch.gap.is_some() {
+                gaps += 1;
+            }
+            assert!(batch.cursor >= cursor, "游标不能后退");
+            delivered.extend(batch_seqs(&batch));
+            cursor = batch.cursor;
+        }
+        assert_eq!(delivered.len(), 20, "每轮都有新输出推出");
+        assert!(delivered.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(gaps, 20, "每轮都真实丢了输出，每轮各报一次");
+    }
+
+    #[test]
+    fn repeated_gap_moves_cursor_forward_without_chunks() {
+        // 重同步那一刻环又被甩开：本轮不推输出，但游标前移，下一轮从更新的位置继续
+        let mut calls = 0;
+        let batch = next_push(1, |from| {
+            calls += 1;
+            Err(TerminalError::GapTooLarge {
+                requested: from,
+                oldest: 10 * calls,
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(batch.chunks.is_empty());
+        assert_eq!(batch.cursor, 9);
+        assert_eq!(
+            batch.gap,
+            Some(TerminalError::GapTooLarge {
+                requested: 1,
+                oldest: 10
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_gap_never_moves_cursor_backwards() {
+        for oldest in [0, 3, 5, 6] {
+            let mut calls = 0;
+            let batch = next_push(5, |from| {
+                calls += 1;
+                if calls == 1 {
+                    Err(TerminalError::GapTooLarge {
+                        requested: from,
+                        oldest,
+                    })
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+            .unwrap();
+            assert_eq!(batch.cursor, 5, "oldest={oldest}");
+        }
+    }
+
+    #[test]
+    fn non_gap_read_error_is_returned() {
+        let result = next_push(0, |_| Err(TerminalError::NotFound));
+        assert_eq!(result, Err(TerminalError::NotFound));
+    }
+
+    // ---- shell 退出后的收尾推送 ----
+
+    #[test]
+    fn drain_all_delivers_everything_past_the_round_budget() {
+        let ring = ring_with(16, 4, 10);
+        let batch = drain_all(2, |from| ring.since(from, 4)).unwrap();
+        assert_eq!(batch_seqs(&batch), (3..=10).collect::<Vec<_>>());
+        assert_eq!(batch.cursor, 10);
+        assert_eq!(batch.gap, None);
+    }
+
+    #[test]
+    fn drain_all_reports_gap_once_and_keeps_going() {
+        let ring = ring_with(3, 4, 8);
+        let batch = drain_all(1, |from| ring.since(from, 4)).unwrap();
+        assert_eq!(
+            batch.gap,
+            Some(TerminalError::GapTooLarge {
+                requested: 1,
+                oldest: 6
+            })
+        );
+        assert_eq!(batch_seqs(&batch), vec![6, 7, 8]);
+        assert_eq!(batch.cursor, 8);
+    }
+
+    #[test]
+    fn drain_all_keeps_a_late_gap_even_when_resync_is_empty() {
+        let mut calls = 0;
+        let batch = drain_all(2, |from| {
+            calls += 1;
+            match calls {
+                1 => Ok(vec![OutputChunk {
+                    seq: 3,
+                    data: b"x".to_vec(),
+                }]),
+                2 => Err(TerminalError::GapTooLarge {
+                    requested: from,
+                    oldest: 10,
+                }),
+                _ => Ok(Vec::new()),
+            }
+        })
+        .unwrap();
+        assert_eq!(batch_seqs(&batch), vec![3]);
+        assert_eq!(
+            batch.gap,
+            Some(TerminalError::GapTooLarge {
+                requested: 3,
+                oldest: 10
+            })
+        );
+        assert_eq!(batch.cursor, 9);
+    }
+
+    #[test]
+    fn drain_all_with_nothing_left_keeps_cursor() {
+        let ring = ring_with(4, 4, 3);
+        let batch = drain_all(3, |from| ring.since(from, 4)).unwrap();
+        assert!(batch.chunks.is_empty());
+        assert_eq!(batch.cursor, 3);
+    }
+
+    #[test]
+    fn exit_frames_follow_last_chunk_and_carry_duration() {
+        let event = AuditEvent::SessionClosed {
+            session_id: sid('h'),
+            reason: CloseReason::Error,
+            duration_ms: 4321,
+        };
+        let frames = exit_frames(&sid('h'), 7, 2, &event);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["type"], "exited");
+        assert_eq!(frames[0]["seq"], 9, "最后一块线上序号是 8，exited 接在其后");
+        assert_eq!(frames[0]["exit_code"], 2);
+        assert_eq!(frames[0]["duration_ms"], 4321);
+        assert_eq!(frames[1]["type"], "closed");
+        assert_eq!(frames[1]["seq"], 0);
+        assert_eq!(frames[1]["reason"], "user");
+    }
+
+    #[test]
+    fn exit_frames_without_output_follow_opened() {
+        let event = AuditEvent::SessionClosed {
+            session_id: sid('i'),
+            reason: CloseReason::User,
+            duration_ms: 10,
+        };
+        let frames = exit_frames(&sid('i'), 0, 0, &event);
+        assert_eq!(frames[0]["seq"], 2);
     }
 }

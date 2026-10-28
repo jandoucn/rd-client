@@ -13,6 +13,9 @@ use std::{
 
 pub(crate) const READ_BUFFER_BYTES: usize = 8 * 1024;
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// shell 退出后 conhost 仍可能有没画到输出管道的尾部内容；输出连续静默这么久才关伪控制台。
+const EXIT_OUTPUT_QUIET: Duration = Duration::from_millis(200);
+const EXIT_OUTPUT_QUIET_MAX: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expiry {
@@ -60,6 +63,7 @@ pub struct PtySession {
     #[cfg(windows)]
     job: super::job_windows::KillOnCloseJob,
     closed: bool,
+    output_settled: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -186,6 +190,32 @@ impl PtySession {
             .map(|status| status.exit_code())
     }
 
+    /// shell 退出后收齐 PTY 里剩余的输出：先等输出静默（Windows 上 conhost 异步把屏幕画进
+    /// 输出管道，立刻关伪控制台会丢掉最后一段），再关闭伪控制台让读端得到 EOF，最后等读线程
+    /// 读完。阻塞至多 [`EXIT_OUTPUT_QUIET_MAX`] + [`READER_JOIN_TIMEOUT`]；可重复调用。
+    pub fn finish_output(&self) {
+        if self.output_settled.load(Ordering::SeqCst) {
+            return;
+        }
+        let quiet_deadline = Instant::now() + EXIT_OUTPUT_QUIET_MAX;
+        while lock(&self.last_activity).elapsed() < EXIT_OUTPUT_QUIET
+            && Instant::now() < quiet_deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        lock(&self.writer).take();
+        lock(&self.master).take();
+        let deadline = Instant::now() + READER_JOIN_TIMEOUT;
+        while !self.reader_done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.output_settled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn output_settled(&self) -> bool {
+        self.output_settled.load(Ordering::SeqCst)
+    }
+
     pub fn process_id(&self) -> Option<u32> {
         lock(&self.child).process_id()
     }
@@ -272,6 +302,7 @@ impl Parts {
             #[cfg(windows)]
             job: self.job,
             closed: false,
+            output_settled: AtomicBool::new(false),
         }
     }
 }
@@ -327,5 +358,11 @@ impl super::TerminalSlot for PtySession {
     }
     fn close(self: Box<Self>) -> Result<Option<u32>, TerminalError> {
         (*self).close()
+    }
+    fn finish_output(&self) {
+        PtySession::finish_output(self)
+    }
+    fn output_settled(&self) -> bool {
+        PtySession::output_settled(self)
     }
 }

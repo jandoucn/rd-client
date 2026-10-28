@@ -166,6 +166,20 @@ mod unix {
     }
 
     #[test]
+    fn finish_output_collects_tail_after_exit() {
+        let session = sh();
+        session
+            .write(b"i=0; while [ $i -lt 3000 ]; do echo LINE$i; i=$((i+1)); done; echo TAIL-$((700+77)); exit 0\r")
+            .unwrap();
+        assert_eq!(wait_exit(&session), 0);
+        session.finish_output();
+        session.finish_output();
+        assert!(session.output_settled());
+        assert!(contains(&collected(&session), b"TAIL-777"));
+        assert_eq!(session.close().unwrap(), Some(0));
+    }
+
+    #[test]
     fn sequences_are_continuous_across_reads() {
         let session = sh();
         session.write(b"echo FIRST-$((1+1))\r").unwrap();
@@ -425,6 +439,71 @@ mod windows {
         let text = String::from_utf8_lossy(output);
         text.match_indices("CHILD=")
             .any(|(index, _)| text[index + 6..].starts_with(|c: char| c.is_ascii_digit()))
+    }
+
+    const BIG_THEN_EXIT: &[u8] =
+        b"(for /l %i in (1,1,3000) do @echo LINE%i) & set /a 777000+777 & exit 0\r";
+
+    #[test]
+    fn finish_output_collects_tail_after_exit() {
+        let session = open(ShellKind::Cmd).unwrap();
+        session.write(BIG_THEN_EXIT).unwrap();
+        assert_eq!(wait_exit(&session), 0);
+        session.finish_output();
+        assert!(session.output_settled());
+        assert!(contains(&collected(&session), b"777777"));
+        session.close().unwrap();
+    }
+
+    /// 与 `runtime::pump` 同序：先收尾已退出的会话，已收尾的读完、其余按预算读，最后回收。
+    #[test]
+    fn pump_order_delivers_tail_output_of_exiting_shell() {
+        use crate::management_agent::terminal::{
+            manager::OpenRequest,
+            transport::{drain_all, next_push, MAX_OUTPUT_CHUNK_BYTES},
+        };
+        for round in 0..30u32 {
+            let session = open(ShellKind::Cmd).unwrap();
+            session.write(BIG_THEN_EXIT).unwrap();
+            let mut manager = SessionManager::default();
+            let id = format!("{:032x}", round + 1);
+            manager.register(
+                OpenRequest {
+                    session_id: id.clone(),
+                    shell: ShellKind::Cmd,
+                    size: size(120, 30),
+                    cwd: None,
+                },
+                Box::new(session),
+            );
+            let budget = MAX_OUTPUT_CHUNK_BYTES * 8;
+            let mut cursor = 0;
+            let mut delivered = Vec::new();
+            let deadline = Instant::now() + WAIT;
+            loop {
+                let settled = manager.settle_exited();
+                let batch = if settled.contains(&id) {
+                    drain_all(cursor, |from| manager.read(&id, from, budget))
+                } else {
+                    next_push(cursor, |from| manager.read(&id, from, budget))
+                }
+                .unwrap();
+                for chunk in &batch.chunks {
+                    delivered.extend_from_slice(&chunk.data);
+                }
+                cursor = batch.cursor;
+                if !manager.drain_exited().is_empty() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "shell did not exit");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                contains(&delivered, b"777777"),
+                "round {round}: tail output lost ({} bytes delivered)",
+                delivered.len()
+            );
+        }
     }
 
     #[test]
