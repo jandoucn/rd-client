@@ -75,7 +75,8 @@ if start < 0 or end <= start:
 data = json.loads(raw[start : end + 1])
 out = data.get("output") or ""
 print(out[-6000:] if len(out) > 6000 else out)
-code = int(data.get("exitCode") or 1)
+code = data.get("exitCode")
+code = 1 if code is None else int(code)
 if code < 0:
     code &= 0xFFFFFFFF
 sys.exit(0 if code == 0 else code if code < 256 else 1)
