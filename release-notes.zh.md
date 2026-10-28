@@ -1,6 +1,6 @@
 ## 版本变化
 
-本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261028.3`，构建序号及 Android 基准 versionCode 为 `2026102803`。Android arm64 APK 预期实际 versionCode 为 `2026104803`。
+本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261028.4`，构建序号及 Android 基准 versionCode 为 `2026102804`。Android arm64 APK 预期实际 versionCode 为 `2026104803`。
 
 - **桌面终端（以管理员身份运行）与终端（SYSTEM）**：Windows 被控端 peer 卡片与连接页快捷菜单新增「终端（以管理员身份运行）」和「终端（SYSTEM）」入口，仅在 Windows 被控或未知平台时显示；认证只需连接密码，不再另外弹本机管理员账号对话框；已安装 Windows 服务时会话身份为 LocalSystem（`whoami = nt authority\system`）；连接密码与记住逻辑与普通控屏完全一致。连接旧版被控端时会提示升级，不进入账号密码死循环。
 - **MSI 安装目录固定**：安装目录锁定为系统盘 Program Files，用户不再能在安装向导中更改；管理代理救援和本地修复均按此固定路径工作，避免改目录后功能失效。
