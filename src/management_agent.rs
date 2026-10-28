@@ -56,6 +56,7 @@ mod local_recovery_events;
 mod uac_policy;
 #[path = "management_agent/script_run.rs"]
 pub(crate) mod script_run;
+#[cfg(windows)]
 #[path = "management_agent/terminal/mod.rs"]
 pub(crate) mod terminal;
 #[cfg(windows)]

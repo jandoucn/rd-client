@@ -227,7 +227,7 @@ pub fn next_push(
 ) -> Result<PushBatch, TerminalError> {
     let (chunks, gap, from) = match read(last) {
         Ok(chunks) => (chunks, None, last),
-        Err(gap @ TerminalError::GapTooLarge { oldest, .. }) => {
+        Err(ref gap @ TerminalError::GapTooLarge { oldest, .. }) => {
             let resume = oldest.saturating_sub(1).max(last);
             match read(resume) {
                 Ok(chunks) => (chunks, Some(gap), resume),

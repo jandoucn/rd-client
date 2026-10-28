@@ -9,20 +9,24 @@ mod output_ring;
 mod protocol;
 #[cfg(windows)]
 pub(crate) mod runtime;
+#[cfg(windows)]
 mod session;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod session_tests;
 mod shell;
 mod transport;
 
 use std::time::Duration;
 
-// 会话命令层接入前，部分导出只被测试使用。
+// 会話命令层接入前，部分导出只被测试使用。
 #[allow(unused_imports)]
 pub use manager::{AuditEvent, CloseReason, OpenRequest, OpenedInfo, SessionManager, TerminalSlot};
 #[allow(unused_imports)]
 pub use output_ring::{OutputChunk, OutputRing, CHUNK_OVERHEAD};
+#[cfg(windows)]
+#[allow(unused_imports)]
 pub(crate) use session::READ_BUFFER_BYTES;
+#[cfg(windows)]
 #[allow(unused_imports)]
 pub use session::{Expiry, PtySession, SessionPolicy};
 #[allow(unused_imports)]
