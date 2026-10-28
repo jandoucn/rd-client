@@ -230,8 +230,8 @@ pub fn next_push(
         Err(ref gap @ TerminalError::GapTooLarge { oldest, .. }) => {
             let resume = oldest.saturating_sub(1).max(last);
             match read(resume) {
-                Ok(chunks) => (chunks, Some(gap), resume),
-                Err(TerminalError::GapTooLarge { .. }) => (Vec::new(), Some(gap), resume),
+                Ok(chunks) => (chunks, Some(gap.clone()), resume),
+                Err(TerminalError::GapTooLarge { .. }) => (Vec::new(), Some(gap.clone()), resume),
                 Err(error) => return Err(error),
             }
         }
