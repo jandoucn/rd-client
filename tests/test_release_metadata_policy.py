@@ -11,9 +11,9 @@ class ReleaseMetadataPolicyTest(unittest.TestCase):
         metadata = json.loads((ROOT / "version.json").read_text())
 
         self.assertEqual(metadata["version"], "1.5.4")
-        self.assertEqual(metadata["build_number"], "20261028.2")
-        self.assertEqual(metadata["build_seq"], 2026102802)
-        self.assertEqual(metadata["android_version_code"], 2026102802)
+        self.assertEqual(metadata["build_number"], "20261028.3")
+        self.assertEqual(metadata["build_seq"], 2026102803)
+        self.assertEqual(metadata["android_version_code"], 2026102803)
 
         pubspec = (ROOT / "flutter/pubspec.yaml").read_text()
         self.assertIn(
