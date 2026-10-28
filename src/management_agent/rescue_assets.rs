@@ -2,7 +2,7 @@ use super::{
     directory_backup::{self, DirectoryBackup},
     install_guard::InstallGuard,
     install_plan::{Artifact, InstallPlan},
-    msi_assets, msi_metadata, package_gate,
+    msi_assets, msi_metadata, package_gate, system_dirs,
     transaction::{Phase, Transaction},
     workspace,
 };
@@ -171,7 +171,7 @@ pub fn after_commit(transaction: &Path) -> Result<(), String> {
 }
 
 fn after_commit_checked(transaction: &Path, public: Option<&[u8]>) -> Result<(), String> {
-    let agent = PathBuf::from(r"C:\ProgramData\RustDesk\ManagementAgent");
+    let agent = system_dirs::get().agent();
     let id = transaction
         .file_name()
         .and_then(|name| name.to_str())
@@ -181,12 +181,17 @@ fn after_commit_checked(transaction: &Path, public: Option<&[u8]>) -> Result<(),
     }
     let identity = hbb_common::config::Config::file();
     if ![
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        system_dirs::get().local_service_roaming(),
+        system_dirs::get().system_profile_roaming(),
     ]
     .iter()
-    .any(|path| identity.to_string_lossy().eq_ignore_ascii_case(path))
-    {
+    .any(|path| {
+        identity.to_string_lossy().eq_ignore_ascii_case(
+            &path
+                .join(r"RustDesk\config\RustDesk.toml")
+                .to_string_lossy(),
+        )
+    }) {
         return Err("rescue identity outside fixed profiles".into());
     }
     let layout = Layout {
@@ -194,10 +199,10 @@ fn after_commit_checked(transaction: &Path, public: Option<&[u8]>) -> Result<(),
         destination: agent.join("rescue"),
         agent,
         transaction: transaction.into(),
-        client: r"C:\Program Files\RustDesk".into(),
+        client: system_dirs::get().normal_install(),
         config: identity.with_file_name("RustDesk2.toml"),
         identity,
-        bootstrap: r"C:\ProgramData\RustDesk\RecoveryBootstrap".into(),
+        bootstrap: system_dirs::get().recovery_bootstrap(),
     };
     let report = prepare(&layout, public, check_installed_source)?;
     let result = transaction.join("rescue-result.json");
@@ -282,7 +287,7 @@ pub fn fixed_source_public_fixture(bundle: &serde_json::Value) -> Result<Vec<u8>
 
 #[cfg(test)]
 pub fn verify_fixed_fixture(public: &[u8]) -> Result<serde_json::Value, String> {
-    let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
+    let root = &system_dirs::get().agent().join(r"rescue\current");
     let state: serde_json::Value = serde_json::from_slice(&read(
         Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\agent.json"),
         65536,
@@ -428,7 +433,7 @@ fn check_installed_source(
     let _source = package_gate::lock_verified_file(&installed.source, target)?;
     let response = super::health_windows::probe_blocking(
         r"\\.\pipe\RustDesk\management-health-v1",
-        Path::new(r"C:\Program Files\RustDesk\RustDesk.exe"),
+        &system_dirs::get().normal_install().join("RustDesk.exe"),
         build,
         std::time::Duration::from_secs(3),
     )
@@ -614,7 +619,7 @@ pub(super) fn local_repair_source(
     String,
 > {
     let (inventory, build, fallback) = r3_verified(public)?;
-    let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
+    let root = &system_dirs::get().agent().join(r"rescue\current");
     let bundle: Bundle = serde_json::from_slice(&read(&root.join("bundle.json"), 65536, false)?)
         .map_err(|_| "local repair bundle malformed")?;
     let approval_source = if bundle.schema == 2 {
@@ -767,8 +772,9 @@ fn signed_target<'a>(
 
 fn check_local(layout: &Layout, plan: &InstallPlan) -> Result<(), String> {
     let state = layout.agent.join("state");
-    let boundary = if layout.agent == Path::new(r"C:\ProgramData\RustDesk\ManagementAgent") {
-        Path::new(r"C:\ProgramData\RustDesk")
+    let data = system_dirs::get().rustdesk_data();
+    let boundary = if layout.agent == system_dirs::get().agent() {
+        data.as_path()
     } else {
         &layout.agent
     };
@@ -1302,7 +1308,13 @@ fn verify(
                 "standard"
             }
         || bootstrap["package_kind"] != "msi"
-        || bootstrap["normal_install_path"] != r"C:\Program Files\RustDesk"
+        || !bootstrap["normal_install_path"]
+            .as_str()
+            .is_some_and(|value| {
+                system_dirs::get()
+                    .fixed_normal_install(Path::new(value))
+                    .is_some()
+            })
     {
         return Err("rescue bootstrap binding mismatch".into());
     }
@@ -1345,7 +1357,7 @@ pub(super) fn trusted_agent_backup(
     if bundle_build != build {
         return Err("agent restore different build refused".into());
     }
-    let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
+    let root = &system_dirs::get().agent().join(r"rescue\current");
     let bundle: Bundle = serde_json::from_slice(&read(&root.join("bundle.json"), 65536, false)?)
         .map_err(|_| "agent restore bundle malformed")?;
     agent_backup_compatible(
@@ -1626,7 +1638,13 @@ pub(super) fn verify_readonly_status(
                 "standard"
             }
         || bootstrap["package_kind"] != "msi"
-        || bootstrap["normal_install_path"] != r"C:\Program Files\RustDesk"
+        || !bootstrap["normal_install_path"]
+            .as_str()
+            .is_some_and(|value| {
+                system_dirs::get()
+                    .fixed_normal_install(Path::new(value))
+                    .is_some()
+            })
     {
         return Err("rescue bootstrap binding mismatch".into());
     }
@@ -1649,8 +1667,8 @@ pub(super) fn verify_readonly_status(
 pub(super) fn r3_verified(
     public: Option<&[u8]>,
 ) -> Result<(DirectoryBackup, u64, PathBuf), String> {
-    let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
-    let agent = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
+    let root = &system_dirs::get().agent().join(r"rescue\current");
+    let agent = &system_dirs::get().agent();
     let state: serde_json::Value =
         serde_json::from_slice(&read(&agent.join("state/agent.json"), 65536, true)?)
             .map_err(|_| "R3 state malformed")?;
@@ -1666,11 +1684,11 @@ pub(super) fn r3_verified(
         agent: agent.into(),
         destination: root.into(),
         transaction: agent.join("transactions").join(&bundle.source_transaction),
-        client: r"C:\Program Files\RustDesk".into(),
+        client: system_dirs::get().normal_install(),
         agent_exe: agent.join("rustdesk-management-agent.exe"),
         config: identity.with_file_name("RustDesk2.toml"),
         identity,
-        bootstrap: r"C:\ProgramData\RustDesk\RecoveryBootstrap".into(),
+        bootstrap: system_dirs::get().recovery_bootstrap(),
     };
     if bundle.schema == 2 {
         first_install::check_gates(&layout, installation, key)?;
@@ -1708,14 +1726,15 @@ pub(super) fn r3_verified(
 
 /// 保底客户端目录：标准版与 SOS 各自一份，位置由 edition 决定。
 pub(super) fn fallback_path(edition: &str) -> PathBuf {
-    Path::new(r"C:\ProgramData\RustDesk\Client")
+    system_dirs::get()
+        .client_root()
         .join(edition)
         .join("RustDesk")
 }
 
 pub(super) fn r3_cycle_allowed() -> Result<bool, String> {
-    let state = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
-    verify_existing_directory(state, Path::new(r"C:\ProgramData\RustDesk"))?;
+    let state = &system_dirs::get().agent().join("state");
+    verify_existing_directory(state, &system_dirs::get().rustdesk_data())?;
     for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
         match std::fs::symlink_metadata(state.join(name)) {
             Ok(_) => return Ok(false),
@@ -1750,14 +1769,14 @@ pub(super) fn r3_cycle_allowed() -> Result<bool, String> {
 
 pub(super) fn r3_stage(public: Option<&[u8]>) -> Result<(PathBuf, u64), String> {
     let (inventory, build, destination) = r3_verified(public)?;
-    if !r3_normal_requires_fallback(&inventory, Path::new(r"C:\Program Files\RustDesk"))? {
+    if !r3_normal_requires_fallback(&inventory, &system_dirs::get().normal_install())? {
         return Err("R3 present normal client must use normal recovery".into());
     }
     if r3_existing_fallback(&inventory, &destination)? {
         return Ok((destination, build));
     }
-    let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
-    let staging = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\r3-staging");
+    let root = &system_dirs::get().agent().join(r"rescue\current");
+    let staging = &system_dirs::get().agent().join(r"rescue\r3-staging");
     workspace::create(staging)?;
     let manifest: UpdateManifest =
         serde_json::from_slice(&read(&root.join("approved-manifest.json"), 262144, false)?)
@@ -1782,9 +1801,11 @@ pub(super) fn r3_stage(public: Option<&[u8]>) -> Result<(PathBuf, u64), String> 
     }
     r3_verified(public)?;
     let parent = destination.parent().ok_or("R3 fallback parent absent")?;
-    for path in [Path::new(r"C:\ProgramData\RustDesk\Client"), parent] {
+    let client_root = system_dirs::get().client_root();
+    let data = system_dirs::get().rustdesk_data();
+    for path in [client_root.as_path(), parent] {
         if path.exists() {
-            verify_existing_directory(path, Path::new(r"C:\ProgramData\RustDesk"))?;
+            verify_existing_directory(path, &data)?;
         } else {
             workspace::create(path)?;
         }
@@ -1861,8 +1882,9 @@ pub(super) fn r3_existing_fallback(
         Ok(_) => {}
     }
     let parent = path.parent().ok_or("R3 fallback parent missing")?;
-    let boundary = if path.starts_with(r"C:\ProgramData\RustDesk") {
-        Path::new(r"C:\ProgramData\RustDesk")
+    let data = system_dirs::get().rustdesk_data();
+    let boundary = if path.starts_with(&data) {
+        data.as_path()
     } else {
         parent
     };

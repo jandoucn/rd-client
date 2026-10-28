@@ -163,7 +163,7 @@ pub fn verify_restore_target(path: &Path, identity_target: bool) -> Result<(), S
 }
 
 pub(super) fn verify_agent_install_directory(path: &Path) -> Result<(), String> {
-    if path != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent") {
+    if path != super::system_dirs::get().agent() {
         return Err("agent install directory not fixed".into());
     }
     local_path(path)?;
@@ -178,11 +178,7 @@ pub(super) fn protect_agent_install_directory(
     evidence: &Path,
     before_write: impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
-    protect_agent_directory_at(
-        Path::new(r"C:\ProgramData\RustDesk\ManagementAgent"),
-        evidence,
-        &before_write,
-    )
+    protect_agent_directory_at(&super::system_dirs::get().agent(), evidence, &before_write)
 }
 
 #[cfg(test)]

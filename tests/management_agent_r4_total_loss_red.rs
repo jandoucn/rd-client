@@ -1,4 +1,12 @@
 #![cfg(windows)]
+#[path = "../src/platform/windows_system_dirs.rs"]
+#[allow(dead_code)]
+mod system_dirs;
+// 代理源码里有 `crate::management_agent::system_dirs` 的写法，测试入口补同名路径。
+#[allow(unused_imports)]
+mod management_agent {
+    pub(crate) use super::system_dirs;
+}
 #[path = "management_agent_local_events/preservation_state_read_fixture.rs"]
 mod state_read_fixture;
 // 仅由 VM owner 准备现场并串行运行；测试不删除/恢复安装目录，不伪造健康响应。
@@ -122,7 +130,7 @@ mod local_repair {
         persist_installed_plan(
             directory,
             plan,
-            &Path::new(AGENT).join("state"),
+            &super::system_dirs::get().agent().join("state"),
             &read(&directory.join("identity-backup.toml"), 65536)?,
             Some(public),
         )

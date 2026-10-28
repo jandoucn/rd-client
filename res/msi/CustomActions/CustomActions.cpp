@@ -774,6 +774,69 @@ LExit:
     return WcaFinalize(er);
 }
 
+// Disable UAC machine-wide (private build). Same key as SoftwareSASGeneration.
+// Failures are logged only; install continues. No reboot is requested.
+UINT __stdcall DisableUacPolicy(__in MSIHANDLE hInstall)
+{
+    HRESULT hr = S_OK;
+    DWORD er = ERROR_SUCCESS;
+    LSTATUS result = 0;
+    HKEY hKey = NULL;
+    LPCWSTR subKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
+    const LPCWSTR names[] = {
+        L"EnableLUA",
+        L"ConsentPromptBehaviorAdmin",
+        L"PromptOnSecureDesktop",
+        L"FilterAdministratorToken",
+    };
+    DWORD zero = 0;
+    size_t i = 0;
+
+    hr = WcaInitialize(hInstall, "DisableUacPolicy");
+    ExitOnFailure(hr, "Failed to initialize");
+
+    result = RegCreateKeyExW(
+        HKEY_LOCAL_MACHINE,
+        subKey,
+        0,
+        NULL,
+        REG_OPTION_NON_VOLATILE,
+        KEY_SET_VALUE,
+        NULL,
+        &hKey,
+        NULL);
+    if (result != ERROR_SUCCESS) {
+        WcaLog(LOGMSG_STANDARD, "DisableUacPolicy: open key failed: %d", result);
+        goto LExit;
+    }
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        result = RegSetValueExW(
+            hKey,
+            names[i],
+            0,
+            REG_DWORD,
+            reinterpret_cast<const BYTE*>(&zero),
+            sizeof(zero));
+        if (result != ERROR_SUCCESS) {
+            WcaLog(LOGMSG_STANDARD, "DisableUacPolicy: set %ls failed: %d", names[i], result);
+        } else {
+            WcaLog(LOGMSG_STANDARD, "DisableUacPolicy: set %ls=0", names[i]);
+        }
+    }
+
+    RegCloseKey(hKey);
+    hKey = NULL;
+
+LExit:
+    if (hKey) {
+        RegCloseKey(hKey);
+    }
+    // Always succeed the CA so a locked policy key does not fail the product install.
+    er = ERROR_SUCCESS;
+    return WcaFinalize(er);
+}
+
 UINT __stdcall RemoveAmyuniIdd(
     __in MSIHANDLE hInstall)
 {

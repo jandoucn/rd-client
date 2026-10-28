@@ -46,8 +46,31 @@ pub fn commands(body: &str, source: &str, installed: &str, backup: &str) -> Resu
         "if errorlevel 8 goto update_backup_failed\r\n> \"%~dp0main-backup-ready\" echo ready",
     );
     let body = format!("{body}\r\nexit /b 0\r\n");
+    let dirs = crate::platform::windows::system_dirs::get();
+    let script_text = SCRIPT
+        .replace(
+            "@@AGENT_EXE@@",
+            &literal(
+                &dirs
+                    .agent()
+                    .join("rustdesk-management-agent.exe")
+                    .to_string_lossy(),
+            ),
+        )
+        .replace(
+            "@@PRODUCT_DATA@@",
+            &literal(&dirs.rustdesk_data().to_string_lossy()),
+        )
+        .replace(
+            "@@NORMAL@@",
+            &literal(&dirs.program_files.join("RustDesk").to_string_lossy()),
+        )
+        .replace(
+            "@@NORMAL_X86@@",
+            &literal(&dirs.program_files_x86.join("RustDesk").to_string_lossy()),
+        );
     let script = format!(
-        "{SCRIPT}\ntry {{ Invoke-LegacyAgentUpdate '{}' '{}' '{}' '{}' '{}' {} '{}' $PSScriptRoot; exit 0 }} catch {{ [Console]::Error.WriteLine($_); if ($_.Exception.Message.StartsWith('[update-pending]')) {{ exit 75 }}; if ($_.Exception.Message.StartsWith('[update-rollback-failed]')) {{ exit 76 }}; if ($_.Exception.Message.StartsWith('[update-rolled-back]')) {{ exit 78 }}; exit 77 }}",
+        "{script_text}\ntry {{ Invoke-LegacyAgentUpdate '{}' '{}' '{}' '{}' '{}' {} '{}' $PSScriptRoot; exit 0 }} catch {{ [Console]::Error.WriteLine($_); if ($_.Exception.Message.StartsWith('[update-pending]')) {{ exit 75 }}; if ($_.Exception.Message.StartsWith('[update-rollback-failed]')) {{ exit 76 }}; if ($_.Exception.Message.StartsWith('[update-rolled-back]')) {{ exit 78 }}; exit 77 }}",
         literal(&target.to_string_lossy()), literal(installed), literal(backup),
         hex::encode(hash.finalize()), edition, build, STANDARD.encode(body.as_bytes())
     );
@@ -99,7 +122,7 @@ function Get-AgentService {
 }
 function Stop-Agent {
     $images = @()
-    $fixed = 'C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe'
+    $fixed = '@@AGENT_EXE@@'
     try {
         foreach ($candidate in Get-CimInstance Win32_Process -Filter "Name='rustdesk-management-agent.exe'" -ErrorAction Stop) {
             if (!$candidate.ExecutablePath -or !$candidate.CreationDate) { throw 'candidate identity unavailable' }
@@ -257,13 +280,13 @@ function Sync-Bootstrap($Directory, $Target, $Hash, $Edition, $Normal, $Existing
 }
 function Invoke-LegacyAgentUpdate($Target, $Installed, $MainBackup, $Hash, $Edition, $Build, $Body, $Work) {
     $ErrorActionPreference = 'Stop'
-    $productRoot = 'C:\ProgramData\RustDesk'
+    $productRoot = '@@PRODUCT_DATA@@'
     $agent = "$productRoot\ManagementAgent\rustdesk-management-agent.exe"
     $state = "$productRoot\ManagementAgent\state"
     $bootstrap = "$productRoot\RecoveryBootstrap"
     $config = "$env:SystemRoot\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
     $normal = Split-Path -Parent $Installed
-    if ($normal -notin @('C:\Program Files\RustDesk','C:\Program Files (x86)\RustDesk')) { throw 'normal install path rejected' }
+    if ($normal -notin @('@@NORMAL@@','@@NORMAL_X86@@')) { throw 'normal install path rejected' }
     foreach ($path in @($Target,$agent,$state,$config,$normal,$Work)) { Assert-PlainPath $path }
     $lock = [Threading.Mutex]::new($false,'Global\RustDeskManagementAgentInstall')
     $held = $false

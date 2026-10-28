@@ -182,8 +182,9 @@ pub fn restore(
     before_create: impl FnOnce() -> Result<(), String>,
     before_publish: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    let destination =
-        Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe");
+    let destination = &super::system_dirs::get()
+        .agent()
+        .join("rustdesk-management-agent.exe");
     absent(destination)?;
     let (source, size) =
         super::rescue_assets::trusted_agent_backup(expected_hash, edition, kind, build, public)?;

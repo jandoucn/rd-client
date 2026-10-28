@@ -18,6 +18,13 @@ pub use ipc_drm::{start_drm, DmabufDesc, DrmDisplayInfo};
 pub(crate) use ipc_drm::DrmConn;
 #[cfg(all(target_os = "linux", feature = "drm"))]
 pub(crate) use ipc_drm::connect_drm;
+// 本机 SYSTEM 终端的 `_terminal` 通道：监听端、授权与连接管理都在自己的模块里，这里只补
+// 客户端也要用的路径与连接入口。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[path = "ipc/terminal.rs"]
+mod ipc_terminal;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) use ipc_terminal::start_terminal;
 
 use crate::{
     common::{is_server, CheckTestNatType},
@@ -73,8 +80,9 @@ use ipc_fs::{
     check_pid, ensure_secure_ipc_parent_dir, scrub_secure_ipc_parent_dir,
     should_scrub_parent_entries_after_check_pid, write_pid,
 };
-// Gated with the module that uses it, so a `drm`-less build does not carry an unused import.
-#[cfg(all(target_os = "linux", feature = "drm"))]
+// Gated with the modules that use it: `_drm` (linux + feature) and `_terminal` (desktop), so a
+// build with neither does not carry an unused import.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ipc_fs::remove_ipc_entry_via_secure_parent_fd;
 use parity_tokio_ipc::{
     Connection as Conn, ConnectionClient as ConnClient, Endpoint, Incoming, SecurityAttributes,
@@ -135,6 +143,29 @@ impl Drop for UserMainIpcScope {
 #[inline]
 pub async fn connect_service(ms_timeout: u64) -> ResultType<ConnectionTmpl<ConnClient>> {
     connect(ms_timeout, crate::POSTFIX_SERVICE).await
+}
+
+/// 本机终端的 IPC 路径。必须与服务端监听用的是同一套：Unix 上放进 `_service` 的目录，那是
+/// root 服务与活跃用户进程共享的唯一目录；Windows 上是与服务同名的命名管道族。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn terminal_ipc_path() -> String {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let service_path = Config::ipc_path(crate::POSTFIX_SERVICE);
+        let dir = std::path::Path::new(&service_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        dir.join("ipc_terminal").to_string_lossy().into_owned()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Config::ipc_path(crate::local_terminal::POSTFIX)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) async fn connect_terminal(ms_timeout: u64) -> ResultType<ConnectionTmpl<ConnClient>> {
+    connect_with_path(ms_timeout, &terminal_ipc_path()).await
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -557,6 +588,13 @@ pub enum Data {
     /// the EGL detile/convert itself (see `DmabufDesc`).
     #[cfg(all(target_os = "linux", feature = "drm"))]
     DrmFrameDmabuf(DmabufDesc),
+    // --- 本机 SYSTEM 终端（`_terminal` 通道）---
+    /// 客户端 -> 服务：一条本机终端请求，JSON 编码的 `LocalRequest`。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    LocalTerminal(Vec<u8>),
+    /// 服务 -> 客户端：一条本机终端响应，protobuf 编码的 `TerminalResponse`。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    LocalTerminalResponse(Vec<u8>),
     /// Service -> client: a hardware-cursor header; the RGBA pixels follow via `send_raw()`.
     #[cfg(all(target_os = "linux", feature = "drm"))]
     DrmCursor {

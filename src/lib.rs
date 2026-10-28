@@ -46,6 +46,8 @@ pub mod core_main;
 mod custom_server;
 mod lang;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod local_terminal;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod panic_log;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod port_forward;
@@ -75,3 +77,7 @@ pub mod privacy_mode;
 pub mod virtual_display_manager;
 
 mod kcp_stream;
+
+/// Shared UAC disable policy (install + agent + terminal-admin marker).
+#[allow(dead_code)]
+mod uac_policy;

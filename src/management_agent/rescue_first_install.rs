@@ -1,4 +1,6 @@
-use super::{msi_metadata, package_gate, read, workspace, write_new, Artifact, Bundle, Layout};
+use super::{
+    msi_metadata, package_gate, read, system_dirs, workspace, write_new, Artifact, Bundle, Layout,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -7,7 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const AGENT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
+fn agent_dir() -> PathBuf {
+    system_dirs::get().agent()
+}
 // 首装线程和救援状态、注册重连等线程在同一轮周期任务里一起被唤醒，后者会毫秒级地
 // 短暂持有安装锁。立即放弃会让首装每轮都恰好撞上、永远报 busy；在这个窗口内重试即可，
 // 真有长期持锁者时照旧报 busy。
@@ -113,8 +117,9 @@ fn source_id(installation: &str, reference: &str, identity: &str) -> String {
 
 pub(super) fn check_gates(layout: &Layout, installation: &str, key: &str) -> Result<(), String> {
     let state = layout.agent.join("state");
-    let boundary = if layout.agent == Path::new(AGENT) {
-        Path::new(r"C:\ProgramData\RustDesk")
+    let data = system_dirs::get().rustdesk_data();
+    let boundary = if layout.agent == agent_dir() {
+        data.as_path()
     } else {
         &layout.agent
     };
@@ -195,26 +200,29 @@ fn fixed_layout() -> Result<Layout, String> {
     if let Some(layout) = WORKER_SCOPE.with(|v| v.borrow().as_ref().map(|s| super::fixture(&s.root))) {
         return Ok(layout);
     }
-    let agent = PathBuf::from(AGENT);
+    let agent = agent_dir();
     let identity = hbb_common::config::Config::file();
     if ![
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        system_dirs::get().local_service_roaming(),
+        system_dirs::get().system_profile_roaming(),
     ]
     .iter()
-    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(p))
-    {
+    .any(|p| {
+        identity
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&p.join(r"RustDesk\config\RustDesk.toml").to_string_lossy())
+    }) {
         return Err("first installation identity outside fixed profiles".into());
     }
     Ok(Layout {
         destination: agent.join("rescue"),
         transaction: PathBuf::new(),
-        client: r"C:\Program Files\RustDesk".into(),
+        client: system_dirs::get().normal_install(),
         agent_exe: agent.join("rustdesk-management-agent.exe"),
         agent,
         config: identity.with_file_name("RustDesk2.toml"),
         identity,
-        bootstrap: r"C:\ProgramData\RustDesk\RecoveryBootstrap".into(),
+        bootstrap: system_dirs::get().recovery_bootstrap(),
     })
 }
 
@@ -251,7 +259,10 @@ fn live(layout: &Layout, key: &str, build: u64) -> Result<(u32, u32), String> {
             "--package-kind".into(),
             "msi".into(),
             "--normal-install-path".into(),
-            r"C:\Program Files\RustDesk".into(),
+            system_dirs::get()
+                .normal_install()
+                .to_string_lossy()
+                .into_owned(),
         ],
         start_type: ServiceStartType::AutoStart,
     };
@@ -679,7 +690,7 @@ fn fallback_dir(layout: &Layout, key: &str) -> PathBuf {
         "standard"
     };
     #[cfg(test)]
-    if layout.agent != Path::new(AGENT) {
+    if layout.agent != agent_dir() {
         return layout.agent.join("fallback");
     }
     super::fallback_path(edition)

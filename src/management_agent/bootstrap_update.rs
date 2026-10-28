@@ -26,8 +26,7 @@ fn binding(plan: &InstallPlan, target: &Artifact) -> Result<Binding, String> {
 }
 
 fn destination() -> Result<PathBuf, String> {
-    Ok(std::env::var_os("ProgramData").map(PathBuf::from).ok_or("ProgramData unavailable")?
-        .join("RustDesk").join("RecoveryBootstrap"))
+    Ok(super::system_dirs::get().recovery_bootstrap())
 }
 
 pub fn prepare(root: &Path, plan: &InstallPlan, target: &Artifact) -> Result<(), String> {

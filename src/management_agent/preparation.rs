@@ -25,7 +25,6 @@ pub fn prepare_fixture(root: &Path, request: &Request<'_>, public: &[u8]) -> Res
 fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]>) -> Result<InstallPlan, String> {
     use super::{directory_backup, install_guard, install_plan::{OriginalService, Trigger}, msi_assets,
         msi_metadata, native_install, package_gate, state_store, transaction::{Evidence, Phase, Transaction}, workspace};
-    use std::path::PathBuf;
     use windows_service::{service::{ServiceAccess, ServiceState, ServiceStartType, ServiceType}, service_manager::{ServiceManager, ServiceManagerAccess}};
     let token = |value: &str| value.len() == 32 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !token(request.transaction_id) || !token(request.command_id) || !token(request.installation_id)
@@ -50,8 +49,7 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
     msi_metadata::verify_pair(&original_metadata,&target_metadata,&original_metadata.product_code,&target_metadata.product_code)?;
     let installed_source = msi_metadata::installed_source(&original_metadata.product_code)?;
     let target_name = package_gate::cache_name(&target.primary,"msi")?;
-    let program_data = std::env::var_os("ProgramData").map(PathBuf::from).ok_or("ProgramData unavailable")?;
-    let agent_root = program_data.join("RustDesk").join("ManagementAgent");
+    let agent_root = super::system_dirs::get().agent();
     let expected_root = agent_root.join("transactions").join(request.transaction_id);
     if root != expected_root && fixture_key.is_none() { return Err("preparation root outside fixed transaction directory".into()); }
     if root.exists() { return Err("installation preparation already exists".into()); }
@@ -62,7 +60,8 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
     };
     check_local_state(&state_directory,request.installation_id,request.target_key)?;
     let edition = if request.target_key.ends_with("-sos") { "sos" } else { "standard" };
-    let normal = Path::new(r"C:\Program Files\RustDesk");
+    let normal_install = super::system_dirs::get().normal_install();
+    let normal = normal_install.as_path();
     let agent = agent_root.join("rustdesk-management-agent.exe");
     let manager = ServiceManager::local_computer(None::<&str>,ServiceManagerAccess::CONNECT).map_err(|e| e.to_string())?;
     let mut services = Vec::new();
@@ -87,9 +86,9 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
         services.push(OriginalService {name:name.into(),command:config.executable_path.to_string_lossy().into_owned(),account:"LocalSystem".into(),start_type:start_type.into(),running:status.current_state==ServiceState::Running});
     }
     let configured_identity = hbb_common::config::Config::file();
-    let identity = [r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"]
-        .into_iter().find(|path| configured_identity.to_string_lossy().eq_ignore_ascii_case(path))
-        .map(PathBuf::from).ok_or("preparation identity path outside fixed service profiles")?;
+    let dirs = super::system_dirs::get();
+    let identity = [dirs.local_service_roaming().join(r"RustDesk\config\RustDesk.toml"),dirs.system_profile_roaming().join(r"RustDesk\config\RustDesk.toml")]
+        .into_iter().find(|path| configured_identity.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())).ok_or("preparation identity path outside fixed service profiles")?;
     workspace::verify_restore_target(&identity,true)?;
     workspace::verify_restore_target(&agent,false)?;
     workspace::create(root)?;

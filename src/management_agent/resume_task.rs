@@ -16,10 +16,9 @@ fn task_name(id: &str) -> Result<String, String> {
 }
 
 fn tool() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32/schtasks.exe")
+    crate::management_agent::system_dirs::get()
+        .system32()
+        .join("schtasks.exe")
 }
 fn xml(value: &str) -> String {
     value

@@ -149,7 +149,8 @@ pub(super) fn with_delivery_fixture<T>(root: &Path, intent: &Path, run: impl FnO
 }
 
 pub(super) fn verify(state: &Path, intent: &Path) -> Result<Vec<File>, String> {
-    let fixed = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
+    let fixed = crate::management_agent::system_dirs::get().agent().join("state");
+    let fixed = fixed.as_path();
     #[cfg(not(test))]
     if state != fixed || intent != hbb_common::config::Config2::file() {
         return Err("preservation fixed state path mismatch".into());
@@ -247,7 +248,8 @@ pub(super) fn with_root_fixture<T>(root: &Path, run: impl FnOnce() -> T) -> T {
 }
 
 pub(super) fn hold_installed_root(root: &Path) -> Result<Vec<File>, String> {
-    let fixed = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
+    let fixed = crate::management_agent::system_dirs::get().agent();
+    let fixed = fixed.as_path();
     #[cfg(not(test))]
     if root != fixed {
         return Err("preservation fixed root path mismatch".into());

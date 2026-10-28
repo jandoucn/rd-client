@@ -231,6 +231,7 @@ class WebHomePage extends StatelessWidget {
           i++;
           break;
         case '--terminal-admin':
+        case '--terminal-system':
           setEnvTerminalAdmin();
           isTerminal = true;
           id = args[i + 1];

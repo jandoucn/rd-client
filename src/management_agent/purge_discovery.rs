@@ -99,7 +99,7 @@ fn native_candidates_for(expected: Option<&str>) -> Result<Vec<Candidate>, Strin
         }
         let code = product_code;
         let location = query("InstallLocation")?.trim_end_matches(['\\', '/']).to_owned();
-        if !location.eq_ignore_ascii_case(r"C:\Program Files\RustDesk") {
+        if !location.eq_ignore_ascii_case(&super::system_dirs::get().normal_install().to_string_lossy()) {
             return Err("RustDesk installation outside fixed location".into());
         }
         let cache_path = query("LocalPackage")?;

@@ -1,3 +1,8 @@
+// install_plan.rs 引用 `super::system_dirs`，该模块在生产 crate 里只在 windows 下编译。
+#![cfg(windows)]
+#[path = "../src/platform/windows_system_dirs.rs"]
+#[allow(dead_code)]
+mod system_dirs;
 #[path = "../src/management_agent/install_plan.rs"]
 mod install_plan;
 #[cfg(windows)]

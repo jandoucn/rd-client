@@ -1,3 +1,4 @@
+use crate::platform::windows::system_dirs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,7 +19,9 @@ pub(crate) mod supervisor;
 #[path = "../management_agent/workspace.rs"]
 mod workspace;
 
-const ROOT: &str = r"C:\ProgramData\RustDesk\ordinary-updates";
+fn receipts_root() -> PathBuf {
+    system_dirs::get().rustdesk_data().join("ordinary-updates")
+}
 #[cfg(not(t02_receipts))]
 #[path = "ordinary_update_receipts/runtime.rs"]
 pub(crate) mod runtime;
@@ -100,7 +103,7 @@ impl OutcomeWriteRequest {
     }
 
     pub(crate) fn write(&self) -> Result<(), String> {
-        self.write_at(Path::new(ROOT))
+        self.write_at(&receipts_root())
     }
 
     #[cfg(test)]
@@ -376,7 +379,7 @@ impl Outbox {
     }
 
     pub(crate) fn open_existing(transaction_id: &str) -> Result<Self, String> {
-        Self::open_at(Path::new(ROOT), transaction_id)
+        Self::open_at(&receipts_root(), transaction_id)
     }
 
     fn open_at(root: &Path, transaction_id: &str) -> Result<Self, String> {
@@ -504,7 +507,7 @@ impl Outbox {
 
     /// The caller must persist this before allowing the installer to start.
     pub(crate) fn prepare(binding: Binding, approved_package_name: &str) -> Result<Self, String> {
-        Self::prepare_at(Path::new(ROOT), binding, approved_package_name)
+        Self::prepare_at(&receipts_root(), binding, approved_package_name)
     }
 
     fn prepare_at(root: &Path, binding: Binding, package_name: &str) -> Result<Self, String> {
@@ -868,7 +871,8 @@ fn legacy_msi_installation_evidence(binding: &Binding) -> Result<bool, String> {
     ) {
         return Ok(false);
     }
-    let path = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\agent.json");
+    let path_buf = system_dirs::get().agent().join(r"state\agent.json");
+    let path = path_buf.as_path();
     workspace::verify_restore_target(path, false)?;
     let mut bytes = Vec::new();
     use std::os::windows::fs::OpenOptionsExt;

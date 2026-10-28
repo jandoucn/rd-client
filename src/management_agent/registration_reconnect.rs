@@ -1,4 +1,5 @@
-use super::handoff::ObservedProcess;
+// 子模块 budget_workspace（workspace.rs）也要从这里拿到 system_dirs。
+use super::{handoff::ObservedProcess, system_dirs};
 use hbb_common::tokio::{
     self,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -7,7 +8,7 @@ use parity_tokio_ipc::{Endpoint, Incoming, SecurityAttributes};
 use serde::{Deserialize, Serialize};
 use std::{
     os::windows::io::AsRawHandle,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -518,15 +519,21 @@ fn peer(handle: *mut std::ffi::c_void) -> Result<(ObservedProcess, std::path::Pa
     Ok((process, path.into()))
 }
 
-pub async fn request_restart(expected_path: &Path, owner: &Owner) -> Result<Reply, String> {
-    if ![
-        r"C:\Program Files\RustDesk\RustDesk.exe",
-        r"C:\ProgramData\RustDesk\Client\standard\RustDesk\RustDesk.exe",
-        r"C:\ProgramData\RustDesk\Client\sos\RustDesk\RustDesk.exe",
+fn fixed_client_exes() -> [PathBuf; 3] {
+    let dirs = super::system_dirs::get();
+    [
+        dirs.normal_install().join("RustDesk.exe"),
+        dirs.client_root().join(r"standard\RustDesk\RustDesk.exe"),
+        dirs.client_root().join(r"sos\RustDesk\RustDesk.exe"),
     ]
-    .iter()
-    .any(|p| expected_path.to_string_lossy().eq_ignore_ascii_case(p))
-    {
+}
+
+pub async fn request_restart(expected_path: &Path, owner: &Owner) -> Result<Reply, String> {
+    if !fixed_client_exes().iter().any(|p| {
+        expected_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&p.to_string_lossy())
+    }) {
         return Err("registration target outside fixed paths".into());
     }
     request_at(PIPE, expected_path, owner).await
@@ -665,7 +672,10 @@ pub fn start() -> std::io::Result<Worker> {
             }
             let rt = runtime.as_ref().ok_or("R0 runtime unavailable")?;
             let (path, observation) = production::observe(&tick.installation)?;
-            let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\registration-reconnect");
+            let root_dir = system_dirs::get()
+                .agent()
+                .join("registration-reconnect");
+            let root = root_dir.as_path();
             if !root.exists() {
                 budget_workspace::create(root)?;
             }
@@ -729,7 +739,8 @@ mod production {
         let _guard = install_guard::InstallGuard::try_acquire()
             .map_err(|e| e.to_string())?
             .ok_or("R0 installation busy")?;
-        let state = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
+        let state_dir = super::super::system_dirs::get().agent().join("state");
+        let state = state_dir.as_path();
         for marker in ["disable-agent", "disable-recovery", "maintenance.json"] {
             match std::fs::symlink_metadata(state.join(marker)) {
                 Ok(_) => return Err("R0 locally blocked".into()),
@@ -748,7 +759,17 @@ mod production {
             return Err("R0 state authorization changed".into());
         }
         let config = hbb_common::config::Config2::file();
-        if ![r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk2.toml"].iter().any(|p|config.to_string_lossy().eq_ignore_ascii_case(p)){return Err("R0 config path refused".into());}
+        let dirs = super::super::system_dirs::get();
+        if ![dirs.local_service_roaming(), dirs.system_profile_roaming()]
+            .iter()
+            .any(|p| {
+                config.to_string_lossy().eq_ignore_ascii_case(
+                    &p.join(r"RustDesk\config\RustDesk2.toml").to_string_lossy(),
+                )
+            })
+        {
+            return Err("R0 config path refused".into());
+        }
         let bytes = read(&config, true)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| "R0 intent encoding")?;
         let intent: hbb_common::toml::Value =
@@ -784,19 +805,15 @@ mod production {
             return Err("R0 service not eligible".into());
         }
         let command = config.executable_path.to_string_lossy();
-        let path = [
-            r"C:\Program Files\RustDesk\RustDesk.exe",
-            r"C:\ProgramData\RustDesk\Client\standard\RustDesk\RustDesk.exe",
-            r"C:\ProgramData\RustDesk\Client\sos\RustDesk\RustDesk.exe",
-        ]
-        .iter()
-        .find(|p| command.eq_ignore_ascii_case(&format!("\"{p}\" --service")))
-        .ok_or("R0 service path refused")?;
-        budget_workspace::verify_restore_target(Path::new(path), false)?;
+        let path = fixed_client_exes()
+            .into_iter()
+            .find(|p| command.eq_ignore_ascii_case(&format!("\"{}\" --service", p.display())))
+            .ok_or("R0 service path refused")?;
+        budget_workspace::verify_restore_target(&path, false)?;
         let metadata: serde_json::Value = serde_json::from_str(include_str!("../../version.json"))
             .map_err(|_| "R0 build metadata")?;
         Ok((
-            PathBuf::from(path),
+            path,
             metadata["build_seq"].as_u64().ok_or("R0 build absent")?,
         ))
     }

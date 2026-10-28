@@ -270,7 +270,7 @@ impl InstallPlan {
         if self.original_build_seq == 0 || self.target_build_seq < self.original_build_seq {
             return Err("installation downgrade refused".into());
         }
-        if self.normal_install_path != r"C:\Program Files\RustDesk" {
+        if self.normal_install_path != super::system_dirs::get().normal_install().to_string_lossy() {
             return Err("installation normal path not approved".into());
         }
         if self.resume_task != format!("RustDeskManagementAgentResume-{}", self.transaction_id) {
@@ -323,7 +323,11 @@ impl InstallPlan {
             " --service --edition {edition} --package-kind {kind} --normal-install-path \"{}\"",
             self.normal_install_path
         );
-        let agent_path = r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe";
+        let agent_path = super::system_dirs::get()
+            .agent()
+            .join("rustdesk-management-agent.exe")
+            .to_string_lossy()
+            .into_owned();
         if !main.command.eq_ignore_ascii_case(&main_command)
             || !(agent
                 .command

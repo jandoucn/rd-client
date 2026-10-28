@@ -198,6 +198,17 @@ fn get_or_create_service(
     Ok(service)
 }
 
+/// 在本进程内创建或复用终端服务，不启动向远端广播的输出循环。
+/// 本机 SYSTEM 终端由 `_terminal` IPC 自行读取输出，因此不需要 `new()` 的广播线程。
+pub fn ensure_service(service_id: &str, is_persistent: bool) -> Result<()> {
+    get_or_create_service(service_id.to_owned(), is_persistent, false).map(|_| ())
+}
+
+/// 关闭终端服务及其中的全部会话。
+pub fn drop_service(service_id: &str) {
+    remove_service(service_id);
+}
+
 /// Remove a service from the global registry
 fn remove_service(service_id: &str) {
     let mut services = TERMINAL_SERVICES.lock().unwrap();

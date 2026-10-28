@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::{Read, Write}, path::{Path, PathBuf}, time::{Duration, Instant}};
 
-const ROOT: &str = r"C:\ProgramData\RustDeskPurge";
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
@@ -51,7 +49,7 @@ fn save_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
 
 // Called only with identity obtained from Approved; no command/path is recorded.
 pub(super) fn prepare(id: &str, installation: &str, product: &str) -> Result<PathBuf, String> {
-    prepare_at(Path::new(ROOT), id, installation, product)
+    prepare_at(&super::system_dirs::get().program_data.join("RustDeskPurge"), id, installation, product)
 }
 
 fn prepare_at(root: &Path, id: &str, installation: &str, product: &str) -> Result<PathBuf, String> {
@@ -95,7 +93,7 @@ pub struct Checked {
     plan_sha256: String,
 }
 
-pub(super) fn open(id: &str) -> Result<Checked, String> { open_at(Path::new(ROOT), id) }
+pub(super) fn open(id: &str) -> Result<Checked, String> { open_at(&super::system_dirs::get().program_data.join("RustDeskPurge"), id) }
 
 fn open_at(root: &Path, id: &str) -> Result<Checked, String> {
     let directory = directory(root, id)?;

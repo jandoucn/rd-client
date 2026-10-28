@@ -11,6 +11,10 @@ fn delivery_disabled_wire_is_lowercase_without_changing_observer_contract() {
     let payload=result.unwrap();
     assert_eq!(payload["service"]["start_type"],"disabled");
     assert_eq!(payload["recovery"]["effective_enabled"],false);
+    let dirs=crate::management_agent::system_dirs::get();
+    assert_eq!(payload["paths"]["fixed_normal_install"],dirs.normal_install().to_string_lossy().as_ref());
+    assert_eq!(payload["paths"]["agent"],paths.agent.to_string_lossy().as_ref());
+    assert_eq!(payload["paths"]["system_drive"],&dirs.windows.to_string_lossy()[..2]);
 }
 
 #[test]

@@ -144,6 +144,9 @@ pub fn may_repeat_running(wire: &serde_json::Value) -> bool {
                     | "diagnostics.collect"
                     | "network.probe"
                     | "diagnostics.logs"
+                    | "system.query_uac"
+                    | "system.disable_uac"
+                    | "system.run"
             )
         )
 }
@@ -180,6 +183,9 @@ pub fn execution_rejection(wire: &serde_json::Value) -> Option<&'static str> {
         "package.update",
         "agent.update",
         "diagnostics.logs",
+        "system.query_uac",
+        "system.disable_uac",
+        "system.run",
     ];
     if !wire["type"].as_str().is_some_and(|value| supported.contains(&value)) {
         return Some("unsupported");
@@ -216,6 +222,8 @@ mod execution_tests {
             "package.verify",
             "diagnostics.collect",
             "network.probe",
+            "system.query_uac",
+            "system.disable_uac",
         ] {
             assert_ne!(
                 execution_rejection(&serde_json::json!({"schema":1,"type_version":1,"type":command_type})),
@@ -398,6 +406,8 @@ pub fn command_envelope(
             | "package.verify"
             | "diagnostics.collect"
             | "network.probe"
+            | "system.query_uac"
+            | "system.disable_uac"
     ) {
         if !(envelope
             .args
@@ -411,6 +421,10 @@ pub fn command_envelope(
                 .unwrap_or(false))
         {
             return Err("command execution parameters unsupported".into());
+        }
+    } else if envelope.command_type == "system.run" {
+        if super::script_run::parse_args(&envelope.args, envelope.timeout_seconds).is_err() {
+            return Err("system.run execution parameters invalid".into());
         }
     } else if matches!(envelope.command_type.as_str(), "package.reinstall" | "package.update" | "agent.update") {
         let args = envelope.args.as_object().ok_or("package command arguments must be object")?;

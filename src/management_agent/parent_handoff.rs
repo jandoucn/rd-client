@@ -61,8 +61,7 @@ fn launch_checked(root: &Path, fixture_key: Option<&[u8]>, native_fixture: bool)
     workspace::verify(root)?;
     let bytes = read(&root.join("prepared.json"), 65536)?;
     let plan = InstallPlan::decode(&bytes)?;
-    let agent_root = std::env::var_os("ProgramData").map(PathBuf::from)
-        .ok_or("ProgramData unavailable")?.join("RustDesk").join("ManagementAgent");
+    let agent_root = super::system_dirs::get().agent();
     if fixture_key.is_none() && root != agent_root.join("transactions").join(&plan.transaction_id) {
         return Err("parent handoff root outside fixed transaction directory".into());
     }

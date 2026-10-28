@@ -20,9 +20,9 @@ fn read_locked(path: &Path, locks: &mut Vec<File>) -> Result<Vec<u8>, String> {
 }
 
 pub(super) fn installed() -> Result<Evidence, String> {
-    resolve(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent"), &[
-        PathBuf::from(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml"),
-        PathBuf::from(r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"),
+    resolve(&super::system_dirs::get().agent(), &[
+        super::system_dirs::get().local_service_roaming().join(r"RustDesk\config\RustDesk.toml"),
+        super::system_dirs::get().system_profile_roaming().join(r"RustDesk\config\RustDesk.toml"),
     ], None)
 }
 

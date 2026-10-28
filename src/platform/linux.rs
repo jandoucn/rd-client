@@ -1065,6 +1065,27 @@ fn force_stop_server() {
     sleep_millis(super::SERVICE_INTERVAL);
 }
 
+/// 本机 SYSTEM 终端：在 root 服务进程里常驻监听 `_terminal` IPC 通道。
+///
+/// `crate::ipc::start_terminal()` 带 `#[tokio::main]`，入口自己建 runtime，因此不能在
+/// 已有的 async 上下文里 await 它，只能当同步函数放进独立线程里跑。Builder 而不是
+/// `thread::spawn`：后者线程创建失败会 panic，而这个 panic 会从 `start_os_service`
+/// 冒出去带走整个 root 服务，终端不可用的代价不该有这么大，所以只记日志。
+fn start_local_terminal_service() {
+    if let Err(err) = std::thread::Builder::new()
+        .name("terminal-ipc".to_owned())
+        .spawn(|| {
+            crate::ipc::start_terminal();
+        })
+    {
+        log::warn!(
+            "failed to spawn the local terminal ipc thread: {}; the SYSTEM terminal is \
+             unavailable in this service process",
+            err
+        );
+    }
+}
+
 pub fn start_os_service() {
     check_if_stop_service();
     stop_rustdesk_servers();
@@ -1073,6 +1094,8 @@ pub fn start_os_service() {
     std::thread::spawn(|| {
         allow_err!(crate::ipc::start(crate::POSTFIX_SERVICE));
     });
+
+    start_local_terminal_service();
 
     // DRM/KMS capture producer (opt-in `drm` feature): a dedicated thread + runtime that streams
     // scanout frames to the user `--server` over the `_drm` service-scoped channel. Runs here

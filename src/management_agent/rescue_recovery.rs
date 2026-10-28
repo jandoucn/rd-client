@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 use windows_service::{
     service::{ServiceAccess, ServiceStartType, ServiceState, ServiceType},
     service_manager::{ServiceManager, ServiceManagerAccess},
@@ -103,7 +103,7 @@ pub fn recover_fixture(public: &[u8]) -> Result<bool, String> {
 }
 
 pub fn bundle_present() -> Result<bool, String> {
-    match std::fs::symlink_metadata(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current") {
+    match std::fs::symlink_metadata(super::system_dirs::get().agent().join(r"rescue\current")) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err("R3 bundle observation failed".into()),
@@ -185,7 +185,7 @@ pub fn recover(public: Option<&[u8]>) -> Result<bool, String> {
     if rustdesk_process_present()? {
         return Err("R3 active or unknown sessions/process state".into());
     }
-    if !super::rescue_assets::r3_normal_missing(Path::new(r"C:\Program Files\RustDesk"))? {
+    if !super::rescue_assets::r3_normal_missing(&super::system_dirs::get().normal_install())? {
         return Ok(false);
     }
     let context = super::local_recovery_events::context()?;
@@ -229,7 +229,8 @@ pub fn recover(public: Option<&[u8]>) -> Result<bool, String> {
             } else {
                 "create"
             };
-            let output = std::process::Command::new(r"C:\Windows\System32\sc.exe")
+            let sc = super::system_dirs::get().system32().join("sc.exe");
+            let output = std::process::Command::new(sc)
                 .args([
                     action,
                     "RustDesk",

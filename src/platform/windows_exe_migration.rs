@@ -1,3 +1,4 @@
+use crate::platform::windows::system_dirs;
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
@@ -193,8 +194,6 @@ pub fn completed(root: &Path) -> Result<(), String> {
         )),
     }
 }
-
-const AGENT_ROOT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
 
 pub fn approved_manifest(args: &[String]) -> Result<hbb_common::UpdateManifest, String> {
     let bytes = approval_bytes(args)?;
@@ -482,7 +481,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let approval = approval_bytes(args)?;
     let manifest: hbb_common::UpdateManifest = serde_json::from_slice(&approval)
         .map_err(|_| "EXE fixed approval malformed")?;
-    let root = Path::new(AGENT_ROOT);
+    let root_dir = system_dirs::get().agent();
+    let root = root_dir.as_path();
     let state_path = root.join("state/agent.json");
     workspace::verify_restore_target(&state_path, false)?;
     let state_bytes = std::fs::read(&state_path).map_err(|e| e.to_string())?;
@@ -504,7 +504,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     if state["package_kind"] != "exe"
         || state["edition"] != edition
-        || state["normal_install_path"] != r"C:\Program Files\RustDesk"
+        || state["normal_install_path"]
+            .as_str()
+            .and_then(|value| system_dirs::get().fixed_normal_install(Path::new(value)))
+            .is_none()
         || state["disabled"] != false
         || state["management_agent_enabled"] != true
     {

@@ -84,7 +84,7 @@ fn pin_directories(state: &Path) -> Result<Vec<File>, String> {
 }
 
 pub fn create(recheck: impl Fn() -> Result<(),String>) -> Result<HeldMarker,String> {
-    create_at(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state"),recheck)
+    create_at(&super::system_dirs::get().agent().join("state"),recheck)
 }
 
 fn create_at(state: &Path, recheck: impl Fn() -> Result<(),String>) -> Result<HeldMarker,String> {

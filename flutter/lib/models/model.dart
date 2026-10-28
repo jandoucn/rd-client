@@ -1017,11 +1017,16 @@ class FfiModel with ChangeNotifier {
     } else if (type == 'input-password') {
       enterPasswordDialog(sessionId, dialogManager);
     } else if (type == 'terminal-admin-login') {
-      enterUserLoginDialog(
-          sessionId, dialogManager, 'terminal-admin-login-tip');
+      // Private build: admin terminal never asks for an OS account. Connection
+      // password is already known (Rust only emits this type from old builds);
+      // login with empty OS credentials so the peer path uses the process token.
+      parent.target!.login('', '', sessionId, '', false);
+      dialogManager.showLoading(translate('Logging in...'),
+          onCancel: closeConnection);
     } else if (type == 'terminal-admin-login-password') {
-      enterUserLoginAndPasswordDialog(
-          sessionId, dialogManager, 'terminal-admin-login-tip');
+      // Old controller builds asked for OS account + connection password.
+      // Only the RustDesk connection password is required now.
+      enterPasswordDialog(sessionId, dialogManager);
     } else if (type == 'restarting') {
       if (_usesAndroidConnectionResume) {
         _androidConnectionResumes[sessionId]?.retryStarted();

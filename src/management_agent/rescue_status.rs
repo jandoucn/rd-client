@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     io::Read,
-    path::{Path, PathBuf},
+    path::Path,
     sync::mpsc,
 };
 
@@ -427,7 +427,7 @@ fn start_checked(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
                 hbb_common::log::warn!("rescue verifier low priority setup failed");
                 return;
             }
-            let agent = PathBuf::from(r"C:\ProgramData\RustDesk\ManagementAgent");
+            let agent = super::system_dirs::get().agent();
             for tick in receiver {
                 let time = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

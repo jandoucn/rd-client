@@ -76,7 +76,7 @@ fn windows_main() {
         }
         return;
     }
-    let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
+    let program_data = management_agent::system_dirs::get().program_data.clone();
     let config = match management_agent::parse_service_arguments(
         arguments
             .iter()

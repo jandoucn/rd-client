@@ -279,7 +279,10 @@ fn fixed_root(id: &str) -> Result<PathBuf, String> {
     {
         return Err("EXE transaction ID invalid".into());
     }
-    Ok(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions").join(id))
+    Ok(crate::management_agent::system_dirs::get()
+        .agent()
+        .join("transactions")
+        .join(id))
 }
 
 pub(crate) fn dispatch(args: &[std::ffi::OsString], mode: &str) -> Result<(), String> {
@@ -303,7 +306,10 @@ fn prepare_cli(root: &Path) -> Result<(), String> {
         .file_name()
         .and_then(|v| v.to_str())
         .ok_or("EXE transaction ID missing")?;
-    let inbox = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\exe-inbox").join(id);
+    let inbox = crate::management_agent::system_dirs::get()
+        .agent()
+        .join("exe-inbox")
+        .join(id);
     workspace::verify(&inbox)?;
     let manifest: hbb_common::UpdateManifest = serde_json::from_slice(&exe_preparation::read(
         &inbox.join("approved-manifest.json"),
@@ -381,9 +387,12 @@ pub(crate) fn helper_native_fixture(root: &Path, public: &[u8]) -> Result<(), St
 
 fn native(root: &Path) -> bool {
     root.parent()
-        == Some(Path::new(
-            r"C:\ProgramData\RustDesk\ManagementAgent\transactions",
-        ))
+        == Some(
+            crate::management_agent::system_dirs::get()
+                .agent()
+                .join("transactions")
+                .as_path(),
+        )
 }
 
 fn launch(root: &Path, layout: &Layout, public: Option<&[u8]>) -> Result<Child, String> {
@@ -534,10 +543,14 @@ fn task_present(plan: &InstallPlan) -> Result<bool, String> {
         r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject Schedule.Service;$s.Connect();try{{$null=$s.GetFolder('\').GetTask('RustDeskManagementAgentResume-{}');[Console]::Write('PRESENT')}}catch{{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};if($e.HResult -eq -2147024894){{[Console]::Write('ABSENT')}}else{{throw}}}}"#,
         plan.transaction_id
     );
-    let output = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = Command::new(
+        crate::management_agent::system_dirs::get()
+            .system32()
+            .join(r"WindowsPowerShell\v1.0\powershell.exe"),
+    )
+    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    .output()
+    .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err("EXE task query failed".into());
     }

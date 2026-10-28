@@ -209,9 +209,6 @@ lazy_static::lazy_static! {
     static ref PENDING_SWITCH_SIDES_UUID: Arc::<Mutex<HashMap<String, (Instant, uuid::Uuid, bool)>>> = Default::default();
 }
 
-#[cfg(target_os = "windows")]
-const TERMINAL_OS_LOGIN_FAILED_MSG: &str = "Incorrect username or password.";
-
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -4095,15 +4092,14 @@ impl Connection {
 
     // Try to fill user token for terminal connection.
     // If username is empty, use the user token of the current session.
-    // If username is not empty, try to logon and check if the user is an administrator.
-    //    If the user is an administrator, use the user token of current process (SYSTEM).
-    //    If the user is not an administrator, return an error message.
-    // Note: Only local and domain users are supported, Microsoft account (online account) not supported for now.
+    // If username is not empty (admin terminal), use the current process token
+    // (SYSTEM when the installed service hosts the connection). Private build
+    // does not require OS credentials; password is ignored.
     #[cfg(target_os = "windows")]
-    fn fill_terminal_user_token(&mut self, username: &str, password: &str) -> Option<&'static str> {
-        // No need to check if the password is empty.
+    fn fill_terminal_user_token(&mut self, username: &str, _password: &str) -> Option<&'static str> {
         if !username.is_empty() {
-            return self.handle_administrator_check(username, password);
+            self.terminal_user_token = Some(TerminalUserToken::SelfUser);
+            return None;
         }
 
         if crate::platform::is_prelogin() {
@@ -4117,40 +4113,6 @@ impl Connection {
 
         self.terminal_user_token = Some(TerminalUserToken::SelfUser);
         None
-    }
-
-    #[cfg(target_os = "windows")]
-    fn handle_administrator_check(
-        &mut self,
-        username: &str,
-        password: &str,
-    ) -> Option<&'static str> {
-        let check_admin_res =
-            crate::platform::get_logon_user_token(username, password).map(|token| {
-                let is_token_admin = crate::platform::is_user_token_admin(token);
-                unsafe {
-                    hbb_common::allow_err!(CloseHandle(HANDLE(token as _)));
-                };
-                is_token_admin
-            });
-        match check_admin_res {
-            Ok(Ok(b)) => {
-                if b {
-                    self.terminal_user_token = Some(TerminalUserToken::SelfUser);
-                    None
-                } else {
-                    Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-                }
-            }
-            Ok(Err(e)) => {
-                log::error!("Failed to check if the user is an administrator: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
-            Err(e) => {
-                log::error!("Failed to get logon user token: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
-        }
     }
 
     #[cfg(target_os = "windows")]

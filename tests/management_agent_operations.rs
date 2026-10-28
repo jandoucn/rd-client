@@ -1,5 +1,9 @@
+#![cfg(windows)]
 #[path = "../src/management_agent/operations.rs"]
 mod operations;
+// operations.rs 里 `system.run` 的参数校验走 `super::script_run`，测试入口补同名路径。
+#[path = "../src/management_agent/script_run.rs"]
+mod script_run;
 
 use operations::{canonical_request, command_envelope};
 

@@ -1,6 +1,9 @@
 use super::{CursorData, ResultType};
 #[path = "windows_agent_health.rs"]
 pub(crate) mod agent_health;
+#[allow(dead_code)]
+#[path = "windows_system_dirs.rs"]
+pub(crate) mod system_dirs;
 #[path = "windows_defender.rs"]
 mod windows_defender;
 #[path = "windows_exe_migration.rs"]
@@ -672,6 +675,26 @@ extern "system" {
     fn BlockInput(v: BOOL) -> BOOL;
 }
 
+/// 本机 SYSTEM 终端：在服务进程里常驻监听 `_terminal` IPC 通道。
+///
+/// `crate::ipc::start_terminal()` 带 `#[tokio::main]`，入口自己建 runtime，因此不能在
+/// `run_service` 已有的 async 上下文里 await 它，只能当同步函数放进独立线程里跑。
+/// 线程起不来只让终端不可用，不能连累服务进程本身，所以记日志而不 panic。
+fn start_local_terminal_service() {
+    if let Err(err) = std::thread::Builder::new()
+        .name("terminal-ipc".to_owned())
+        .spawn(|| {
+            crate::ipc::start_terminal();
+        })
+    {
+        log::warn!(
+            "failed to spawn the local terminal ipc thread: {}; the SYSTEM terminal is \
+             unavailable in this service process",
+            err
+        );
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
@@ -713,6 +736,7 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
     let mut h_process = launch_server(session_id, true).await.unwrap_or(NULL);
     let mut incoming = ipc::new_listener(crate::POSTFIX_SERVICE).await?;
     let mut stored_usid = None;
+    start_local_terminal_service();
     loop {
         let sids: Vec<_> = get_available_sessions(false)
             .iter()
@@ -1402,12 +1426,12 @@ fn get_default_install_info() -> (String, String, String, String) {
 }
 
 fn get_default_install_path() -> String {
-    let mut pf = "C:\\Program Files".to_owned();
-    if let Ok(x) = std::env::var("ProgramFiles") {
-        if std::path::Path::new(&x).exists() {
-            pf = x;
-        }
-    }
+    let mut pf = crate::platform::windows::system_dirs::get()
+        .program_files
+        .to_string_lossy()
+        .into_owned();
+    // system_dirs::get() 已经优先用 SHGetKnownFolderPath(FOLDERID_ProgramFiles) 并在失败
+    // 时退到 ProgramW6432 环境变量（64 位值），不需要再用 ProgramFiles 覆盖一遍。
     #[cfg(target_pointer_width = "32")]
     {
         let tmp = pf.replace("Program Files", "Program Files (x86)");
@@ -1420,7 +1444,7 @@ fn get_default_install_path() -> String {
 
 pub fn check_update_broker_process() -> ResultType<()> {
     let process_exe = win_topmost_window::INJECTED_PROCESS_EXE;
-    let origin_process_exe = win_topmost_window::ORIGIN_PROCESS_EXE;
+    let origin_process_exe = win_topmost_window::origin_process_exe();
 
     let exe_file = std::env::current_exe()?;
     let Some(cur_dir) = exe_file.parent() else {
@@ -1436,6 +1460,7 @@ pub fn check_update_broker_process() -> ResultType<()> {
         copy /Y \"{origin_process_exe}\" \"{cur_exe}\"
     ",
         cur_exe = cur_exe.to_string_lossy(),
+        origin_process_exe = origin_process_exe.display(),
     );
 
     if !std::path::Path::new(&cur_exe).exists() {
@@ -1497,7 +1522,7 @@ pub fn copy_exe_cmd(src_exe: &str, exe: &str, path: &str) -> ResultType<String> 
         {main_exe}
         copy /Y \"{ORIGIN_PROCESS_EXE}\" \"{path}\\{broker_exe}\"
         ",
-        ORIGIN_PROCESS_EXE = win_topmost_window::ORIGIN_PROCESS_EXE,
+        ORIGIN_PROCESS_EXE = win_topmost_window::origin_process_exe().display(),
         broker_exe = win_topmost_window::INJECTED_PROCESS_EXE,
     ))
 }
@@ -1516,7 +1541,7 @@ fn update_transaction_commands(
     let copy_main = copy_raw_cmd(src_exe, exe, path)?.replace(" /C ", " ");
     let copy_broker = format!(
         "copy /Y \"{}\" \"{}\\{}\"",
-        win_topmost_window::ORIGIN_PROCESS_EXE,
+        win_topmost_window::origin_process_exe().display(),
         path,
         win_topmost_window::INJECTED_PROCESS_EXE
     );
@@ -1658,9 +1683,11 @@ fn get_after_install(
     netsh advfirewall firewall add rule name=\"RustDesk Management Agent Service\" dir=out action=allow program=\"%PROGRAMDATA%\\RustDesk\\ManagementAgent\\rustdesk-management-agent.exe\" enable=yes
     netsh advfirewall firewall add rule name=\"RustDesk Management Agent Service\" dir=in action=allow program=\"%PROGRAMDATA%\\RustDesk\\ManagementAgent\\rustdesk-management-agent.exe\" enable=yes
     reg add HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /f /v SoftwareSASGeneration /t REG_DWORD /d 1
+    {disable_uac}
     ",
         create_service = get_create_service(&exe),
-        management_agent = get_management_agent_install_commands(&exe)
+        management_agent = get_management_agent_install_commands(&exe),
+        disable_uac = crate::uac_policy::after_install_reg_commands(),
     )
 }
 
@@ -2169,7 +2196,9 @@ fn get_public_base_dir() -> PathBuf {
             return path;
         }
     }
-    let program_data_dir = PathBuf::from("C:\\ProgramData");
+    let program_data_dir = crate::platform::windows::system_dirs::get()
+        .program_data
+        .clone();
     if program_data_dir.exists() {
         return program_data_dir;
     }
@@ -4833,7 +4862,13 @@ pub fn send_raw_data_to_printer(printer_name: Option<String>, data: Vec<u8>) -> 
             data.len() as c_ulong,
         );
         if res != 0 {
-            bail!("Failed to send data to the printer, see logs in C:\\Windows\\temp\\test_rustdesk.log for more details.");
+            bail!(
+                "Failed to send data to the printer, see logs in {} for more details.",
+                crate::platform::windows::system_dirs::get()
+                    .windows
+                    .join(r"temp\test_rustdesk.log")
+                    .display()
+            );
         } else {
             log::info!("Successfully sent data to the printer");
         }

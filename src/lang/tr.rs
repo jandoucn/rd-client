@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Yeni sekme"),
         ("Keep terminal sessions on disconnect", "Bağlantı kesildiğinde terminal oturumlarını açık tut"),
         ("Terminal (Run as administrator)", "Terminal (Yönetici olarak çalıştır)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Lütfen kontrol edilen tarafın yönetici kullanıcı adı ve parolasını giriniz."),
         ("Failed to get user token.", "Kullanıcı belirteci alınamadı."),
         ("Incorrect username or password.", "Hatalı kullanıcı adı veya parola."),

@@ -1,5 +1,13 @@
 #![cfg(windows)]
 
+#[path = "../src/platform/windows_system_dirs.rs"]
+#[allow(dead_code)]
+mod system_dirs;
+// 代理源码里有 `crate::management_agent::system_dirs` 的写法，测试入口补同名路径。
+#[allow(unused_imports)]
+mod management_agent {
+    pub(crate) use super::system_dirs;
+}
 #[path = "../src/management_agent/identity.rs"]
 mod identity;
 #[path = "../src/management_agent/local_event_logic.rs"]

@@ -2322,6 +2322,7 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
         i++;
         break;
       case '--terminal-admin':
+      case '--terminal-system':
         setEnvTerminalAdmin();
         type = UriLinkType.terminal;
         id = args[i + 1];
@@ -2402,6 +2403,7 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     "rdp",
     "terminal",
     "terminal-admin",
+    "terminal-system",
   ];
   if (uri.authority.isEmpty &&
       uri.path.split('').every((char) => char == '/')) {
@@ -2497,7 +2499,9 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     } else if (command == '--terminal') {
       connect(Get.context!, id,
           isTerminal: true, forceRelay: forceRelay, password: password);
-    } else if (command == 'terminal-admin') {
+    } else if (command == 'terminal-admin' ||
+        command == 'terminal-system' ||
+        command == '--terminal-system') {
       setEnvTerminalAdmin();
       connect(Get.context!, id,
           isTerminal: true, forceRelay: forceRelay, password: password);

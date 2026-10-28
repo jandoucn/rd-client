@@ -9,10 +9,19 @@ use std::{
 pub fn restore(root: &Path, source: &Artifact, destination: &Path) -> Result<(), String> {
     source.verify(root)?;
     workspace::verify_file(&root.join(&source.relative_path))?;
+    let dirs = crate::management_agent::system_dirs::get();
     let identity_target = [
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
-    ].iter().any(|path| destination.to_string_lossy().eq_ignore_ascii_case(path));
+        dirs.local_service_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+        dirs.system_profile_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+    ]
+    .iter()
+    .any(|path| {
+        destination
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+    });
     workspace::verify_restore_target(destination, identity_target)?;
     let temporary = destination.with_extension(format!("restore-{}", std::process::id()));
     let mut input = std::fs::OpenOptions::new()

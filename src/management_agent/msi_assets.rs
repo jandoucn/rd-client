@@ -86,8 +86,7 @@ fn extract_verified(root: &Path, package: &Path, target: &hbb_common::UpdateTarg
     if destination.contains('"') || destination.chars().any(char::is_control) {
         return Err("MSI extraction destination invalid".into());
     }
-    let executable = std::env::var_os("SystemRoot").map(PathBuf::from)
-        .ok_or("Windows directory unavailable")?.join("System32").join("msiexec.exe");
+    let executable = super::system_dirs::get().system32().join("msiexec.exe");
     let mut command = Command::new(executable);
     command.arg("/a").arg(package).args(["/qn", "/norestart", "REBOOT=ReallySuppress"])
         .arg(format!("TARGETDIR={destination}"))

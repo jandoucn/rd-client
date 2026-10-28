@@ -30,7 +30,19 @@ std::wstring Encoded(const std::wstring& value) {
     return result;
 }
 
+// 客户端固定装在系统盘的 Program Files 下；系统盘不一定是 C 盘，必须向系统查询。
+bool FixedNormalPath(std::wstring& path) {
+    PWSTR programFiles = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles))) return false;
+    path = std::wstring(programFiles) + L"\\RustDesk";
+    CoTaskMemFree(programFiles);
+    return true;
+}
+
 SC_HANDLE OpenFixedMainService(DWORD access) {
+    std::wstring normal;
+    if (!FixedNormalPath(normal)) return nullptr;
+    const std::wstring expected = L"\"" + normal + L"\\RustDesk.exe\" --service";
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!manager) return nullptr;
     SC_HANDLE service = OpenServiceW(manager, L"RustDesk", access | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
@@ -46,7 +58,7 @@ SC_HANDLE OpenFixedMainService(DWORD access) {
         || config->dwStartType == SERVICE_DISABLED
         || !config->lpServiceStartName || _wcsicmp(config->lpServiceStartName, L"LocalSystem") != 0
         || !config->lpBinaryPathName
-        || _wcsicmp(config->lpBinaryPathName, L"\"C:\\Program Files\\RustDesk\\RustDesk.exe\" --service") != 0) {
+        || _wcsicmp(config->lpBinaryPathName, expected.c_str()) != 0) {
         CloseServiceHandle(service);
         return nullptr;
     }
@@ -77,6 +89,8 @@ UINT __stdcall InspectBootstrapUpgrade(MSIHANDLE install) {
         return WcaFinalize(ERROR_INSTALL_FAILURE);
     const std::wstring root = std::wstring(programData) + L"\\RustDesk";
     CoTaskMemFree(programData);
+    std::wstring normal;
+    if (!FixedNormalPath(normal)) return WcaFinalize(ERROR_INSTALL_FAILURE);
     WCHAR system[MAX_PATH];
     const UINT length = GetSystemDirectoryW(system, MAX_PATH);
     if (!length || length >= MAX_PATH) return WcaFinalize(ERROR_INSTALL_FAILURE);
@@ -86,7 +100,7 @@ UINT __stdcall InspectBootstrapUpgrade(MSIHANDLE install) {
         ;
     const std::wstring script = source + L"\ntry {if(Test-RdBootstrapUpgrade -Root " + Literal(root)
         + L" -Edition " + Literal(edition)
-        + L" -NormalPath 'C:\\Program Files\\RustDesk'){exit 0};exit 10}catch{exit 20}";
+        + L" -NormalPath " + Literal(normal) + L"){exit 0};exit 10}catch{exit 20}";
     const std::wstring line = L"\"" + executable + L"\" -NoProfile -NonInteractive -EncodedCommand " + Encoded(script);
     if (line.size() >= 32760) return WcaFinalize(ERROR_INSTALL_FAILURE);
     std::vector<wchar_t> arguments(line.begin(), line.end()); arguments.push_back(0);

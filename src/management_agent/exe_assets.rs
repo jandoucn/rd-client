@@ -50,7 +50,7 @@ pub fn prepare(
     edition: &str,
     minimum_build: u64,
 ) -> Result<SealedAssets, AssetError> {
-    if parent != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\exe-assets") {
+    if parent != super::system_dirs::get().agent().join("exe-assets") {
         return Err(AssetError::Workspace);
     }
     prepare_checked(

@@ -13,21 +13,19 @@
                     <Publish Event="SpawnDialog" Value="CancelDlg" />
                 </Control>
 
-                <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.InstallDirDlgDescription)" />
+                <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.MyInstallDirDlgDescription)" />
                 <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.InstallDirDlgTitle)" />
                 <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
                 <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
                 <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
 
                 <Control Id="FolderLabel" Type="Text" X="20" Y="60" Width="290" Height="18" NoPrefix="yes" Text="!(loc.InstallDirDlgFolderLabel)" />
-                <Control Id="Folder" Type="PathEdit" X="20" Y="80" Width="320" Height="18" Property="WIXUI_INSTALLDIR" Indirect="yes" />
-                <Control Id="ChangeFolder" Type="PushButton" X="20" Y="100" Width="56" Height="17" Text="!(loc.InstallDirDlgChange)" />
+                <!-- 安装目录固定，只显示不允许修改。 -->
+                <Control Id="Folder" Type="Text" X="20" Y="80" Width="320" Height="18" NoPrefix="yes" Text="[INSTALLFOLDER_INNER]" />
 
                 <Control Id="ChkBoxStartMenuShortcuts" Type="CheckBox" X="20" Y="140" Width="290" Height="17" Property="STARTMENUSHORTCUTS" CheckBoxValue="1" Text="!(loc.MyInstallDirDlgStartMenuShortcuts)" />
                 <Control Id="ChkBoxDesktopShortcuts" Type="CheckBox" X="20" Y="160" Width="290" Height="17" Property="DESKTOPSHORTCUTS" CheckBoxValue="1" Text="!(loc.MyInstallDirDlgDesktopShortcuts)" />
                 <Control Id="ChkBoxInstallPrinter" Type="CheckBox" X="20" Y="180" Width="290" Height="17" Property="PRINTER" CheckBoxValue="1" Text="!(loc.MyInstallDirDlgPrinter)" />
-                <Control Id="DefenderExclusions" Type="CheckBox" X="20" Y="201" Width="330" Height="17" Property="DEFENDER_CHECKBOX" CheckBoxValue="1" Text="!(loc.DefenderFileExclusions)" />
-                <Control Id="DefenderScope" Type="Text" X="20" Y="220" Width="330" Height="12" Text="!(loc.DefenderFileExclusionsScope)" />
             </Dialog>
         </UI>
     </Fragment>

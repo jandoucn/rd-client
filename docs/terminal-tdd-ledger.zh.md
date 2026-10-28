@@ -2,7 +2,7 @@
 
 > 本文件是本轮唯一执行台账。用户要求随时可见 TDD 进度：每完成一项立即改状态并写证据，不写「应该通过」。
 > 状态：⬜ 未开始 · 🟨 进行中 · ✅ 完成 · ⛔ 阻塞 · ⚠️ 已知限制
-> 最后更新：2026-10-28 08:40（审查修复：客户端尾部输出丢失、握手超时、到期原因与时长，见 §6）
+> 最后更新：2026-10-28 18:31（现网 agent 已换成审查修复后 debug 二进制，生产链路 whoami/resize/attach 冒烟全绿，见 §6 复测）
 >
 > ✅ 治理已放行（用户 2026-10-27 确认）：「SYSTEM 终端授权例外」已写入 rd-client 与 rd-api 两个 AGENTS.md。T2 按协议走独立 WS（不接命令通道），见 overnight-notes 特殊情况 1。契约《实现澄清补丁 v1》见 `docs/terminal-protocol.zh.md` §10。
 >
@@ -149,7 +149,20 @@
 | R6 | `drain_all` 后续轮次遇到缺口且重同步为空时丢掉缺口报告（代码审查 L1） | 代码审查 | 缺口与游标在空结果时也合并 | ✅ `drain_all_keeps_a_late_gap_even_when_resync_is_empty` |
 | H1 | 输出积压超过 4MB 环后 pump 永久卡住（另一会话修复 `transport::next_push`） | — | 由「Terminal 相关改动审查」会话完成 | ✅ 该会话 6 条用例 |
 
-测试回执：Mac `terminal::` 83/83；win10-gs `terminal::` 91/91（debug，未替换现网 agent）；Mac clippy 终端文件无告警。⚠️ win10-gs clippy 未能跑完：`rustdesk` lib 既有 16 个 deny 级错误（`src/platform/windows.rs`、`src/privacy_mode/win_virtual_display.rs`），与终端无关；另 `vcvars64.bat` 会把 `VCPKG_ROOT` 覆盖成 C 盘缺头文件的副本，clippy 需在 vcvars 之后重设。
+测试回执：Mac `terminal::` 83/83；win10-gs `terminal::` 91/91（debug）；Mac clippy 终端文件无告警。⚠️ win10-gs clippy 未能跑完：`rustdesk` lib 既有 16 个 deny 级错误（`src/platform/windows.rs`、`src/privacy_mode/win_virtual_display.rs`），与终端无关；另 `vcvars64.bat` 会把 `VCPKG_ROOT` 覆盖成 C 盘缺头文件的副本，clippy 需在 vcvars 之后重设。
+
+**现网替换 + 生产冒烟（2026-10-28 18:25–18:31）**
+
+| 项 | 结果 |
+|---|---|
+| 替换 | `replace-agent.ps1`；备份 `D:\tmp\rdtest\agent-backup\rustdesk-management-agent-20261028-182507.exe`（旧 sha `3e588920…`） |
+| 现网 sha256 | `39eb81cafd669f4e27e1e0ad0b2918d709fe15894fa520ed8135eabebaf46462`（与 `target\debug` 构建一致） |
+| 服务 | `RustDeskManagementAgent` Running；PID 30256 起于 18:25:10；出站 `47.100.7.221:443` ESTABLISHED |
+| 设备 | `1338209581`（yan），`terminal.available=true` |
+| V4 whoami | `nt authority\system` + `NT AUTHORITY\SYSTEM` + `__V4_OK__` |
+| V2 resize | `V2_COLS=140 V2_ROWS=45` |
+| V5 attach | 断浏览器 WS 不 close → attach 后 `V5_AFTER` 回显；补发约 4120 字节 |
+| 清理 | 临时 `rd_admin` 会话与铸造脚本已删 |
 
 已知限制（代码审查确认，本轮不改）：
 - shell 自行退出时 pump 线程逐个收尾，每个约 200ms、最坏 2s 静默 + 2s 读线程；4 个会话同时退出最坏约 16s，期间其他会话的输入与输出暂停（心跳仍在 60s 判死线内）。
@@ -165,6 +178,7 @@
   - 大段粘贴：170KB 与 200KB 均按 32KB 分片完整到达（`LEN-174080`、`LEN-204800`，19s / 23s），之后会话仍可用。
   - 断线重连输入暂停：掐断浏览器 WS 后出现「发送 Ctrl+C 并恢复输入」「恢复输入」，暂停期间输入既不回显也不执行；点「恢复输入」后输入正常。
   - 连带修复（同一版本，未见问题）：鉴权在 open/attach 前复核并每 60 秒复核；重连中「结束会话」走 REST；broker 1013/4013 关闭码与优雅关闭；容器捕获 SIGQUIT，`docker stop` 1 秒内正常退出。
-- ⛔ broker 仍未修：outbox 无上限（已绑定设备可撑爆 broker 内存）、attach 补发与实时输出竞态、慢浏览器阻塞同设备全部会话。
+- ✅ broker 三项已修（rd-api 工作区待提交）：outbox 加 8 MB 硬上限并改为会话级投递协程，attach 补发与实时输出按同一游标串行，慢浏览器只暂停它自己的会话。修复过程中另发现并修掉「对端不读时关闭连接自锁」：写锁被卡住的写操作占着，`CloseWithCode` 会一直等同一把锁，调用方还握着会话锁，`finish` 随之挂死。
+- ✅ rd-api 前端：工具栏新增「选中即复制」开关（默认关闭、状态存 localStorage），开启后选中即写剪贴板（去抖、同段不重复写、失败只提示一次）；终端内支持 Ctrl+V 与 Cmd+V 粘贴，只处理 keydown 以免 xterm 对同一次按键调两次处理器导致粘贴两遍。
 - 工作区未提交的 `system.run` 接入命令通道（operations.rs / operations_runtime.rs）与 AGENTS「命令通道禁止任意执行」冲突，不属终端范围，勿随终端提交。
 

@@ -47,7 +47,9 @@ pub fn context() -> Result<Option<EventContext>, String> {
         super::workspace::verify(value.path.parent().ok_or("local event parent absent")?)?;
         return Ok(Some(value));
     }
-    let path = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\local-events\events.json");
+    let agent_dir = super::system_dirs::get().agent();
+    let path = agent_dir.join(r"state\local-events\events.json");
+    let path = path.as_path();
     if !path.exists() {
         return Ok(None);
     }
@@ -57,7 +59,7 @@ pub fn context() -> Result<Option<EventContext>, String> {
     };
     let identity = super::identity::load_existing()?;
     let state: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(r"C:\ProgramData\RustDesk\ManagementAgent\state\agent.json")
+        &std::fs::read(agent_dir.join(r"state\agent.json"))
             .map_err(|_| "local events state unavailable")?,
     )
     .map_err(|_| "local events state malformed")?;
@@ -496,7 +498,7 @@ pub(super) fn reconcile_repairs(
         return Err("local R4 poll identity mismatch".into());
     }
     #[cfg(not(test))]
-    if agent != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent") {
+    if agent != super::system_dirs::get().agent() {
         return Err("local R4 fixed transaction root required".into());
     }
     let path = state.join("local-events/events.json");

@@ -324,17 +324,21 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     outbox.dispatch(|_, _| {
         #[cfg(not(t02_receipts))]
         super::runtime::install_allowed()?;
-        let status = Command::new(r"C:\Windows\System32\msiexec.exe")
-            .arg("/i")
-            .arg(outbox.directory.join(&package_name))
-            .args([
-                "/qn",
-                "LAUNCH_TRAY_APP=N",
-                "REBOOT=ReallySuppress",
-                "/norestart",
-            ])
-            .status()
-            .map_err(|e| e.to_string())?;
+        let status = Command::new(
+            crate::platform::windows::system_dirs::get()
+                .system32()
+                .join("msiexec.exe"),
+        )
+        .arg("/i")
+        .arg(outbox.directory.join(&package_name))
+        .args([
+            "/qn",
+            "LAUNCH_TRAY_APP=N",
+            "REBOOT=ReallySuppress",
+            "/norestart",
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
         let code = status.code().ok_or("ordinary installer exit unavailable")? as u32;
         let result = super::OutcomeWriteRequest::parse(&[
             args[0].clone(),

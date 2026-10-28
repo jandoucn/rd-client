@@ -314,7 +314,9 @@ fn run_admitted_msi(command: &Command, root: &Path, step: &str) -> Result<Instal
             let response = serde_json::json!({"schema":2,"role":if removal{"remove"}else{"install"},"parent_product_code":session.permit["product_code"],"parent_package_code":session.permit["package_code"],"transaction_id":session.permit["transaction_id"],"step":session.permit["step"],"nonce":session.permit["nonce"],
                 "challenge":challenge,"product_code":values[3],"package_code":values[4],"helper":session.permit["helper"],"ca":owner});
             let path = if removal {
-                std::path::PathBuf::from(r"C:\ProgramData\RustDesk\ManagementAgent\state")
+                super::system_dirs::get()
+                    .agent()
+                    .join("state")
                     .join(format!("msi-remove-session-{challenge}.json"))
             } else {
                 session
@@ -691,8 +693,11 @@ fn prepare_msi_removal(
     if !cache_path
         .parent()
         .map(|p| {
-            p.to_string_lossy()
-                .eq_ignore_ascii_case(r"C:\Windows\Installer")
+            p.to_string_lossy().eq_ignore_ascii_case(
+                &super::system_dirs::get()
+                    .installer_cache()
+                    .to_string_lossy(),
+            )
         })
         .unwrap_or(false)
         || !cache_path
@@ -815,7 +820,12 @@ fn prepare_msi_admission(
         .get_program()
         .to_string_lossy()
         .replace('/', "\\")
-        .eq_ignore_ascii_case(r"C:\Windows\System32\msiexec.exe")
+        .eq_ignore_ascii_case(
+            &super::system_dirs::get()
+                .system32()
+                .join("msiexec.exe")
+                .to_string_lossy(),
+        )
     {
         return Ok(None);
     }
@@ -880,7 +890,12 @@ fn prepare_msi_admission(
     }) {
         return Err("MSI admission unexpected caller override".into());
     }
-    if root != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions").join(id) {
+    if root
+        != super::system_dirs::get()
+            .agent()
+            .join("transactions")
+            .join(id)
+    {
         return Err("MSI admission requires fixed transaction directory".into());
     }
     let read = |path: &Path, limit: u64| -> Result<(serde_json::Value, String), String> {
@@ -926,7 +941,9 @@ fn prepare_msi_admission(
     )?;
     let (handoff, handoff_hash) = read(&root.join("handoff.json"), 4096)?;
     let (marker, marker_hash) = read(
-        Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\maintenance.json"),
+        &super::system_dirs::get()
+            .agent()
+            .join(r"state\maintenance.json"),
         4096,
     )?;
     let (transaction, transaction_hash) = read(&root.join("transaction.json"), 65536)?;
@@ -1000,9 +1017,8 @@ fn prepare_msi_admission(
         return Err("MSI admission previous helper still alive".into());
     }
     for gate in ["disable-agent", "disable-recovery"] {
-        match std::fs::symlink_metadata(
-            Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state").join(gate),
-        ) {
+        match std::fs::symlink_metadata(super::system_dirs::get().agent().join("state").join(gate))
+        {
             Ok(_) => return Err("MSI admission locally blocked".into()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("MSI admission local gate unavailable: {e}")),

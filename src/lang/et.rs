@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Uus kaart"),
         ("Keep terminal sessions on disconnect", "Säilita terminaliseansid ühenduse katkemisel"),
         ("Terminal (Run as administrator)", "Terminal (käivita administraatorina)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Palun sisesta juhitava poole administraatori kasutajanimi ja parool."),
         ("Failed to get user token.", "Kasutaja loa hankimine ebaõnnestus."),
         ("Incorrect username or password.", "Vale kasutajanimi või parool."),

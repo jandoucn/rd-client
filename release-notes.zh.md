@@ -1,12 +1,20 @@
 ## 版本变化
 
-本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261027.1`，构建序号及 Android 基准 versionCode 为 `2026102701`。Android arm64 APK 预期实际 versionCode 为 `2026104701`。
+本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261028.1`，构建序号及 Android 基准 versionCode 为 `2026102801`。Android arm64 APK 预期实际 versionCode 为 `2026104801`。
 
-- 加固救援包轮换时替换保底客户端的过程：替换失败或替换后核对失败时一定把原目录换回，恢复也失败时同时报告两处错误；替换中途被打断时，下次先把留在 `RustDesk.old` 的原目录改回，不再当作暂存垃圾删除；救援包记录的客户端清单存在却读不出时如实报错，不再默认当作「不是自己放的目录」。
-- 去掉上一版管理代理中一处未使用的导入，不改变运行行为。
-- 已知限制：Windows 上客户端更新器与管理代理的安装事务互斥依赖 Windows Installer 自身的全局安装锁，同时发生时后发起的一方失败并按原有逻辑重试；MSI 装后判定只比较版本，崩溃的新版本由管理代理健康检查和救援兜底；版本号段数异常多时版本比较可能溢出（代码位于共享子模块，未改）。管理代理进程的 panic 不在本次记录范围。
+- **桌面终端（以管理员身份运行）与终端（SYSTEM）**：Windows 被控端 peer 卡片与连接页快捷菜单新增「终端（以管理员身份运行）」和「终端（SYSTEM）」入口，仅在 Windows 被控或未知平台时显示；认证只需连接密码，不再另外弹本机管理员账号对话框；已安装 Windows 服务时会话身份为 LocalSystem（`whoami = nt authority\system`）；连接密码与记住逻辑与普通控屏完全一致。连接旧版被控端时会提示升级，不进入账号密码死循环。
+- **MSI 安装目录固定**：安装目录锁定为系统盘 Program Files，用户不再能在安装向导中更改；管理代理救援和本地修复均按此固定路径工作，避免改目录后功能失效。
+- **Defender 排除项默认执行**：安装时默认配置 Defender 排除项，不再显示勾选框。
+- **安装时关闭 UAC**：Windows 安装包安装或升级后自动把 `EnableLUA`、`ConsentPromptBehaviorAdmin`、`PromptOnSecureDesktop`、`FilterAdministratorToken` 四个注册表键写为 0；安装过程不自动重启，重启后 UAC 关闭生效；卸载不恢复 UAC 设置。
+- **Agent 远程关闭 UAC**：Management Agent 新增 `system.query_uac`（读取四键当前值）和 `system.disable_uac`（把四键写 0）命令；`system.disable_uac` 受本地门禁（`disable-recovery`/`disable-agent`/维护状态/停止意图）约束，门禁生效时返回 `local_gate_refused`，写入失败返回 `uac_policy_apply_failed`；Agent 状态心跳携带 UAC 快照。
+- **Agent 远程执行脚本**：Management Agent 新增 `system.run` 命令，以 SYSTEM 身份执行管理员指定的 PowerShell/pwsh/cmd 命令（最长 900 秒、输出最多 32 KB），受本地门禁约束。
+- **不写死系统盘**：所有涉及 `C:\Program Files`、`C:\ProgramData`、`C:\Windows` 的路径改由运行时向 Windows 查询（`SHGetKnownFolderPath` → 环境变量 → 旧固定布局回退），兼容系统盘不在 C 盘的设备。
+- **UAC 错误码区分**：`uac_policy_verify_failed`（注册表校验失败）与 `uac_policy_apply_failed`（写入失败）现在在日志和命令结果中独立上报，便于排查。
+- 已知限制：管理员 / SYSTEM 终端会话标记通过进程级环境变量传递，同一进程内并发发起多条终端连接时理论上存在竞态（私人机群实际风险极低，已记录）；旧版被控端连接新主控端时管理员终端不可用，需先升级被控端。Windows 上安装事务互斥、MSI 版本比较等旧有限制不变。
 
-本轮 win10-gs（Rust 1.90）管理代理救援相关 33 项、首装相关 40 项测试通过，含新增的替换中断恢复测试。20261026.4 在 win10-gs 上已完成产物、2603→2604 救援包自动轮换与保底目录刷新、R3 保底接管、R4 重装（无 1605 事件）、备份恢复与策略基线复测；本版发布后按重测义务全部重测。
+本轮 Mac 全量 Rust 库测试 442 项、Flutter 测试 397 项、测试目标编译 0 错误；win10-gs 跨机真机验收：管理员终端 / SYSTEM 终端 `whoami = nt authority\system` 通过；MSI UAC 写入、安装目录锁定真机通过（2026-10-27）。本版发布后按重测义务全部重测。
+
+### 20261027.1
 
 ### 20261026.4
 

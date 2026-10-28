@@ -294,7 +294,12 @@ impl LocalRepairPlan {
             || self.created_at == 0
             || self.version.is_empty()
             || self.original_normal != "missing"
-            || self.fallback_path != format!(r"C:\ProgramData\RustDesk\Client\{edition}\RustDesk")
+            || self.fallback_path
+                != crate::management_agent::system_dirs::get()
+                    .client_root()
+                    .join(edition)
+                    .join("RustDesk")
+                    .to_string_lossy()
             || self.fallback_command
                 != format!("\"{}\\RustDesk.exe\" --service", self.fallback_path)
             || !["auto", "manual"].contains(&self.fallback_start.as_str())
@@ -302,16 +307,31 @@ impl LocalRepairPlan {
         {
             return Err("local repair fixed source contract invalid".into());
         }
+        let dirs = crate::management_agent::system_dirs::get();
+        let agent_exe = dirs.agent().join("rustdesk-management-agent.exe");
+        let normal = dirs.normal_install();
         let agent = format!(
-            r#"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe --service --edition {edition} --package-kind msi --normal-install-path "C:\Program Files\RustDesk""#
+            r#"{} --service --edition {edition} --package-kind msi --normal-install-path "{}""#,
+            agent_exe.display(),
+            normal.display()
         );
         let quoted = format!(
-            r#""C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe" --service --edition {edition} --package-kind msi --normal-install-path "C:\Program Files\RustDesk""#
+            r#""{}" --service --edition {edition} --package-kind msi --normal-install-path "{}""#,
+            agent_exe.display(),
+            normal.display()
         );
         if self.agent_command != agent && self.agent_command != quoted {
             return Err("local repair agent contract invalid".into());
         }
-        if ![r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"].contains(&self.identity_path.as_str()){
+        if ![
+            dirs.local_service_roaming()
+                .join(r"RustDesk\config\RustDesk.toml"),
+            dirs.system_profile_roaming()
+                .join(r"RustDesk\config\RustDesk.toml"),
+        ]
+        .iter()
+        .any(|path| self.identity_path.eq_ignore_ascii_case(&path.to_string_lossy()))
+        {
             return Err("local repair identity path invalid".into());
         }
         if self.product_code.len() != 38

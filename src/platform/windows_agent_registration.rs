@@ -7,6 +7,7 @@ mod registration_reconnect;
 #[path = "../management_agent/workspace.rs"]
 mod workspace;
 
+use crate::platform::windows::system_dirs;
 use std::{io::Read, path::Path};
 
 fn read(path: &Path, identity: bool) -> Result<Vec<u8>, String> {
@@ -88,8 +89,8 @@ pub fn start(build: u64) {
             use std::sync::atomic::Ordering;
             let _guard=install_guard::InstallGuard::try_acquire().map_err(|_|"registration install lock unavailable")?.ok_or("registration installation busy")?;
             let config=Config::file().with_file_name("RustDesk2.toml");
-            if ![r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk2.toml"].iter().any(|p|config.to_string_lossy().eq_ignore_ascii_case(p)){return Err("registration config outside fixed profiles".into());}
-            check_gates(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state"),&config,crate::is_server(),crate::rendezvous_mediator::NEEDS_DEPLOY.load(Ordering::SeqCst),crate::updater::has_no_active_conns(),&Config::get_option("stop-service"))?;
+            let dirs=system_dirs::get();if ![dirs.local_service_roaming(),dirs.system_profile_roaming()].iter().any(|p|config.to_string_lossy().eq_ignore_ascii_case(&p.join(r"RustDesk\config\RustDesk2.toml").to_string_lossy())){return Err("registration config outside fixed profiles".into());}
+            check_gates(&dirs.agent().join("state"),&config,crate::is_server(),crate::rendezvous_mediator::NEEDS_DEPLOY.load(Ordering::SeqCst),crate::updater::has_no_active_conns(),&Config::get_option("stop-service"))?;
             if crate::platform::installing_service(){return Err("registration installation active".into());}
             if hbb_common::config::get_online_state()>0&&Config::get_key_confirmed(){return Err("registration already online".into());}
             if Config::get_rendezvous_servers()!=vec![String::from("rd.yan.life")]{return Err("registration server configuration mismatch".into());}

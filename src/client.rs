@@ -2853,6 +2853,7 @@ pub struct LoginConfigHandler {
     id: String,
     pub conn_type: ConnType,
     pub is_terminal_admin: bool,
+    pub terminal_admin_os_login_fallback: bool,
     hash: Hash,
     password: Vec<u8>, // remember password for reconnect
     pub remember: bool,
@@ -4506,6 +4507,18 @@ pub fn handle_login_error(
     err: &str,
     interface: &impl Interface,
 ) -> bool {
+    if let Some(dialog) = {
+        let lc = lc.read().unwrap();
+        crate::uac_policy::terminal_admin_legacy_peer_hint(
+            lc.is_terminal_admin,
+            lc.terminal_admin_os_login_fallback,
+            err,
+        )
+    } {
+        lc.write().unwrap().terminal_admin_os_login_fallback = true;
+        interface.msgbox("error", "Terminal (Run as administrator)", dialog, "");
+        return true;
+    }
     if err == LOGIN_MSG_PASSWORD_EMPTY {
         lc.write().unwrap().password = Default::default();
         interface.msgbox("input-password", "Password Required", "", "");
@@ -4735,11 +4748,32 @@ pub async fn handle_hash(
 
     let is_terminal_admin = lc.read().unwrap().is_terminal_admin;
     let is_terminal = lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL);
+    // Private build: admin terminal uses peer process token (SYSTEM when installed).
+    // Never open an OS account dialog; only the RustDesk connection password.
     if is_terminal && is_terminal_admin {
-        if password.is_empty() {
-            interface.msgbox("terminal-admin-login-password", "", "", "");
-        } else {
-            interface.msgbox("terminal-admin-login", "", "", "");
+        match crate::uac_policy::terminal_admin_after_hash(password.is_empty()) {
+            crate::uac_policy::TerminalAdminAfterHash::PromptConnectionPassword => {
+                interface.msgbox(
+                    crate::uac_policy::TERMINAL_ADMIN_CONNECTION_PASSWORD_MSGBOX,
+                    "Password Required",
+                    "",
+                    "",
+                );
+            }
+            crate::uac_policy::TerminalAdminAfterHash::AutoLoginWithMarker => {
+                let mut hasher = Sha256::new();
+                hasher.update(&password);
+                hasher.update(&hash.challenge);
+                let hash_password = hasher.finalize()[..].into();
+                send_login(
+                    lc.clone(),
+                    crate::uac_policy::TERMINAL_ADMIN_OS_MARKER.to_string(),
+                    String::new(),
+                    hash_password,
+                    peer,
+                )
+                .await;
+            }
         }
         lc.write().unwrap().hash = hash;
         return true;
@@ -4851,6 +4885,12 @@ pub async fn handle_login_from_ui(
     hasher2.update(&lc.read().unwrap().hash.challenge);
     hash_password = hasher2.finalize()[..].to_vec();
 
+    let marker_login = {
+        let lc = lc.read().unwrap();
+        lc.is_terminal_admin && !lc.terminal_admin_os_login_fallback
+    };
+    let (os_username, os_password) =
+        crate::uac_policy::terminal_login_os_credentials(marker_login, os_username, os_password);
     send_login(lc.clone(), os_username, os_password, hash_password, peer).await;
 }
 

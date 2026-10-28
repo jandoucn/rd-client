@@ -7183,6 +7183,7 @@ dependencies = [
  "totp-rs",
  "tray-icon",
  "ttf-parser",
+ "tungstenite",
  "url",
  "uuid",
  "virtual_display",

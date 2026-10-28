@@ -1,4 +1,12 @@
+// helper_runtime.rs、resume_task.rs、install_plan.rs 引用 `super::system_dirs` /
+// `crate::management_agent::system_dirs`，该模块在生产 crate 里只在 windows 下编译。
 #![cfg(windows)]
+#[path = "../src/platform/windows_system_dirs.rs"]
+#[allow(dead_code)]
+mod system_dirs;
+mod management_agent {
+    pub(crate) use super::system_dirs;
+}
 #[path = "../src/management_agent/bootstrap_update.rs"] mod bootstrap_update;
 #[path = "../src/management_agent/handoff.rs"]
 mod handoff;

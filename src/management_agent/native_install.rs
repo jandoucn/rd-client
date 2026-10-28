@@ -55,7 +55,8 @@ impl NativeAssets {
         {
             return Err("native installation assets/product identity invalid".into());
         }
-        if ![r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"].contains(&self.identity_path.as_str()){return Err("native installation identity path not approved".into());}
+        let dirs = super::system_dirs::get();
+        if ![dirs.local_service_roaming(), dirs.system_profile_roaming()].iter().any(|root| root.join(r"RustDesk\config\RustDesk.toml").to_string_lossy().eq_ignore_ascii_case(&self.identity_path)){return Err("native installation identity path not approved".into());}
         if !self.original_msi.relative_path.ends_with(".msi")
             || !self.agent_target.relative_path.ends_with(".exe")
             || !self.client_target_manifest.relative_path.ends_with(".json")
@@ -239,9 +240,7 @@ impl NativeInstaller {
             arguments: vec!["--service".into()],
             start_type: start_type(&main_snapshot.start_type)?,
         };
-        let program_data = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        let program_data = super::system_dirs::get().program_data.clone();
         let agent = Contract {
             name: "RustDeskManagementAgent".into(),
             executable: program_data.join("RustDesk").join("ManagementAgent").join("rustdesk-management-agent.exe"),
@@ -291,10 +290,7 @@ impl NativeInstaller {
             &self.root.join(&package.relative_path),
             &manifest,
         )?;
-        let tool = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join("System32/msiexec.exe");
+        let tool = super::system_dirs::get().system32().join("msiexec.exe");
         let mut command = Command::new(tool);
         command.args(installer_process::msi_arguments(
             &self.root.join(&package.relative_path),

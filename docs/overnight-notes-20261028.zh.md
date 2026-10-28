@@ -20,3 +20,12 @@
 - 生产 **0.1.56** 健康；设备 **1338209581** caps 含 `system.terminal@1`；终端 WS ESTABLISHED。
 - **V1–V2、V4–V6** 台账已 ✅；**V3** ⏭️ v2。
 - 收尾门禁 G1–G6 ✅；G7 ⚠️；G8 ⚠️ 保留。
+
+## 补充（2026-10-28 晚）：桌面管理员终端跨机验收
+
+与网页 Agent 终端无关。详见 **`docs/desktop-terminal-admin-system.zh.md`**。
+
+- win10-gs、GepShare（`83077683`）主库 `librustdesk.dll` 均为 sha `35cec6e31840ff6a…`。
+- **跨机** win10-gs → GepShare 管理员终端：无 Windows 交互登录框；`whoami` = `nt authority\system`。
+- 本机连本机不作连接密码结论；Mac Yan 热换 dylib 会导致无法启动，已恢复原库。
+- Flutter「终端（SYSTEM）」菜单等正式 Tag Build。

@@ -43,7 +43,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const AGENT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
 const LIMIT: usize = 262144;
 
 pub struct CurrentInstallation<'a> {
@@ -244,7 +243,7 @@ fn current_product_code() -> Result<String, DeliveryError> {
         }
         if !query("InstallLocation")?
             .trim_end_matches(['\\', '/'])
-            .eq_ignore_ascii_case(r"C:\Program Files\RustDesk")
+            .eq_ignore_ascii_case(&super::system_dirs::get().normal_install().to_string_lossy())
             || found.is_some()
         {
             return Err(DeliveryError::RegisteredSourceMismatch);
@@ -325,7 +324,7 @@ fn discard_superseded_at<G>(
 #[cfg(not(test))]
 pub fn discard_superseded_approval() -> Result<bool, DeliveryError> {
     discard_superseded_at(
-        Path::new(AGENT),
+        &super::system_dirs::get().agent(),
         install_guard::InstallGuard::try_acquire,
         current_product_code,
         |path| {
@@ -340,7 +339,8 @@ pub fn discard_superseded_approval() -> Result<bool, DeliveryError> {
 
 #[cfg(not(test))]
 pub fn coordinate_current_installation() -> Result<CoordinationOutcome, DeliveryError> {
-    let agent = Path::new(AGENT);
+    let agent = super::system_dirs::get().agent();
+    let agent = agent.as_path();
     let _root_reader = installed_state_acl::hold_installed_root(agent)
         .map_err(|_| DeliveryError::UntrustedPath)?;
     let _installed_read = installed_state_acl::verify_installed_state(
@@ -370,11 +370,15 @@ pub fn coordinate_current_installation() -> Result<CoordinationOutcome, Delivery
         .ok_or(DeliveryError::BuildMismatch)?;
     let identity = hbb_common::config::Config::file();
     if ![
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        super::system_dirs::get()
+            .local_service_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+        super::system_dirs::get()
+            .system_profile_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .iter()
-    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(p))
+    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
     {
         return Err(DeliveryError::IdentityMismatch);
     }
@@ -390,7 +394,7 @@ pub fn coordinate_current_installation() -> Result<CoordinationOutcome, Delivery
     gates(agent, &bytes, &config, &request)?;
     let health = super::health_windows::probe_blocking(
         r"\\.\pipe\RustDesk\management-health-v2",
-        Path::new(r"C:\Program Files\RustDesk\RustDesk.exe"),
+        &super::system_dirs::get().normal_install().join("RustDesk.exe"),
         build,
         std::time::Duration::from_secs(3),
     )
@@ -437,15 +441,20 @@ pub enum DeliveryError {
 pub fn deliver_installed_msi_approval(request: Request<'_>) -> Result<(), DeliveryError> {
     let identity = hbb_common::config::Config::file();
     if ![
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        super::system_dirs::get()
+            .local_service_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+        super::system_dirs::get()
+            .system_profile_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .iter()
-    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(p))
+    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
     {
         return Err(DeliveryError::IdentityMismatch);
     }
-    let agent = Path::new(AGENT);
+    let agent = super::system_dirs::get().agent();
+    let agent = agent.as_path();
     let config = identity.with_file_name("RustDesk2.toml");
     let _root_reader = installed_state_acl::hold_installed_root(agent)
         .map_err(|_| DeliveryError::UntrustedPath)?;
@@ -482,7 +491,7 @@ fn read_locked(
 }
 
 fn hold_directory(path: &Path) -> Result<File, DeliveryError> {
-    if path == Path::new(AGENT) {
+    if path == super::system_dirs::get().agent() {
         let _validated = installed_state_acl::hold_installed_root(path)
             .map_err(|_| DeliveryError::UntrustedPath)?;
     }

@@ -299,6 +299,19 @@ class _ConnectionPageState extends State<ConnectionPage>
         isTcpTunneling: isTcpTunneling);
   }
 
+  /// Whether the admin / SYSTEM terminal entries apply to [id].
+  /// The peer card gates these on `peer.platform == kPeerPlatformWindows`, but a
+  /// manually typed ID has no peer object. Only a cached peer that is known to
+  /// be non-Windows hides the entries; an unknown ID keeps them, so the entry is
+  /// not lost for a device that is simply not in the address book.
+  bool _terminalAdminApplies(String id) {
+    if (id.isEmpty) return true;
+    for (final peer in _allPeersLoader.peers) {
+      if (peer.id == id) return peer.platform == kPeerPlatformWindows;
+    }
+    return true;
+  }
+
   /// UI for the remote ID TextField.
   /// Search for a peer.
   Widget _buildRemoteIDTextField(BuildContext context) {
@@ -529,6 +542,22 @@ class _ConnectionPageState extends State<ConnectionPage>
                                       '${translate('Terminal')} (beta)',
                                       () => onConnect(isTerminal: true)
                                     ),
+                                    if (_terminalAdminApplies(_idController.id)) ...[
+                                      (
+                                        '${translate('Terminal (Run as administrator)')} (beta)',
+                                        () {
+                                          setEnvTerminalAdmin();
+                                          onConnect(isTerminal: true);
+                                        }
+                                      ),
+                                      (
+                                        translate('Terminal (SYSTEM)'),
+                                        () {
+                                          setEnvTerminalAdmin();
+                                          onConnect(isTerminal: true);
+                                        }
+                                      ),
+                                    ],
                                     // `connect` routes this through the
                                     // desktop path only; the peer card gates
                                     // it the same way.

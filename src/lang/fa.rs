@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "زبانه جدید"),
         ("Keep terminal sessions on disconnect", "حفظ جلسات ترمینال پس از قطع اتصال"),
         ("Terminal (Run as administrator)", "ترمینال (اجرای به عنوان مدیر سیستم)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "برای اجرای ترمینال به‌ عنوان مدیر، نام کاربری و رمز عبور مدیر سیستم ریموت را وارد کنید."),
         ("Failed to get user token.", "دریافت توکن کاربر ناموفق بود."),
         ("Incorrect username or password.", "نام کاربری یا رمز عبور اشتباه است."),

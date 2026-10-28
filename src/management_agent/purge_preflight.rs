@@ -10,7 +10,7 @@ pub fn acquire() -> Result<Context, String> {
     if !unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() } {
         return Err("purge execution requires administrator".into());
     }
-    acquire_at(std::path::Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\maintenance.json"))
+    acquire_at(&super::system_dirs::get().agent().join(r"state\maintenance.json"))
 }
 
 fn acquire_at(maintenance: &std::path::Path) -> Result<Context, String> {

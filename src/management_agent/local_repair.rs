@@ -18,8 +18,12 @@ use windows_service::{
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
 
-const AGENT: &str = r"C:\ProgramData\RustDesk\ManagementAgent";
-const NORMAL: &str = r"C:\Program Files\RustDesk";
+fn agent_root() -> PathBuf {
+    crate::management_agent::system_dirs::get().agent()
+}
+fn normal() -> PathBuf {
+    crate::management_agent::system_dirs::get().normal_install()
+}
 
 #[path = "local_repair_total_loss_runtime.rs"]
 mod total_loss_runtime;
@@ -156,7 +160,7 @@ fn root(id: &str) -> Result<PathBuf, String> {
     if !token(id) {
         return Err("local repair transaction ID invalid".into());
     }
-    Ok(Path::new(AGENT).join("transactions").join(id))
+    Ok(agent_root().join("transactions").join(id))
 }
 pub(super) fn capacity_admission(
     root: &Path,
@@ -272,7 +276,7 @@ fn copy(directory: &Path, source: &Path, name: &str, limit: u64) -> Result<Artif
     })
 }
 fn normal_missing() -> Result<(), String> {
-    match std::fs::symlink_metadata(NORMAL) {
+    match std::fs::symlink_metadata(normal()) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err("local repair normal state unknown".into()),
         Ok(_) => Err("local repair requires explicit missing normal directory".into()),
@@ -301,11 +305,11 @@ fn start_type(value: &str) -> ServiceStartType {
 fn main_contract(plan: &LocalRepairPlan, fallback: bool) -> Contract {
     Contract {
         name: "RustDesk".into(),
-        executable: Path::new(if fallback {
-            plan.fallback_path.as_str()
+        executable: if fallback {
+            PathBuf::from(plan.fallback_path.as_str())
         } else {
-            NORMAL
-        })
+            normal()
+        }
         .join("RustDesk.exe"),
         arguments: vec!["--service".into()],
         start_type: start_type(&plan.fallback_start),
@@ -314,7 +318,7 @@ fn main_contract(plan: &LocalRepairPlan, fallback: bool) -> Contract {
 fn agent_contract(plan: &LocalRepairPlan) -> Contract {
     Contract {
         name: "RustDeskManagementAgent".into(),
-        executable: Path::new(AGENT).join("rustdesk-management-agent.exe"),
+        executable: agent_root().join("rustdesk-management-agent.exe"),
         arguments: vec![
             "--service".into(),
             "--edition".into(),
@@ -327,7 +331,7 @@ fn agent_contract(plan: &LocalRepairPlan) -> Contract {
             "--package-kind".into(),
             "msi".into(),
             "--normal-install-path".into(),
-            NORMAL.into(),
+            normal().to_string_lossy().into_owned(),
         ],
         start_type: ServiceStartType::AutoStart,
     }
@@ -500,7 +504,7 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     let fallback_command = snapshot_service(&fallback_contract)?;
     let agent = Contract {
         name: "RustDeskManagementAgent".into(),
-        executable: Path::new(AGENT).join("rustdesk-management-agent.exe"),
+        executable: agent_root().join("rustdesk-management-agent.exe"),
         arguments: vec![
             "--service".into(),
             "--edition".into(),
@@ -508,7 +512,7 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
             "--package-kind".into(),
             "msi".into(),
             "--normal-install-path".into(),
-            NORMAL.into(),
+            normal().to_string_lossy().into_owned(),
         ],
         start_type: ServiceStartType::AutoStart,
     };
@@ -516,12 +520,19 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     ready(&fallback_contract.executable, build, true)?;
     let configured = hbb_common::config::Config::file();
     let identity = [
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        crate::management_agent::system_dirs::get()
+            .local_service_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+        crate::management_agent::system_dirs::get()
+            .system_profile_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .into_iter()
-    .find(|path| configured.to_string_lossy().eq_ignore_ascii_case(path))
-    .map(PathBuf::from)
+    .find(|path| {
+        configured
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+    })
     .ok_or("local repair identity outside fixed profiles")?;
     let config = identity.with_file_name("RustDesk2.toml");
     if !hbb_common::config::Config2::file()
@@ -537,7 +548,7 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     if let Some(approval) = &approval_source {
         let receipt = copy(
             &directory,
-            &Path::new(AGENT).join("rescue/current/installation-receipt.json"),
+            &agent_root().join("rescue/current/installation-receipt.json"),
             "installation-receipt.json",
             65536,
         )?;
@@ -547,14 +558,14 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     }
     freeze_approval(
         &directory,
-        &Path::new(AGENT).join("rescue/current"),
+        &agent_root().join("rescue/current"),
         &manifest,
         approval_source.as_ref(),
         key,
     )?;
     let client_inventory = copy(
         &directory,
-        Path::new(AGENT)
+        agent_root()
             .join("rescue/current/client/manifest.json")
             .as_path(),
         "client-inventory.json",
@@ -570,20 +581,22 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     let config_backup = copy(&directory, &config, "config-backup.toml", 65536)?;
     let bootstrap_backup = copy(
         &directory,
-        Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\rustdesk-recovery-bootstrap.exe"),
+        &crate::management_agent::system_dirs::get()
+            .recovery_bootstrap()
+            .join("rustdesk-recovery-bootstrap.exe"),
         "bootstrap-backup.exe",
         512 * 1024 * 1024,
     )?;
     let bootstrap_manifest = copy(
         &directory,
-        Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\bootstrap.json"),
+        &crate::management_agent::system_dirs::get()
+            .recovery_bootstrap()
+            .join("bootstrap.json"),
         "bootstrap-backup.json",
         65536,
     )?;
     let approved_bundle: serde_json::Value = serde_json::from_slice(&read(
-        Path::new(AGENT)
-            .join("rescue/current/bundle.json")
-            .as_path(),
+        agent_root().join("rescue/current/bundle.json").as_path(),
         65536,
     )?)
     .map_err(|_| "local repair bundle malformed")?;
@@ -635,7 +648,7 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
         persist_installed_plan(
             &directory,
             &plan,
-            &Path::new(AGENT).join("state"),
+            &agent_root().join("state"),
             &identity_bytes,
             public,
         )?;
@@ -824,12 +837,7 @@ fn check(directory: &Path, plan: &LocalRepairPlan, public: Option<&[u8]>) -> Res
     if plan.approval_source.is_some() {
         workspace::verify_file(&directory.join("installation-receipt.json"))?;
         let identity = read(&directory.join(&plan.identity_backup.relative_path), 65536)?;
-        plan.verify_approval_source(
-            directory,
-            &Path::new(AGENT).join("state"),
-            &identity,
-            public,
-        )?;
+        plan.verify_approval_source(directory, &agent_root().join("state"), &identity, public)?;
     }
     for asset in plan.artifacts() {
         workspace::verify_file(&directory.join(&asset.relative_path))?;
@@ -929,7 +937,7 @@ fn launch_checked(directory: &Path, public: Option<&[u8]>) -> Result<std::proces
     }
     check(directory, &plan, public)?;
     normal_missing()?;
-    require_optin(&Path::new(AGENT).join("state"))?;
+    require_optin(&agent_root().join("state"))?;
     if !super::rescue_assets::r3_cycle_allowed()? {
         return Err("local repair locally blocked".into());
     }
@@ -952,7 +960,7 @@ fn launch_checked(directory: &Path, public: Option<&[u8]>) -> Result<std::proces
     )?));
     let nonce = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(32));
     super::maintenance::claim(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &plan.installation_id,
         &plan.transaction_id,
         &digest,
@@ -1022,7 +1030,7 @@ fn launch_checked(directory: &Path, public: Option<&[u8]>) -> Result<std::proces
     )?;
     verify_task(&plan, directory)?;
     preflight_owned(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &hbb_common::config::Config2::file(),
         &plan,
         &binding,
@@ -1147,7 +1155,7 @@ fn run_checked(
             &plan,
             &binding,
             &tx,
-            &Path::new(AGENT).join("state"),
+            &agent_root().join("state"),
             &hbb_common::config::Config2::file(),
             || {
                 verify_task(&plan, &directory)?;
@@ -1164,7 +1172,7 @@ fn run_checked(
             &directory,
             &plan,
             &binding,
-            &Path::new(AGENT).join("state"),
+            &agent_root().join("state"),
             &hbb_common::config::Config2::file(),
             || verify_task(&plan, &directory),
         )?;
@@ -1180,7 +1188,7 @@ fn run_checked(
     }
     verify_task(&plan, &directory)?;
     super::maintenance::verify(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &hbb_common::config::Config2::file(),
         &plan.installation_id,
         id,
@@ -1210,7 +1218,7 @@ fn run_checked(
         outcome,
         || {
             preflight_owned(
-                &Path::new(AGENT).join("state"),
+                &agent_root().join("state"),
                 &hbb_common::config::Config2::file(),
                 &plan,
                 &binding,
@@ -1226,7 +1234,7 @@ fn run_checked(
         &directory,
         &plan,
         &binding,
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         result,
         || super::resume_task::remove(id),
     )
@@ -1373,7 +1381,7 @@ struct LocalBackend {
 impl LocalBackend {
     fn gates(&self) -> Result<(), String> {
         super::maintenance::verify(
-            &Path::new(AGENT).join("state"),
+            &agent_root().join("state"),
             &hbb_common::config::Config2::file(),
             &self.plan.installation_id,
             &self.plan.transaction_id,
@@ -1393,21 +1401,25 @@ impl LocalBackend {
         let command = if fallback {
             self.plan.fallback_command.clone()
         } else {
-            format!(r#""{NORMAL}\RustDesk.exe" --service"#)
+            format!(r#""{}" --service"#, normal().join("RustDesk.exe").display())
         };
-        let status = std::process::Command::new(r"C:\Windows\System32\sc.exe")
-            .args([
-                "config",
-                "RustDesk",
-                "binPath=",
-                &command,
-                "start=",
-                &self.plan.fallback_start,
-                "obj=",
-                "LocalSystem",
-            ])
-            .status()
-            .map_err(|e| e.to_string())?;
+        let status = std::process::Command::new(
+            crate::management_agent::system_dirs::get()
+                .system32()
+                .join("sc.exe"),
+        )
+        .args([
+            "config",
+            "RustDesk",
+            "binPath=",
+            &command,
+            "start=",
+            &self.plan.fallback_start,
+            "obj=",
+            "LocalSystem",
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
         if !status.success() {
             return Err("local repair fixed service configuration failed".into());
         }
@@ -1415,7 +1427,7 @@ impl LocalBackend {
     }
     fn verify_agent(&self) -> Result<(), String> {
         let _lock = package_gate::lock_verified_file(
-            &Path::new(AGENT).join("rustdesk-management-agent.exe"),
+            &agent_root().join("rustdesk-management-agent.exe"),
             &hbb_common::UpdateTarget {
                 size: self.plan.agent_backup.size,
                 sha256: self.plan.agent_backup.sha256.clone(),
@@ -1427,7 +1439,9 @@ impl LocalBackend {
             return Err("local repair agent not running".into());
         }
         let _bootstrap = package_gate::lock_verified_file(
-            Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\rustdesk-recovery-bootstrap.exe"),
+            &crate::management_agent::system_dirs::get()
+                .recovery_bootstrap()
+                .join("rustdesk-recovery-bootstrap.exe"),
             &hbb_common::UpdateTarget {
                 size: self.plan.bootstrap_backup.size,
                 sha256: self.plan.bootstrap_backup.sha256.clone(),
@@ -1435,7 +1449,9 @@ impl LocalBackend {
             },
         )?;
         let actual: serde_json::Value = serde_json::from_slice(&read(
-            Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\bootstrap.json"),
+            &crate::management_agent::system_dirs::get()
+                .recovery_bootstrap()
+                .join("bootstrap.json"),
             65536,
         )?)
         .map_err(|_| "local repair bootstrap manifest invalid")?;
@@ -1472,7 +1488,7 @@ impl Backend for LocalBackend {
     }
     fn apply_package(&mut self) -> Result<InstallOutcome, String> {
         self.gates()?;
-        require_optin(&Path::new(AGENT).join("state"))?;
+        require_optin(&agent_root().join("state"))?;
         let package = self.directory.join(&self.plan.package.relative_path);
         let _lock = package_gate::lock_verified_file(
             &package,
@@ -1482,7 +1498,11 @@ impl Backend for LocalBackend {
                 ..Default::default()
             },
         )?;
-        let mut command = std::process::Command::new(r"C:\Windows\System32\msiexec.exe");
+        let mut command = std::process::Command::new(
+            crate::management_agent::system_dirs::get()
+                .system32()
+                .join("msiexec.exe"),
+        );
         command
             .args(super::installer_process::msi_arguments(
                 &package,
@@ -1526,7 +1546,7 @@ impl Backend for LocalBackend {
                 ..Default::default()
             },
         )?;
-        let matches = self.inventory()?.matches_directory(Path::new(NORMAL))?
+        let matches = self.inventory()?.matches_directory(&normal())?
             && registered.package_name == self.plan.package.relative_path;
         #[cfg(test)]
         let matches = matches && !self.fail_validation;
@@ -1579,7 +1599,7 @@ impl Backend for LocalBackend {
         super::file_restore::restore(
             &self.directory,
             &self.plan.agent_backup,
-            &Path::new(AGENT).join("rustdesk-management-agent.exe"),
+            &agent_root().join("rustdesk-management-agent.exe"),
         )?;
         original_identity(&self.directory, &self.plan)?;
         self.configure(true)?;

@@ -4,6 +4,7 @@
 #include <vector>
 #include <wincrypt.h>
 #include <objbase.h>
+#include <shlobj.h>
 #pragma comment(lib, "msi.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -52,7 +53,7 @@ function ProcessOwner($owner,[string]$path){
 )PS"
 LR"PS(
 try {
- $base='C:\ProgramData\RustDesk\ManagementAgent'
+ $base=Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'RustDesk\ManagementAgent'
  if($removal){
   Token $challenge 32
   $session=(ReadBound "$base\state\msi-remove-session-$challenge.json" 8192).value
@@ -135,7 +136,7 @@ LR"PS(
   $sf=[IO.File]::Open($src,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);[void]$held.Add($sf);Same $sf.Length $old.size
   $sha=[Security.Cryptography.SHA256]::Create();try{Same ([BitConverter]::ToString($sha.ComputeHash($sf)).Replace('-','').ToLowerInvariant()) $old.sha256}finally{$sha.Dispose()}
   $cache=[string]$remove.cached_path
-  Need ([IO.Path]::GetDirectoryName($cache) -ieq 'C:\Windows\Installer' -and [IO.Path]::GetExtension($cache) -ieq '.msi') 'cached_path'
+  Need ([IO.Path]::GetDirectoryName($cache) -ieq (Join-Path ([Environment]::GetFolderPath('Windows')) 'Installer') -and [IO.Path]::GetExtension($cache) -ieq '.msi') 'cached_path'
   Need ([IO.Path]::GetFullPath($original) -ieq $cache) 'removal_original_database'
   $cf=[IO.File]::Open($cache,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);[void]$held.Add($cf)
   $sha=[Security.Cryptography.SHA256]::Create();try{Same ([BitConverter]::ToString($sha.ComputeHash($cf)).Replace('-','').ToLowerInvariant()) $remove.cached_sha256}finally{$sha.Dispose()}
@@ -255,7 +256,12 @@ extern "C" UINT __stdcall CheckAgentInstallAdmission(MSIHANDLE install) {
             if(read!=ERROR_SUCCESS || !SessionChallenge(install,id,step,nonce,product,code,challenge,created,removal)
                 || !AdmissionPermit(id,step,nonce,Property(install,L"OriginalDatabase"),product,code,challenge,GetCurrentProcessId(),created,removal)) { Refused(install);return ERROR_INSTALL_FAILURE; }
         } else {
-            DWORD marker=GetFileAttributesW(L"C:\\ProgramData\\RustDesk\\ManagementAgent\\state\\maintenance.json");
+            // ProgramData 跟着系统盘走，不能写死 C 盘。
+            PWSTR programData=nullptr;
+            if(FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData,0,nullptr,&programData))){Refused(install);return ERROR_INSTALL_FAILURE;}
+            const std::wstring maintenance=std::wstring(programData)+L"\\RustDesk\\ManagementAgent\\state\\maintenance.json";
+            CoTaskMemFree(programData);
+            DWORD marker=GetFileAttributesW(maintenance.c_str());
             DWORD markerError=GetLastError();
             if(marker!=INVALID_FILE_ATTRIBUTES || (markerError!=ERROR_FILE_NOT_FOUND && markerError!=ERROR_PATH_NOT_FOUND)){Refused(install);return ERROR_INSTALL_FAILURE;}
         }

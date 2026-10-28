@@ -161,10 +161,9 @@ fn cleanup_task_present(id: &str, helper: &Path) -> Result<bool, String> {
     let script = format!(
         r#"$ErrorActionPreference='Stop';try {{$s=New-Object -ComObject Schedule.Service;$s.Connect();$f=$s.GetFolder('\');try {{$t=$f.GetTask('RustDeskManagementAgentResume-{id}');[Console]::Out.Write('PRESENT')}}catch {{$e=$_.Exception;while($e.InnerException){{$e=$e.InnerException}};if($e.HResult -eq -2147024894){{[Console]::Out.Write('ABSENT')}}else{{throw}}}}}}catch{{[Console]::Error.Write('Task query failed');exit 1}}"#
     );
-    let tool = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .ok_or("SystemRoot unavailable")?
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let tool = super::system_dirs::get()
+        .system32()
+        .join(r"WindowsPowerShell\v1.0\powershell.exe");
     let output = std::process::Command::new(tool)
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
@@ -389,8 +388,7 @@ fn resume_checked(root: &Path, fixture_key: Option<(&str, &[u8])>) -> Result<Own
     let terminal_cleanup = cleanup_receipt(root, &plan, &transaction)?;
     if terminal_cleanup { cleanup_task_present(&plan.transaction_id, &helper)?; }
     else { resume_task::verify(&resume_task::read_back(&plan.transaction_id)?, &helper, &plan.transaction_id)?; }
-    let state_directory = std::env::var_os("ProgramData").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| r"C:\ProgramData".into()).join("RustDesk/ManagementAgent/state");
+    let state_directory = super::system_dirs::get().agent().join("state");
     let intent_path = hbb_common::config::Config2::file();
     #[cfg(test)]
     let (state_directory, intent_path) = if fixture_key.is_some() {
@@ -499,9 +497,7 @@ fn take_over_checked(
     resume_task::verify(&definition, &helper_path, &plan.transaction_id)?;
     let registered = resume_task::read_back(&plan.transaction_id)?;
     resume_task::verify(&registered, &helper_path, &plan.transaction_id)?;
-    let state_directory = std::env::var_os("ProgramData")
-        .map(std::path::PathBuf::from).unwrap_or_else(|| r"C:\ProgramData".into())
-        .join("RustDesk/ManagementAgent/state");
+    let state_directory = super::system_dirs::get().agent().join("state");
     let intent_path = hbb_common::config::Config2::file();
     #[cfg(test)]
     let (state_directory, intent_path) = if fixture_key.is_some() && !native_fixture {

@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Új lap"),
         ("Keep terminal sessions on disconnect", "Terminál munkamenetek megtartása leválasztáskor"),
         ("Terminal (Run as administrator)", "Terminál (rendszergazdaként futtatva)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Adja meg a felügyelt terminál rendszergazdai fiókjának jelszavát."),
         ("Failed to get user token.", "Hiba a felhasználói token lekérdezésekor."),
         ("Incorrect username or password.", "A felhasználónév vagy a jelszó helytelen."),

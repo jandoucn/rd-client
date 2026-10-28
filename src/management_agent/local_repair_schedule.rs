@@ -148,8 +148,8 @@ pub struct Tick {
 
 fn normal_missing() -> Result<bool, String> {
     use std::os::windows::fs::MetadataExt;
-    let normal = Path::new(r"C:\Program Files\RustDesk");
-    match std::fs::symlink_metadata(normal) {
+    let normal = crate::management_agent::system_dirs::get().normal_install();
+    match std::fs::symlink_metadata(&normal) {
         Ok(metadata) => {
             if metadata.file_attributes() & 0x400 != 0 {
                 return Err("automatic local repair normal reparse refused".into());
@@ -239,7 +239,9 @@ fn run_total_loss(
 }
 fn approval() -> Result<Approval, String> {
     let mut value: Approval = serde_json::from_slice(&read(
-        Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current\bundle.json"),
+        &crate::management_agent::system_dirs::get()
+            .agent()
+            .join(r"rescue\current\bundle.json"),
         65536,
     )?)
     .map_err(|_| "automatic local repair approval malformed")?;
@@ -259,7 +261,9 @@ fn approval() -> Result<Approval, String> {
         if artifact.relative_path != "installation-receipt.json" || artifact.size > 65536 {
             return Err("automatic local repair receipt reference invalid".into());
         }
-        let root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current");
+        let root = &crate::management_agent::system_dirs::get()
+            .agent()
+            .join(r"rescue\current");
         artifact.verify(root)?;
         let receipt: serde_json::Value =
             serde_json::from_slice(&read(&root.join(&artifact.relative_path), 65536)?)
@@ -340,7 +344,9 @@ fn run_once(tick: &Tick, public: Option<&[u8]>) -> Result<Decision, String> {
         return Ok(Decision::Deferred);
     }
     let a = approval()?;
-    let transactions = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions");
+    let transactions = &crate::management_agent::system_dirs::get()
+        .agent()
+        .join("transactions");
     match std::fs::symlink_metadata(transactions) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             workspace::create(transactions)?;
@@ -361,7 +367,8 @@ fn run_once(tick: &Tick, public: Option<&[u8]>) -> Result<Decision, String> {
     if let Some(id) = prior {
         return Ok(Decision::Existing(id));
     }
-    let fallback = Path::new(r"C:\ProgramData\RustDesk\Client")
+    let fallback = crate::management_agent::system_dirs::get()
+        .client_root()
         .join(if a.target_key.ends_with("-sos") {
             "sos"
         } else {

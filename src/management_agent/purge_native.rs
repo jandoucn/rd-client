@@ -1,8 +1,5 @@
 use super::{purge_discovery::{self, Approved}, purge_execution::{self, Backend}, purge_handoff, purge_policy::{InstallerResult, Outcome, Probe}, purge_preflight::Context};
-use std::{path::Path, process::Command, time::{Duration, Instant}};
-
-const ROOT: &str = r"C:\ProgramData\RustDesk";
-const NORMAL: &str = r"C:\Program Files\RustDesk";
+use std::{process::Command, time::{Duration, Instant}};
 
 pub(super) struct Native {
     context: Context,
@@ -33,7 +30,7 @@ impl Backend for Native {
         let approved = self.approved.as_ref().ok_or("purge approval missing")?;
         // Never pass package paths, recovery flags, transforms or admission overrides.
         let log = fixed_log()?;
-        let mut child = Command::new(r"C:\Windows\System32\msiexec.exe")
+        let mut child = Command::new(super::system_dirs::get().system32().join("msiexec.exe"))
             .args(["/x", approved.product_code(), "/qn", "/norestart", "REBOOT=ReallySuppress", "/L*v"])
             .arg(log).spawn().map_err(|error| format!("purge installer launch: {error}"))?;
         let deadline = Instant::now() + Duration::from_secs(300);
@@ -58,7 +55,7 @@ impl Backend for Native {
         let current = std::env::current_exe().map_err(|e| e.to_string())?;
         let parent = current.parent().ok_or("purge helper directory absent")?;
         if current.file_name().and_then(|s| s.to_str()) != Some("purge-helper.exe")
-            || parent.parent() != Some(Path::new(r"C:\ProgramData\RustDeskPurge")) {
+            || parent.parent() != Some(super::system_dirs::get().program_data.join("RustDeskPurge").as_path()) {
             return Err("purge cleanup requires fixed external helper".into());
         }
         super::workspace::verify(parent)?;
@@ -69,7 +66,7 @@ impl Backend for Native {
         for service in ["RustDeskManagementAgent", "RustDesk"] {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                let status = Command::new(r"C:\Windows\System32\sc.exe").args(["query", service])
+                let status = Command::new(super::system_dirs::get().system32().join("sc.exe")).args(["query", service])
                     .status().map_err(|e| format!("purge service verify: {e}"))?;
                 if status.code() == Some(1060) { break; }
                 if !status.success() || Instant::now() >= deadline {
@@ -78,7 +75,7 @@ impl Backend for Native {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        for path in [Path::new(NORMAL).to_path_buf(), Path::new(ROOT).to_path_buf()] {
+        for path in [super::system_dirs::get().normal_install(), super::system_dirs::get().rustdesk_data()] {
             self.context.recheck()?;
             match std::fs::symlink_metadata(&path) {
                 Ok(metadata) => {
@@ -115,7 +112,7 @@ fn stop_remove_recovery_task(context: &Context) -> Result<(), String> {
         }
         exit 0
     } catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }"#;
-    let output = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    let output = Command::new(super::system_dirs::get().system32().join(r"WindowsPowerShell\v1.0\powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-Command", script]).output()
         .map_err(|e| format!("purge task lifecycle: {e}"))?;
     if !output.status.success() {
@@ -135,7 +132,7 @@ fn stop_remove_recovery_task(context: &Context) -> Result<(), String> {
         catch { $e=$_.Exception; while($e.InnerException){$e=$e.InnerException}; if ($e.HResult -ne -2147024894) { throw } }
         exit 0
     } catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }"#;
-    let output = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    let output = Command::new(super::system_dirs::get().system32().join(r"WindowsPowerShell\v1.0\powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-Command", delete]).output()
         .map_err(|e| format!("purge task deletion: {e}"))?;
     if !output.status.success() {
@@ -148,7 +145,7 @@ fn fixed_log() -> Result<std::path::PathBuf, String> {
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let directory = current.parent().ok_or("purge log helper parent absent")?;
     if current.file_name().and_then(|v| v.to_str()) != Some("purge-helper.exe")
-        || directory.parent() != Some(Path::new(r"C:\ProgramData\RustDeskPurge")) {
+        || directory.parent() != Some(super::system_dirs::get().program_data.join("RustDeskPurge").as_path()) {
         return Err("purge log outside fixed helper".into());
     }
     super::workspace::verify(directory)?;

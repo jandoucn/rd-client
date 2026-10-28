@@ -192,6 +192,8 @@ fn execute_command(
     command_type: &str,
     state: &AgentState,
     paths: &AgentPaths,
+    args: &serde_json::Value,
+    timeout_seconds: u64,
 ) -> Result<serde_json::Value, String> {
     let observed = recovery_windows::inspect(state, paths)?;
     match command_type {
@@ -243,6 +245,63 @@ fn execute_command(
             Ok(serde_json::json!({ "service": "running", "action": if fallback { "repair_fallback" } else { "repair_normal" } }))
         }
         "network.probe" => fixed_network_probe(),
+        "system.query_uac" => {
+            #[cfg(windows)]
+            {
+                let snap = super::uac_policy::read_snapshot()
+                    .map_err(|err| format!("uac_policy_query_failed:{err}"))?;
+                Ok(super::uac_policy::query_result_json(&snap))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (state, paths);
+                Err("unsupported agent operation".into())
+            }
+        }
+        "system.disable_uac" => {
+            if let Some(refusal) = super::uac_policy::local_gate_refusal(
+                super::purge_marker_path(paths).exists(),
+                paths.state.join("disable-agent").exists(),
+                paths.state.join("maintenance.json").exists(),
+                !matches!(
+                    recovery_windows::read_intent(),
+                    Ok(super::recovery::Intent::Enabled)
+                ),
+            ) {
+                return Err(refusal.into());
+            }
+            #[cfg(windows)]
+            {
+                let (before, after, reboot_required) = super::uac_policy::apply_disabled()
+                    .map_err(|err| format!("uac_policy_apply_failed:{err}"))?;
+                Ok(super::uac_policy::command_result_json(
+                    &before,
+                    &after,
+                    reboot_required,
+                ))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (state, paths);
+                Err("unsupported agent operation".into())
+            }
+        }
+        "system.run" => {
+            if let Some(refusal) = super::uac_policy::local_gate_refusal(
+                super::purge_marker_path(paths).exists(),
+                paths.state.join("disable-agent").exists(),
+                paths.state.join("maintenance.json").exists(),
+                !matches!(
+                    recovery_windows::read_intent(),
+                    Ok(super::recovery::Intent::Enabled)
+                ),
+            ) {
+                return Err(refusal.into());
+            }
+            let request = super::script_run::parse_args(args, timeout_seconds)
+                .map_err(|code| code.to_string())?;
+            super::script_run::execute(&request)
+        }
         "package.reinstall" | "package.update" | "agent.update" => {
             Err("approved package is resolved only through the persisted installer transaction; direct command execution is intentionally gated".into())
         }
@@ -656,11 +715,17 @@ fn poll_with_identity(
         let outcome = if command_type(wire)? == "network.probe" {
             super::network_probe::fixed(Duration::from_secs(wire["timeout_seconds"].as_u64().unwrap_or(1)))
         } else {
-            execute_command(&command_type(wire)?, state, paths)
+            execute_command(
+                &command_type(wire)?,
+                state,
+                paths,
+                &wire["args"],
+                wire["timeout_seconds"].as_u64().unwrap_or(60),
+            )
         };
         match outcome {
             Ok(result)=>log.finish(&command.id,"succeeded",result,unix_timestamp())?,
-            Err(error)=>log.finish(&command.id,"failed",serde_json::json!({"error_code":"service_query_failed","message":error}),unix_timestamp())?,
+            Err(error)=>log.finish(&command.id,"failed",serde_json::json!({"error_code":super::uac_policy::command_error_code(&error).unwrap_or("service_query_failed"),"message":error}),unix_timestamp())?,
         }
     }
     upload_events(identity, base, &binding, &mut log)
@@ -1846,13 +1911,13 @@ mod tests {
         state.last_error = "secret-token-123 https://example.invalid/?password=secret".into();
         state.service_recovery_error = "secret-user-profile".into();
         state.normal_install_path = root.join("arbitrary").to_string_lossy().into_owned();
-        let report = execute_command("package.verify", &state, &paths).unwrap();
+        let report = execute_command("package.verify", &state, &paths, &serde_json::json!({}), 60).unwrap();
         assert_eq!(report["verified"], false);
         assert_eq!(report["objects"]["agent"]["status"], "unverified");
         assert_eq!(report["objects"]["fallback"]["status"], "missing");
         assert_eq!(report["objects"]["normal"]["status"], "unapproved_path");
         assert_eq!(report["objects"]["agent"]["size"], 18);
-        let diagnostics = execute_command("diagnostics.collect", &state, &paths).unwrap();
+        let diagnostics = execute_command("diagnostics.collect", &state, &paths, &serde_json::json!({}), 60).unwrap();
         let text = serde_json::to_string(&diagnostics).unwrap();
         for secret in ["secret-token", "secret-user-profile", "password=", "example.invalid", "arbitrary"] {
             assert!(!text.contains(secret), "diagnostic leaked {secret}");

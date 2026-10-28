@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Nova pestana"),
         ("Keep terminal sessions on disconnect", "Manter as sesións de terminal ao desconectar"),
         ("Terminal (Run as administrator)", "Terminal (executar como administrador)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Por favor, introduce o nome de usuario e contrasinal de administrador do lado controlado."),
         ("Failed to get user token.", "Produciuse un fallo ao obter o token de usuario."),
         ("Incorrect username or password.", "Nome de usuario ou contrasinal incorrectos."),

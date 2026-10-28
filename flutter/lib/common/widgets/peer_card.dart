@@ -657,6 +657,18 @@ abstract class BasePeerCard extends StatelessWidget {
     );
   }
 
+  /// SYSTEM shell on the installed Windows service. Same free-OS-password path
+  /// as admin terminal: only the RustDesk connection password (fixed or one-time),
+  /// remembered the same way as a normal desktop control session.
+  @protected
+  MenuEntryBase<String> _terminalSystemAction(BuildContext context) {
+    return _connectCommonAction(
+      context,
+      translate('Terminal (SYSTEM)'),
+      isTerminalRunAsAdmin: true,
+    );
+  }
+
   @protected
   MenuEntryBase<String> _tcpTunnelingAction(BuildContext context) {
     return _connectCommonAction(
@@ -1014,6 +1026,7 @@ class RecentPeerCard extends BasePeerCard {
 
     if (peer.platform == kPeerPlatformWindows) {
       menuItems.add(_terminalRunAsAdminAction(context));
+      menuItems.add(_terminalSystemAction(context));
     }
 
     final List favs = (await bind.mainGetFav()).toList();
@@ -1080,6 +1093,7 @@ class FavoritePeerCard extends BasePeerCard {
 
     if (peer.platform == kPeerPlatformWindows) {
       menuItems.add(_terminalRunAsAdminAction(context));
+      menuItems.add(_terminalSystemAction(context));
     }
 
     if (isDesktop && peer.platform != kPeerPlatformAndroid) {
@@ -1141,6 +1155,7 @@ class DiscoveredPeerCard extends BasePeerCard {
 
     if (peer.platform == kPeerPlatformWindows) {
       menuItems.add(_terminalRunAsAdminAction(context));
+      menuItems.add(_terminalSystemAction(context));
     }
 
     final List favs = (await bind.mainGetFav()).toList();
@@ -1201,6 +1216,7 @@ class AddressBookPeerCard extends BasePeerCard {
 
     if (peer.platform == kPeerPlatformWindows) {
       menuItems.add(_terminalRunAsAdminAction(context));
+      menuItems.add(_terminalSystemAction(context));
     }
 
     if (isDesktop && peer.platform != kPeerPlatformAndroid) {
@@ -1359,6 +1375,7 @@ class MyGroupPeerCard extends BasePeerCard {
 
     if (peer.platform == kPeerPlatformWindows) {
       menuItems.add(_terminalRunAsAdminAction(context));
+      menuItems.add(_terminalSystemAction(context));
     }
 
     if (isDesktop && peer.platform != kPeerPlatformAndroid) {

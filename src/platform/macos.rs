@@ -1041,6 +1041,26 @@ pub fn lock_screen() {
     .ok();
 }
 
+/// 本机 SYSTEM 终端：在服务进程里常驻监听 `_terminal` IPC 通道。
+///
+/// `crate::ipc::start_terminal()` 带 `#[tokio::main]`，入口自己建 runtime，因此不能在
+/// 已有的 async 上下文里 await 它，只能当同步函数放进独立线程里跑。线程起不来只让终端
+/// 不可用，不能连累这个以 root 运行的服务进程，所以记日志而不 panic。
+fn start_local_terminal_service() {
+    if let Err(err) = std::thread::Builder::new()
+        .name("terminal-ipc".to_owned())
+        .spawn(|| {
+            crate::ipc::start_terminal();
+        })
+    {
+        log::warn!(
+            "failed to spawn the local terminal ipc thread: {}; the SYSTEM terminal is \
+             unavailable in this service process",
+            err
+        );
+    }
+}
+
 /// Starts the macOS system service IPC listener and the background
 /// silent auto-update thread.
 pub fn start_os_service() {
@@ -1050,6 +1070,7 @@ pub fn start_os_service() {
     if let Err(err) = crate::ipc::start("_service") {
         log::error!("Failed to start ipc_service: {}", err);
     }
+    start_local_terminal_service();
 
     /* // mouse/keyboard works in prelogin now with launchctl asuser.
        // below can avoid multi-users logged in problem, but having its own below problem.

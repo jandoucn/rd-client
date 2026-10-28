@@ -54,18 +54,23 @@ impl FixedPlatformAdapter {
         use windows_service::service::ServiceStartType;
         plan.validate()?;
         let edition = Self::edition(plan)?;
-        let agent_root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
+        let dirs = crate::management_agent::system_dirs::get();
+        let agent_root = dirs.agent();
         let configured = hbb_common::config::Config::file();
-        let identity=[r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml"]
-            .iter().find(|p|configured.to_string_lossy().eq_ignore_ascii_case(p)).ok_or("EXE fixed identity path unavailable")?;
+        let identity = [dirs.local_service_roaming(), dirs.system_profile_roaming()]
+            .map(|p| p.join("RustDesk").join("config").join("RustDesk.toml"))
+            .into_iter()
+            .find(|p| {
+                configured
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&p.to_string_lossy())
+            })
+            .ok_or("EXE fixed identity path unavailable")?;
         let layout = Layout {
-            normal: r"C:\Program Files\RustDesk".into(),
+            normal: dirs.normal_install(),
             agent: agent_root.join("rustdesk-management-agent.exe"),
             state: agent_root.join("state"),
-            config: Path::new(identity)
-                .parent()
-                .ok_or("EXE fixed config missing")?
-                .into(),
+            config: identity.parent().ok_or("EXE fixed config missing")?.into(),
         };
         let contracts = ["RustDesk", "RustDeskManagementAgent"].map(|name| {
             let original = plan
@@ -150,7 +155,9 @@ impl FixedPlatformAdapter {
                     .ok_or("fixture parent")?
                     .join("transaction")
             } else {
-                Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions")
+                crate::management_agent::system_dirs::get()
+                    .agent()
+                    .join("transactions")
                     .join(&plan.transaction_id)
             };
             super::exe_runtime::recovery_gates(&root, &layout, plan, authority.as_ref())?;
@@ -501,11 +508,12 @@ impl FixedPlatformAdapter {
         let mut system = System::new();
         system.refresh_processes();
         for process in system.processes().values() {
-            if !process
-                .exe()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(r"C:\Program Files\RustDesk\RustDesk.exe")
-            {
+            if !process.exe().to_string_lossy().eq_ignore_ascii_case(
+                &crate::management_agent::system_dirs::get()
+                    .normal_install()
+                    .join("RustDesk.exe")
+                    .to_string_lossy(),
+            ) {
                 continue;
             }
             if !matches!(
@@ -537,8 +545,12 @@ impl FixedPlatformAdapter {
                 let mut size = name.len() as u32;
                 if unsafe { QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut size) }
                     == 0
-                    || !String::from_utf16_lossy(&name[..size as usize])
-                        .eq_ignore_ascii_case(r"C:\Program Files\RustDesk\RustDesk.exe")
+                    || !String::from_utf16_lossy(&name[..size as usize]).eq_ignore_ascii_case(
+                        &crate::management_agent::system_dirs::get()
+                            .normal_install()
+                            .join("RustDesk.exe")
+                            .to_string_lossy(),
+                    )
                     || !observed.is_alive()?
                 {
                     return Err("EXE fixed child identity changed".into());
@@ -582,7 +594,9 @@ impl Platform for FixedPlatformAdapter {
                     .ok_or("fixture parent missing")?
                     .join("transaction")
             } else {
-                std::path::Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions")
+                crate::management_agent::system_dirs::get()
+                    .agent()
+                    .join("transactions")
                     .join(&self.plan.transaction_id)
             };
             if root.join("stopped-state.json").exists() {

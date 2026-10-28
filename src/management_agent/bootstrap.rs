@@ -57,6 +57,16 @@ struct BootstrapManifest {
     normal_install_path: String,
 }
 
+fn manifest_normal_install_path(manifest: &BootstrapManifest) -> String {
+    if manifest.normal_install_path.is_empty() {
+        return String::new();
+    }
+    super::system_dirs::get()
+        .fixed_normal_install(Path::new(&manifest.normal_install_path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| manifest.normal_install_path.clone())
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct BootstrapBudget {
     failures: u8,
@@ -204,11 +214,7 @@ pub fn task_xml(executable: &Path, config: &ServiceConfig) -> Result<String, Str
 }
 
 fn system_executable(name: &str) -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32")
-        .join(name)
+    super::system_dirs::get().system32().join(name)
 }
 
 fn require_admin() -> Result<(), String> {
@@ -237,7 +243,7 @@ fn verify_existing(directory: &Path, digest: &str, config: &ServiceConfig) -> Re
         || manifest.agent_sha256 != digest
         || manifest.edition != config.edition
         || manifest.package_kind != config.package_kind
-        || manifest.normal_install_path != normal
+        || manifest_normal_install_path(&manifest) != normal
         || file_hash(&directory.join("rustdesk-recovery-bootstrap.exe"))? != digest
     {
         return Err("bootstrap drift detected; transactional upgrade required".into());
@@ -438,12 +444,15 @@ fn recreate_missing_agent(
 ) -> Result<(), String> {
     use std::ffi::OsString;
     use windows_service::service::{ServiceErrorControl, ServiceInfo};
-    let fixed = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+    let fixed =
+        AgentPaths::from_program_data(&super::system_dirs::get().program_data, config.edition);
     if paths.agent != fixed.agent
         || paths.state != fixed.state
         || paths.root != fixed.root
         || (!manifest.normal_install_path.is_empty()
-            && !super::approved_normal_install_path(Path::new(&manifest.normal_install_path)))
+            && !super::approved_normal_install_path(Path::new(&manifest_normal_install_path(
+                manifest,
+            ))))
     {
         return Err("bootstrap repair outside fixed layout".into());
     }
@@ -467,7 +476,7 @@ fn recreate_missing_agent(
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || state.edition != config.edition
         || state.package_kind != config.package_kind
-        || state.normal_install_path != manifest.normal_install_path;
+        || state.normal_install_path != manifest_normal_install_path(manifest);
     for name in ["disable-agent", "disable-recovery", "maintenance.json"] {
         match std::fs::symlink_metadata(paths.state.join(name)) {
             Ok(_) => blocked = true,
@@ -540,7 +549,7 @@ fn recreate_missing_agent(
     if !manifest.normal_install_path.is_empty() {
         args.extend([
             "--normal-install-path".into(),
-            manifest.normal_install_path.clone().into(),
+            manifest_normal_install_path(manifest).into(),
         ]);
     }
     let info = ServiceInfo {
@@ -577,7 +586,7 @@ fn recreate_missing_agent(
     if !manifest.normal_install_path.is_empty() {
         expected.push_str(&format!(
             " --normal-install-path \"{}\"",
-            manifest.normal_install_path
+            manifest_normal_install_path(manifest)
         ));
     }
     if !agent_command_matches(&registered.executable_path.to_string_lossy(), &expected)
@@ -621,9 +630,11 @@ fn restore_missing_agent(
     paths: &AgentPaths,
     manifest: &BootstrapManifest,
 ) -> Result<(), String> {
-    let fixed = AgentPaths::from_program_data(r"C:\ProgramData", config.edition);
+    let fixed =
+        AgentPaths::from_program_data(&super::system_dirs::get().program_data, config.edition);
+    let fixed_normal = super::system_dirs::get().normal_install();
     if paths != &fixed
-        || config.normal_install_path.as_deref() != Some(Path::new(r"C:\Program Files\RustDesk"))
+        || config.normal_install_path.as_deref() != Some(fixed_normal.as_path())
     {
         return Err("agent restore outside fixed layout".into());
     }
@@ -663,7 +674,7 @@ fn restore_missing_agent(
             agent_path(paths).display(),
             config.edition.name(),
             config.package_kind.extension(),
-            manifest.normal_install_path
+            manifest_normal_install_path(manifest)
         );
         if !agent_command_matches(&registered.executable_path.to_string_lossy(), &command)
             || registered.service_type != ServiceType::OWN_PROCESS
@@ -732,7 +743,7 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
     if manifest.schema != 1
         || manifest.edition != config.edition
         || manifest.package_kind != config.package_kind
-        || manifest.normal_install_path
+        || manifest_normal_install_path(&manifest)
             != config
                 .normal_install_path
                 .as_deref()
@@ -795,7 +806,7 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
     if !manifest.normal_install_path.is_empty() {
         expected.push_str(&format!(
             " --normal-install-path \"{}\"",
-            manifest.normal_install_path.trim_end_matches(['\\', '/'])
+            manifest_normal_install_path(&manifest).trim_end_matches(['\\', '/'])
         ));
     }
     let trusted = agent_command_matches(&registered.executable_path.to_string_lossy(), &expected)

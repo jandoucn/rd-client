@@ -226,8 +226,7 @@ pub fn repair_service(state: &AgentState, paths: &AgentPaths, fallback: bool) ->
     }
     let binary = format!(r#""{}" --service"#, executable.display());
     let command = if observed.state == recovery::ServiceState::Absent { "create" } else { "config" };
-    let sc = std::env::var_os("SystemRoot").map(std::path::PathBuf::from)
-        .ok_or("Windows system directory unavailable")?.join("System32/sc.exe");
+    let sc = super::system_dirs::get().system32().join("sc.exe");
     let status = Command::new(sc)
         .args([
             command,
@@ -482,10 +481,7 @@ impl FailureActionsRetry {
 // accepted the configuration, so a transient failure retries on the next start
 // instead of being silently lost.
 pub fn ensure_service_failure_actions() -> Result<bool, String> {
-    let sc = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .ok_or("Windows system directory unavailable")?
-        .join("System32/sc.exe");
+    let sc = super::system_dirs::get().system32().join("sc.exe");
     let tokens = failure_actions_tokens();
     let mut outcomes = Vec::new();
     // The agent binary has no access to the client crate root, so the service

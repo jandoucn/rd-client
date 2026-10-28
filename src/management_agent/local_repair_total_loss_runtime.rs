@@ -10,7 +10,7 @@ fn absent(path: &Path) -> Result<(), String> {
 
 fn prestate(fallback: &Path) -> Result<Prestate, String> {
     no_client_process()?;
-    absent(Path::new(NORMAL))?;
+    absent(&normal())?;
     absent(fallback)?;
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| e.to_string())?;
@@ -110,12 +110,16 @@ pub(super) fn no_client_process() -> Result<(), String> {
                     return Err("total loss client PID reused".into());
                 }
                 if process.is_alive()? {
+                    let dirs = crate::management_agent::system_dirs::get();
                     let fixed = [
-                        r"C:\Program Files\RustDesk\RustDesk.exe",
-                        r"C:\ProgramData\RustDesk\Client\sos\RustDesk\RustDesk.exe",
-                        r"C:\ProgramData\RustDesk\Client\standard\RustDesk\RustDesk.exe",
+                        dirs.normal_install().join("RustDesk.exe"),
+                        dirs.client_root().join(r"sos\RustDesk\RustDesk.exe"),
+                        dirs.client_root().join(r"standard\RustDesk\RustDesk.exe"),
                     ];
-                    return Err(if fixed.iter().any(|p| image.eq_ignore_ascii_case(p)) {
+                    return Err(if fixed
+                        .iter()
+                        .any(|p| image.eq_ignore_ascii_case(&p.to_string_lossy()))
+                    {
                         "total loss fixed client process active"
                     } else {
                         "total loss foreign client image; fail closed"
@@ -143,7 +147,7 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
     let _guard = super::super::install_guard::InstallGuard::try_acquire()
         .map_err(|e| e.to_string())?
         .ok_or("total loss installation busy")?;
-    require_optin(&Path::new(AGENT).join("state"))?;
+    require_optin(&agent_root().join("state"))?;
     if !super::super::rescue_assets::r3_cycle_allowed()? {
         return Err("total loss locally blocked".into());
     }
@@ -181,7 +185,7 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
     };
     let agent = Contract {
         name: "RustDeskManagementAgent".into(),
-        executable: Path::new(AGENT).join("rustdesk-management-agent.exe"),
+        executable: agent_root().join("rustdesk-management-agent.exe"),
         arguments: vec![
             "--service".into(),
             "--edition".into(),
@@ -189,7 +193,7 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
             "--package-kind".into(),
             "msi".into(),
             "--normal-install-path".into(),
-            NORMAL.into(),
+            normal().to_string_lossy().into_owned(),
         ],
         start_type: ServiceStartType::AutoStart,
     };
@@ -219,12 +223,19 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
     let agent_command = config.executable_path.to_string_lossy().into_owned();
     let configured = hbb_common::config::Config::file();
     let identity = [
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
+        crate::management_agent::system_dirs::get()
+            .local_service_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
+        crate::management_agent::system_dirs::get()
+            .system_profile_roaming()
+            .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .into_iter()
-    .find(|path| configured.to_string_lossy().eq_ignore_ascii_case(path))
-    .map(PathBuf::from)
+    .find(|path| {
+        configured
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+    })
     .ok_or("total loss identity outside fixed profiles")?;
     let config = hbb_common::config::Config2::file();
     if !config
@@ -235,7 +246,7 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
     }
     workspace::create(&directory)?;
     workspace::create(&directory.join("runtime"))?;
-    let rescue = Path::new(AGENT).join("rescue/current");
+    let rescue = agent_root().join("rescue/current");
     freeze_approval(
         &directory,
         &rescue,
@@ -291,13 +302,17 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
         config_backup: copy(&directory, &config, "config-backup.toml", 65536)?,
         bootstrap_backup: copy(
             &directory,
-            Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\rustdesk-recovery-bootstrap.exe"),
+            &crate::management_agent::system_dirs::get()
+                .recovery_bootstrap()
+                .join("rustdesk-recovery-bootstrap.exe"),
             "bootstrap-backup.exe",
             512 * 1024 * 1024,
         )?,
         bootstrap_manifest: copy(
             &directory,
-            Path::new(r"C:\ProgramData\RustDesk\RecoveryBootstrap\bootstrap.json"),
+            &crate::management_agent::system_dirs::get()
+                .recovery_bootstrap()
+                .join("bootstrap.json"),
             "bootstrap-backup.json",
             65536,
         )?,
@@ -371,7 +386,7 @@ fn check_assets(
     }
     plan.verify_approval_source(
         directory,
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &read(&directory.join("identity-backup.toml"), 65536)?,
         public,
     )?;
@@ -388,7 +403,7 @@ pub(super) fn launch(
         .map_err(|e| e.to_string())?
         .ok_or("total loss installation busy")?;
     other_transactions(directory)?;
-    require_optin(&Path::new(AGENT).join("state"))?;
+    require_optin(&agent_root().join("state"))?;
     if !super::super::rescue_assets::r3_cycle_allowed()?
         || Some(prestate(Path::new(&plan.fallback_path))?) != plan.total_loss
     {
@@ -405,7 +420,7 @@ pub(super) fn launch(
     )?));
     let nonce = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(32));
     super::super::maintenance::claim(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &plan.installation_id,
         &plan.transaction_id,
         &digest,
@@ -471,7 +486,7 @@ pub(super) fn launch(
     )?;
     verify_task(&plan, directory)?;
     preflight_owned(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &hbb_common::config::Config2::file(),
         &plan,
         &handoff,
@@ -555,7 +570,7 @@ pub(super) fn run(
     other_transactions_owned(directory, &handoff)?;
     verify_task(&plan, directory)?;
     preflight_owned(
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &hbb_common::config::Config2::file(),
         &plan,
         &handoff,
@@ -573,11 +588,11 @@ pub(super) fn run(
     }
     save(
         &directory.join("agent-directory-acl-intent.json"),
-        &serde_json::json!({"transaction_id":tx.id,"object":AGENT,"remove_users_create_mask":6}),
+        &serde_json::json!({"transaction_id":tx.id,"object":agent_root().to_string_lossy(),"remove_users_create_mask":6}),
     )?;
     let authorize_mutation = || {
         preflight_owned(
-            &Path::new(AGENT).join("state"),
+            &agent_root().join("state"),
             &hbb_common::config::Config2::file(),
             &plan,
             &handoff,
@@ -673,7 +688,7 @@ pub(super) fn run(
                 &serde_json::json!({"schema":1,"transaction_id":tx.id,"phase":tx.phase,"error":null,"reboot_required":false}),
             )?;
             super::super::maintenance::release_owned(
-                &Path::new(AGENT).join("state"),
+                &agent_root().join("state"),
                 &plan.installation_id,
                 &plan.transaction_id,
                 &handoff.plan_sha256,
@@ -725,7 +740,7 @@ fn reconcile(
         directory,
         plan,
         public,
-        &Path::new(AGENT).join("state"),
+        &agent_root().join("state"),
         &hbb_common::config::Config2::file(),
     )
 }
@@ -825,7 +840,7 @@ fn reconcile_at(
                         &digest,
                         &handoff.nonce,
                     )?;
-                    if state == Path::new(AGENT).join("state") {
+                    if state == agent_root().join("state") {
                         verify_task(plan, directory)?;
                     }
                     let cause: serde_json::Value = serde_json::from_slice(&read(
@@ -890,7 +905,7 @@ fn reconcile_at(
                 &digest,
                 &handoff.nonce,
             )?;
-            let product_state = state == Path::new(AGENT).join("state");
+            let product_state = state == agent_root().join("state");
             if product_state {
                 cleanup_task(directory, plan, false)?;
             }
@@ -953,10 +968,13 @@ pub(super) fn cleanup_task(
     remove: bool,
 ) -> Result<(), String> {
     plan.validate()?;
-    let path = Path::new(r"C:\Windows\System32\Tasks").join(format!(
-        "RustDeskManagementAgentResume-{}",
-        plan.transaction_id
-    ));
+    let path = crate::management_agent::system_dirs::get()
+        .system32()
+        .join("Tasks")
+        .join(format!(
+            "RustDeskManagementAgentResume-{}",
+            plan.transaction_id
+        ));
     match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("total loss cleanup task observation unknown: {e}")),

@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "新建选项卡"),
         ("Keep terminal sessions on disconnect", "断开连接时保持终端会话"),
         ("Terminal (Run as administrator)", "终端（以管理员身份运行）"),
+        ("Terminal (SYSTEM)", "终端（SYSTEM）"),
         ("terminal-admin-login-tip", "请输入被控端的管理员账号密码。"),
         ("Failed to get user token.", "获取用户令牌时出错。"),
         ("Incorrect username or password.", "用户名或密码不正确。"),

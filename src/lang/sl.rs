@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Nov zavihek"),
         ("Keep terminal sessions on disconnect", "Ob prekinitvi povezave ohrani seje terminala"),
         ("Terminal (Run as administrator)", "Terminal (zaženi kot skrbnik)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Vnesite skrbniško uporabniško ime in geslo nadzorovane strani."),
         ("Failed to get user token.", "Pridobivanje uporabniškega žetona ni uspelo."),
         ("Incorrect username or password.", "Napačno uporabniško ime ali geslo."),

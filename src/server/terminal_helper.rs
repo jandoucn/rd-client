@@ -295,23 +295,26 @@ pub fn encode_resize_message(rows: u16, cols: u16) -> Vec<u8> {
 /// Get the default shell for Windows.
 pub fn get_default_shell() -> String {
     // Try PowerShell Core first (absolute paths only)
+    let program_files = &crate::platform::windows::system_dirs::get().program_files;
     let pwsh_paths = [
-        "pwsh.exe",
-        r"C:\Program Files\PowerShell\7\pwsh.exe",
-        r"C:\Program Files\PowerShell\6\pwsh.exe",
+        std::path::PathBuf::from("pwsh.exe"),
+        program_files.join(r"PowerShell\7\pwsh.exe"),
+        program_files.join(r"PowerShell\6\pwsh.exe"),
     ];
 
     for path in &pwsh_paths {
-        if std::path::Path::new(path).exists() {
-            log::debug!("Found PowerShell Core: {}", path);
-            return path.to_string();
+        if path.exists() {
+            log::debug!("Found PowerShell Core: {}", path.display());
+            return path.to_string_lossy().into_owned();
         }
     }
 
     // Try Windows PowerShell
-    let powershell_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-    if std::path::Path::new(powershell_path).exists() {
-        return powershell_path.to_string();
+    let powershell_path = crate::platform::windows::system_dirs::get()
+        .system32()
+        .join(r"WindowsPowerShell\v1.0\powershell.exe");
+    if powershell_path.exists() {
+        return powershell_path.to_string_lossy().into_owned();
     }
 
     // Fallback to cmd.exe

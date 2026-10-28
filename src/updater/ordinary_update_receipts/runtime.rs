@@ -1,5 +1,5 @@
 use super::{
-    workspace, Binding, Channel, Outbox, PreparationError, Terminal, VerifiedRunningTarget, ROOT,
+    workspace, Binding, Channel, Outbox, PreparationError, Terminal, VerifiedRunningTarget, receipts_root,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,17 +18,25 @@ mod health;
 mod health_windows;
 use super::supervisor::guard as install_guard;
 
-const INSTALLED: &str = r"C:\Program Files\RustDesk\RustDesk.exe";
+fn installed() -> std::path::PathBuf {
+    crate::platform::windows::system_dirs::get()
+        .normal_install()
+        .join("RustDesk.exe")
+}
 static STARTED: AtomicBool = AtomicBool::new(false);
 const ORDINARY_MSI_TRANSACTIONS_ENABLED: bool = false;
 
 pub(crate) fn use_receipt_path() -> Result<bool, String> {
-    refuse_pending_at(Path::new(ROOT))?;
+    refuse_pending_at(&receipts_root())?;
     if !ORDINARY_MSI_TRANSACTIONS_ENABLED {
         return Ok(false);
     }
     install_allowed()?;
-    receipt_path_at(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state"))
+    receipt_path_at(
+        &crate::platform::windows::system_dirs::get()
+            .agent()
+            .join("state"),
+    )
 }
 
 fn refuse_pending_at(root: &Path) -> Result<(), String> {
@@ -186,7 +194,10 @@ fn receipt_path_at(directory: &Path) -> Result<bool, String> {
 }
 
 fn instance() -> Result<String, String> {
-    let path = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state\agent.json");
+    let path = crate::platform::windows::system_dirs::get()
+        .agent()
+        .join(r"state\agent.json");
+    let path = path.as_path();
     workspace::verify_restore_target(path, false)?;
     let mut bytes = Vec::new();
     use std::os::windows::fs::OpenOptionsExt;
@@ -225,7 +236,9 @@ pub(super) fn install_allowed() -> Result<(), String> {
     {
         return Err("ordinary local installation policy refused".into());
     }
-    let state = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state");
+    let state = crate::platform::windows::system_dirs::get()
+        .agent()
+        .join("state");
     for name in ["disable-recovery", "disable-agent", "maintenance.json"] {
         match fs::symlink_metadata(state.join(name)) {
             Ok(_) => return Err("ordinary local maintenance/disable gate refused".into()),
@@ -299,7 +312,10 @@ pub(crate) fn install(
         .ok_or("ordinary installation busy")?;
     super::admission::check_installed(package)?;
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    if !current.to_string_lossy().eq_ignore_ascii_case(INSTALLED) {
+    if !current
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&installed().to_string_lossy())
+    {
         return Err("ordinary writer requires fixed installed image".into());
     }
     let identity = super::super::current_update_client_identity();
@@ -308,7 +324,7 @@ pub(crate) fn install(
             return Ok(());
         }
     }
-    if let Ok(entries) = fs::read_dir(ROOT) {
+    if let Ok(entries) = fs::read_dir(receipts_root()) {
         for entry in entries.filter_map(Result::ok) {
             if let Some(existing) = entry
                 .file_name()
@@ -344,7 +360,8 @@ pub(crate) fn install(
     let prepared = (|| -> Result<(), PreparationError> {
         let runtime = outbox.directory.join("runtime");
         workspace::create(&runtime).map_err(|_| PreparationError::refused("create_runtime"))?;
-        let parent = Path::new(INSTALLED)
+        let installed_exe = installed();
+        let parent = installed_exe
             .parent()
             .ok_or_else(|| PreparationError::refused("copy_writer"))?;
         workspace::verify_restore_target(&current, false)
@@ -430,12 +447,16 @@ pub(crate) fn runner_commands(id: &str, digest: &str) -> Result<String, String> 
     }
     let outcome_args = super::package_contract::runner_arguments(id, digest, "%RD_MSI_RAW_EXIT%");
     Ok(format!(
-        "\"C:\\Windows\\System32\\msiexec.exe\" /i \"{}\" /qn LAUNCH_TRAY_APP=N REBOOT=ReallySuppress /norestart\r\n\
+        "\"{}\" /i \"{}\" /qn LAUNCH_TRAY_APP=N REBOOT=ReallySuppress /norestart\r\n\
          set \"RD_MSI_RAW_EXIT=%errorlevel%\"\r\n\
          \"{}\" {}\r\n\
          if errorlevel 1 exit /b 75\r\n\
          if \"%RD_MSI_RAW_EXIT%\"==\"3010\" exit /b 0\r\n\
          exit /b %RD_MSI_RAW_EXIT%",
+        crate::platform::windows::system_dirs::get()
+            .system32()
+            .join("msiexec.exe")
+            .display(),
         package.display(),
         writer.display(),
         outcome_args.join(" ")
@@ -463,7 +484,7 @@ pub(crate) fn start() {
 }
 
 pub(crate) fn owns_command(command_id: &str) -> bool {
-    let Ok(entries) = fs::read_dir(ROOT) else {
+    let Ok(entries) = fs::read_dir(receipts_root()) else {
         return false;
     };
     entries.filter_map(Result::ok).any(|entry| {
@@ -479,13 +500,13 @@ pub(crate) fn owns_command(command_id: &str) -> bool {
 }
 
 async fn reconcile_all() -> Result<(), String> {
-    if !Path::new(ROOT).exists() {
+    if !receipts_root().exists() {
         return Ok(());
     }
-    workspace::verify(Path::new(ROOT))?;
+    workspace::verify(&receipts_root())?;
     let identity = super::super::current_update_client_identity();
     let installation = instance()?;
-    for entry in fs::read_dir(ROOT).map_err(|e| e.to_string())? {
+    for entry in fs::read_dir(receipts_root()).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -517,7 +538,7 @@ async fn reconcile_all() -> Result<(), String> {
                 hbb_common::tokio::task::spawn_blocking(move || {
                     handle.block_on(health_windows::probe(
                         r"\\.\pipe\RustDesk\management-health-v2",
-                        Path::new(INSTALLED),
+                        &installed(),
                         build,
                         Duration::from_secs(3),
                     ))

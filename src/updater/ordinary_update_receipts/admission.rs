@@ -161,16 +161,20 @@ fn installed_cache(target: &Path) -> Result<PathBuf, String> {
             return Err(UNAVAILABLE.into());
         }
         let location = product_info(&product, "InstallLocation")?;
-        if !location
-            .trim_end_matches(['\\', '/'])
-            .eq_ignore_ascii_case(r"C:\Program Files\RustDesk")
-        {
+        if !location.trim_end_matches(['\\', '/']).eq_ignore_ascii_case(
+            &crate::platform::windows::system_dirs::get()
+                .normal_install()
+                .to_string_lossy(),
+        ) {
             return Err(UNAVAILABLE.into());
         }
         let cache = PathBuf::from(product_info(&product, "LocalPackage")?);
         if !cache.parent().is_some_and(|p| {
-            p.to_string_lossy()
-                .eq_ignore_ascii_case(r"C:\Windows\Installer")
+            p.to_string_lossy().eq_ignore_ascii_case(
+                &crate::platform::windows::system_dirs::get()
+                    .installer_cache()
+                    .to_string_lossy(),
+            )
         }) || !cache
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("msi"))

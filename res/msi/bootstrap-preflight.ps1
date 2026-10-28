@@ -35,7 +35,8 @@ function Test-RdBootstrapUpgrade {
     if($state.disabled -ne $false -or $state.management_agent_enabled -ne $true){return $false}
     $manifest=Get-Content -LiteralPath (Join-Path $directory 'bootstrap.json') -Raw|ConvertFrom-Json
     if($manifest.schema -ne 1 -or $manifest.edition -ne $Edition -or $manifest.package_kind -ne 'msi' -or
-        $manifest.normal_install_path -ne $NormalPath -or $state.normal_install_path -ne $NormalPath -or
+        (([string]$manifest.normal_install_path).TrimEnd('\') -ne $NormalPath.TrimEnd('\') -and ([string]$manifest.normal_install_path).TrimEnd('\') -ne 'C:\Program Files\RustDesk') -or
+        (([string]$state.normal_install_path).TrimEnd('\') -ne $NormalPath.TrimEnd('\') -and ([string]$state.normal_install_path).TrimEnd('\') -ne 'C:\Program Files\RustDesk') -or
         $state.target_key -ne "windows-x86_64-msi-$Edition"){throw 'Bootstrap identity mismatch'}
     $hash=(Get-FileHash -LiteralPath (Join-Path $Root 'ManagementAgent\rustdesk-management-agent.exe') -Algorithm SHA256).Hash
     if($manifest.agent_sha256 -ne $hash -or (Get-FileHash -LiteralPath (Join-Path $directory 'rustdesk-recovery-bootstrap.exe') -Algorithm SHA256).Hash -ne $hash){throw 'Bootstrap original integrity mismatch'}

@@ -1,4 +1,13 @@
 #[cfg(windows)]
+#[path = "../src/platform/windows_system_dirs.rs"]
+#[allow(dead_code)]
+mod system_dirs;
+// workspace.rs 里有 `super::system_dirs` 引用，测试入口补同名路径。
+#[cfg(windows)]
+mod management_agent {
+    pub(crate) use super::system_dirs;
+}
+#[cfg(windows)]
 #[path = "../src/management_agent/workspace.rs"]
 mod workspace;
 

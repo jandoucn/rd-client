@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "تبويب جديد"),
         ("Keep terminal sessions on disconnect", "الاحتفاظ بجلسات الطرفية عند قطع الاتصال"),
         ("Terminal (Run as administrator)", "الطرفية (تشغيل كمسؤول)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "لتشغيل الطرفية كمسؤول، يرجى إدخال اسم المستخدم وكلمة المرور للمسؤول."),
         ("Failed to get user token.", "فشل في الحصول على رمز المستخدم."),
         ("Incorrect username or password.", "اسم المستخدم أو كلمة المرور غير صحيحة."),

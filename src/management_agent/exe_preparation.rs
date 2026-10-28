@@ -110,7 +110,7 @@ pub(crate) fn bootstrap_directory(root: &Path) -> PathBuf {
     {
         return root.parent().unwrap().join("RecoveryBootstrap");
     }
-    PathBuf::from(r"C:\ProgramData\RustDesk\RecoveryBootstrap")
+    crate::management_agent::system_dirs::get().recovery_bootstrap()
 }
 
 pub(crate) fn bootstrap_target(root: &Path) -> Result<Artifact, String> {
@@ -272,21 +272,21 @@ pub(crate) fn local_intent_checked(layout: &Layout, owned: bool) -> Result<(), S
 
 pub(crate) fn fixed_layout() -> Result<Layout, String> {
     let configured = hbb_common::config::Config::file();
-    let identity = [
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
-    ]
-    .iter()
-    .find(|p| configured.to_string_lossy().eq_ignore_ascii_case(p))
-    .ok_or("EXE fixed identity path unavailable")?;
+    let dirs = crate::management_agent::system_dirs::get();
+    let identity = [dirs.local_service_roaming(), dirs.system_profile_roaming()]
+        .map(|p| p.join("RustDesk").join("config").join("RustDesk.toml"))
+        .into_iter()
+        .find(|p| {
+            configured
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&p.to_string_lossy())
+        })
+        .ok_or("EXE fixed identity path unavailable")?;
     Ok(Layout {
-        normal: r"C:\Program Files\RustDesk".into(),
-        agent: r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe".into(),
-        state: r"C:\ProgramData\RustDesk\ManagementAgent\state".into(),
-        config: Path::new(identity)
-            .parent()
-            .ok_or("EXE config missing")?
-            .into(),
+        normal: dirs.normal_install(),
+        agent: dirs.agent().join("rustdesk-management-agent.exe"),
+        state: dirs.agent().join("state"),
+        config: identity.parent().ok_or("EXE config missing")?.into(),
     })
 }
 
@@ -337,10 +337,13 @@ fn copy(root: &Path, from: &Path, name: &str, identity: bool) -> Result<Artifact
 }
 
 fn snapshots(edition: &str) -> Vec<OriginalService> {
+    let dirs = crate::management_agent::system_dirs::get();
+    let normal = dirs.normal_install();
+    let agent = dirs.agent().join("rustdesk-management-agent.exe");
     vec![
         OriginalService {
             name: "RustDesk".into(),
-            command: r#""C:\Program Files\RustDesk\RustDesk.exe" --service"#.into(),
+            command: format!(r#""{}" --service"#, normal.join("RustDesk.exe").display()),
             account: "LocalSystem".into(),
             start_type: "auto".into(),
             running: true,
@@ -348,7 +351,9 @@ fn snapshots(edition: &str) -> Vec<OriginalService> {
         OriginalService {
             name: "RustDeskManagementAgent".into(),
             command: format!(
-                r#""C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe" --service --edition {edition} --package-kind exe --normal-install-path "C:\Program Files\RustDesk""#
+                r#""{}" --service --edition {edition} --package-kind exe --normal-install-path "{}""#,
+                agent.display(),
+                normal.display()
             ),
             account: "LocalSystem".into(),
             start_type: "auto".into(),
@@ -359,22 +364,22 @@ fn snapshots(edition: &str) -> Vec<OriginalService> {
 
 pub fn prepare(request: &Request<'_>) -> Result<InstallPlan, String> {
     let configured = hbb_common::config::Config::file();
-    let identity = [
-        r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml",
-        r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml",
-    ]
-    .iter()
-    .find(|p| configured.to_string_lossy().eq_ignore_ascii_case(p))
-    .ok_or("EXE identity outside fixed profiles")?;
-    let agent_root = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent");
+    let dirs = crate::management_agent::system_dirs::get();
+    let identity = [dirs.local_service_roaming(), dirs.system_profile_roaming()]
+        .map(|p| p.join("RustDesk").join("config").join("RustDesk.toml"))
+        .into_iter()
+        .find(|p| {
+            configured
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&p.to_string_lossy())
+        })
+        .ok_or("EXE identity outside fixed profiles")?;
+    let agent_root = dirs.agent();
     let layout = Layout {
-        normal: r"C:\Program Files\RustDesk".into(),
+        normal: dirs.normal_install(),
         agent: agent_root.join("rustdesk-management-agent.exe"),
         state: agent_root.join("state"),
-        config: Path::new(identity)
-            .parent()
-            .ok_or("EXE profile missing")?
-            .into(),
+        config: identity.parent().ok_or("EXE profile missing")?.into(),
     };
     prepare_checked(
         &agent_root.join("transactions").join(request.transaction_id),
@@ -404,7 +409,9 @@ pub fn prepare_fixture(
 pub fn prepare_native_fixture(request: &Request<'_>, public: &[u8]) -> Result<InstallPlan, String> {
     let layout = fixed_layout()?;
     prepare_checked(
-        &Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions")
+        &crate::management_agent::system_dirs::get()
+            .agent()
+            .join("transactions")
             .join(request.transaction_id),
         &layout,
         request,
@@ -547,7 +554,9 @@ fn prepare_checked(
     let asset_parent = if fixture {
         root.join("assets")
     } else {
-        PathBuf::from(r"C:\ProgramData\RustDesk\ManagementAgent\exe-assets")
+        crate::management_agent::system_dirs::get()
+            .agent()
+            .join("exe-assets")
     };
     if !asset_parent.exists() {
         workspace::create(&asset_parent)?;
@@ -674,7 +683,10 @@ fn prepare_checked(
         original_build_seq: request.current_build,
         target_version: version.into(),
         target_build_seq: build,
-        normal_install_path: r"C:\Program Files\RustDesk".into(),
+        normal_install_path: crate::management_agent::system_dirs::get()
+            .normal_install()
+            .to_string_lossy()
+            .into_owned(),
         package,
         client_backup: describe(root, "exe-assets.json")?,
         agent_backup,

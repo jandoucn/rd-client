@@ -111,10 +111,17 @@ fn preserve_agent_checked(
         );
         #[cfg(not(test))]
         if destination
-            != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe")
-            || state != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state")
+            != crate::management_agent::system_dirs::get()
+                .agent()
+                .join("rustdesk-management-agent.exe")
+            || state
+                != crate::management_agent::system_dirs::get()
+                    .agent()
+                    .join("state")
             || directory
-                != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions")
+                != crate::management_agent::system_dirs::get()
+                    .agent()
+                    .join("transactions")
                     .join(&expected.transaction_id)
             || intent != hbb_common::config::Config2::file()
         {
@@ -215,7 +222,7 @@ fn preserve_agent_checked(
             let parent = destination
                 .parent()
                 .ok_or("total loss destination parent missing")?;
-            if parent == Path::new(r"C:\ProgramData\RustDesk\ManagementAgent") {
+            if parent == crate::management_agent::system_dirs::get().agent() {
                 workspace::verify_agent_install_directory(parent)?;
             } else {
                 workspace::verify(parent)?;
@@ -391,7 +398,7 @@ pub(crate) fn completed_preservation_for(
         .and_then(Path::parent)
         .ok_or("completed preservation root missing")?;
     #[cfg(not(test))]
-    if agent != Path::new(r"C:\ProgramData\RustDesk\ManagementAgent") {
+    if agent != crate::management_agent::system_dirs::get().agent() {
         return Err("completed preservation fixed root mismatch".into());
     }
     let bytes = receipt_read(&directory.join("local-repair-plan.json"))?;
@@ -571,10 +578,14 @@ pub(crate) fn completed_preservation_for(
     }
     workspace::verify_restore_target(&state.join("service-recovery-enabled"), false)?;
     #[cfg(not(test))]
-    let tasks = Path::new(r"C:\Windows\System32\Tasks").to_path_buf();
+    let tasks = crate::management_agent::system_dirs::get()
+        .system32()
+        .join("Tasks");
     #[cfg(test)]
     let tasks = if PRODUCT_FIXTURE.with(|v| v.get()) {
-        Path::new(r"C:\Windows\System32\Tasks").to_path_buf()
+        crate::management_agent::system_dirs::get()
+            .system32()
+            .join("Tasks")
     } else {
         agent.join("tasks")
     };
@@ -740,16 +751,20 @@ fn native_process_present() -> Result<bool, String> {
 }
 
 #[cfg(windows)]
-fn native_agent_path() -> &'static std::path::Path {
+fn native_agent_path() -> std::path::PathBuf {
     #[cfg(not(test))]
-    let value = r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe";
+    let value = crate::management_agent::system_dirs::get()
+        .agent()
+        .join("rustdesk-management-agent.exe");
     #[cfg(test)]
     let value = if PRODUCT_FIXTURE.with(|v| v.get()) {
-        r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe"
+        crate::management_agent::system_dirs::get()
+            .agent()
+            .join("rustdesk-management-agent.exe")
     } else {
-        r"C:\RustDeskAgentLab\total-loss-native\fixture-agent.exe"
+        std::path::PathBuf::from(r"C:\RustDeskAgentLab\total-loss-native\fixture-agent.exe")
     };
-    std::path::Path::new(value)
+    value
 }
 
 #[cfg(windows)]
@@ -818,9 +833,11 @@ fn native_verify_mode(plan: &super::LocalRepairPlan, may_start: bool) -> Result<
     };
     use windows_service::service::{ServiceAccess, ServiceState};
     #[cfg(not(test))]
-    let exe = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe");
+    let exe = &crate::management_agent::system_dirs::get()
+        .agent()
+        .join("rustdesk-management-agent.exe");
     #[cfg(test)]
-    let exe = native_agent_path();
+    let exe = &native_agent_path();
     #[cfg(not(test))]
     let identity = Path::new(&plan.identity_path);
     #[cfg(test)]
@@ -892,7 +909,9 @@ pub fn preserve_missing_agent_native(
     installation_error: String,
 ) -> Result<PreservationReceipt, String> {
     use std::{io::Read, path::Path};
-    let directory = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\transactions")
+    let directory = crate::management_agent::system_dirs::get()
+        .agent()
+        .join("transactions")
         .join(&expected.transaction_id);
     if expected.transaction_id.len() != 32
         || !expected
@@ -923,14 +942,18 @@ pub fn preserve_missing_agent_native_bound(
     use std::path::Path;
     #[cfg(not(test))]
     let (state, intent, identity) = (
-        Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state").to_path_buf(),
+        crate::management_agent::system_dirs::get()
+            .agent()
+            .join("state"),
         hbb_common::config::Config2::file(),
         Path::new(&plan.identity_path).to_path_buf(),
     );
     #[cfg(test)]
     let (state, intent, identity) = if PRODUCT_FIXTURE.with(|v| v.get()) {
         (
-            Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\state").to_path_buf(),
+            crate::management_agent::system_dirs::get()
+                .agent()
+                .join("state"),
             hbb_common::config::Config2::file(),
             Path::new(&plan.identity_path).to_path_buf(),
         )
@@ -1031,7 +1054,7 @@ fn preserve_native_at(
         state,
         intent,
         identity,
-        native_agent_path(),
+        &native_agent_path(),
         expected,
         installation_error,
         || {
@@ -1209,12 +1232,15 @@ impl Prestate {
             return Err("total loss client anchor must be absent".into());
         }
         if let OriginalService::Stopped { command, start } = &self.original_service {
+            let normal_command = format!(
+                r#""{}" --service"#,
+                crate::management_agent::system_dirs::get()
+                    .normal_install()
+                    .join("RustDesk.exe")
+                    .display()
+            );
             if !["auto", "manual"].contains(&start.as_str())
-                || ![
-                    r#""C:\Program Files\RustDesk\RustDesk.exe" --service"#,
-                    fallback_command,
-                ]
-                .contains(&command.as_str())
+                || ![normal_command.as_str(), fallback_command].contains(&command.as_str())
             {
                 return Err("total loss original service contract invalid".into());
             }

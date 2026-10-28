@@ -4,16 +4,16 @@ use windows_service::{service::{ServiceAccess, ServiceState, ServiceType}, servi
 
 pub fn stop_and_delete(name: &str, context: &Context) -> Result<(), String> {
     let executable = match name {
-        "RustDesk" => PathBuf::from(r"C:\Program Files\RustDesk\RustDesk.exe"),
-        "RustDeskManagementAgent" => PathBuf::from(r"C:\ProgramData\RustDesk\ManagementAgent\rustdesk-management-agent.exe"),
+        "RustDesk" => super::system_dirs::get().normal_install().join("RustDesk.exe"),
+        "RustDeskManagementAgent" => super::system_dirs::get().agent().join("rustdesk-management-agent.exe"),
         _ => return Err("purge service outside fixed contract".into()),
     };
     if name == "RustDeskManagementAgent" {
-        let bytes = std::fs::read(r"C:\ProgramData\RustDesk\ManagementAgent\state\agent.json").map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(super::system_dirs::get().agent().join(r"state\agent.json")).map_err(|e| e.to_string())?;
         let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "purge service state malformed")?;
         let edition = state["edition"].as_str().ok_or("purge service edition missing")?;
         if !matches!(edition, "standard" | "sos") || state["package_kind"] != "msi" { return Err("purge agent contract state mismatch".into()); }
-        return stop_bound(name, executable, &format!("--service --edition {edition} --package-kind msi --normal-install-path \"C:\\Program Files\\RustDesk\""), context);
+        return stop_bound(name, executable, &format!("--service --edition {edition} --package-kind msi --normal-install-path \"{}\"", super::system_dirs::get().normal_install().display()), context);
     }
     stop_bound(name, executable, "--service", context)
 }

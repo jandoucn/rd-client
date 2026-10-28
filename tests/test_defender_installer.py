@@ -144,11 +144,10 @@ if($result.Items.Count -gt 7){throw 'scope broadened'}
         self.assertIn('Execute="deferred"',wxs)
         self.assertIn('Impersonate="no"',wxs)
         self.assertIn('Return="ignore"',wxs)
-        # 交互安装默认勾选、静默安装（后台更新、Agent 新装与修复）默认配置 Defender。
+        # 界面不再显示 Defender 选项，交互与静默安装都默认配置；命令行 DEFENDER_EXCLUSIONS=0 仍可关闭。
         self.assertIn('<Property Id="DEFENDER_EXCLUSIONS" Value="1" Secure="yes" />',wxs)
         self.assertIn('[INSTALLFOLDER_INNER]',wxs)
-        self.assertIn('Bitness="always64"',wxs)
-        self.assertIn('DEFENDER_SAVED_CONSENT=&quot;1&quot;',wxs)
+        self.assertNotIn('DEFENDER_CHECKBOX',wxs)
         self.assertNotIn('RUSTDESK_AGENT_RECOVERY=&quot;1&quot;',wxs)
         self.assertIn('<Custom Action="ConfigureDefender" Before="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />',wxs)
         self.assertNotIn('Remove-MpPreference',wxs)

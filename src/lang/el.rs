@@ -686,6 +686,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("New tab", "Νέα καρτέλα"),
         ("Keep terminal sessions on disconnect", "Διατήρηση περιόδων λειτουργίας τερματικού κατά την αποσύνδεση"),
         ("Terminal (Run as administrator)", "Τερματικό (Εκτέλεση ως διαχειριστής)"),
+        ("Terminal (SYSTEM)", ""),
         ("terminal-admin-login-tip", "Παρακαλώ εισάγετε το όνομα χρήστη και τον κωδικό πρόσβασης διαχειριστή της ελεγχόμενης πλευράς."),
         ("Failed to get user token.", "Αποτυχία λήψης διακριτικού χρήστη."),
         ("Incorrect username or password.", "Λανθασμένο όνομα χρήστη ή κωδικός πρόσβασης."),
