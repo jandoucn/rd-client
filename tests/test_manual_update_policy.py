@@ -17,9 +17,11 @@ class ManualUpdatePolicyTest(unittest.TestCase):
         gate = updater[start:updater.index("    let Some(ref manifest)", start)]
         start = updater.index("    let mut action = decide_update_action", start)
         action = updater[start:updater.index("    if let Some(command) = command {", start)]
-        # 显式安装请求的抬升只作用于 download，disabled 不得被越过。
-        self.assertIn("if install_requested && action == UpdateAction::Download", action)
+        # 显式安装请求把 notify 与 download 都抬升为安装，disabled 不得被越过。
+        self.assertIn("action = install_request_action(action, install_requested);", action)
         self.assertNotIn("if manually && response.update_available", action)
+        lift = updater[updater.index("fn install_request_action("):updater.index("fn check_update_request_with_action(")]
+        self.assertIn("matches!(action, UpdateAction::Notify | UpdateAction::Download)", lift)
         decision = base[base.index("pub fn decide_update_action("):base.index("pub fn update_target_key(")]
         source = r'''
 #[derive(Debug, PartialEq)]
@@ -30,7 +32,7 @@ pub struct VersionCheckResponse { update_available: bool, mode: String, auto_ins
 mod keys { pub const OPTION_ALLOW_AUTO_UPDATE: &str = "auto"; }
 mod config { pub struct Config; impl Config { pub fn get_option(_: &str) -> String { "N".into() } } }
 fn update_option_enabled(value: &str) -> bool { value == "Y" }
-''' + check + decision + '''
+''' + check + decision + lift + '''
 fn admitted(response: &VersionCheckResponse, manually: bool, command: Option<()>) -> Result<UpdateCommandRunOutcome, ()> {
 ''' + gate + '''
     Ok(UpdateCommandRunOutcome::CheckCompleted)
@@ -62,14 +64,15 @@ fn confirmed_manual_install_is_admitted_for_every_mode() {
     }
 }
 #[test]
-fn explicit_install_lifts_download_but_never_disabled() {
+fn explicit_install_lifts_notify_and_download_but_never_disabled() {
     let download = VersionCheckResponse { update_available: true, mode: "download".into(), auto_install: false };
     assert_eq!(install_action(&download, true), UpdateAction::AutoInstall);
     assert_eq!(install_action(&download, false), UpdateAction::Download);
     let disabled = VersionCheckResponse { update_available: true, mode: "disabled".into(), auto_install: false };
     assert_eq!(install_action(&disabled, true), UpdateAction::Ignore);
     let notify = VersionCheckResponse { update_available: true, mode: "notify".into(), auto_install: false };
-    assert_eq!(install_action(&notify, true), UpdateAction::Notify);
+    assert_eq!(install_action(&notify, true), UpdateAction::AutoInstall);
+    assert_eq!(install_action(&notify, false), UpdateAction::Notify);
 }
 #[test]
 fn disabled_background_install_and_missing_update_stay_inert() {
