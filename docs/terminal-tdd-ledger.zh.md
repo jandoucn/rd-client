@@ -164,6 +164,35 @@
 | V5 attach | 断浏览器 WS 不 close → attach 后 `V5_AFTER` 回显；补发约 4120 字节 |
 | 清理 | 临时 `rd_admin` 会话与铸造脚本已删 |
 
+## 7. 2026-10-29 无 ConPTY 备选（GEP / Server 2016）
+
+GEP（`505054514`，Windows Server 2016 Datacenter 14393）网页终端四次 `terminal_open_failed` / `terminal_start_failed`。同版本 Agent 在 Windows 10 上 `terminal_open` 成功。原因是 `CreatePseudoConsole` 从 Windows 10 1809 才有，Server 2016 没有，现有 `portable-pty` 启动必然失败。网页把审计一律标成「✓ 成功」是展示问题，不是这次启动失败的原因。
+
+| 项 | 决定 |
+|---|---|
+| 现有路径 | 不改。`kernel32` 导出 `CreatePseudoConsole` 时仍只走 `PtySession::open_conpty` |
+| 备选 | `console_host::PipeSession`：匿名管道 + `CreateProcessW`，三种 shell 共用 |
+| 句柄 | 只把子进程需要的管道端列入 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`，避免继承 Agent 自己的写端 |
+| 参数 | 命令行按 CreateProcess 规则加引号。PowerShell 的 `-Command` 含空格，不能按空格拆 |
+| 尺寸 | 管道没有控制台窗口，`resize` 成功但不生效。全屏 TUI 仍只在 ConPTY 上成立 |
+| 结束 | 仍归入 KillOnClose Job，关闭会话杀整棵进程树 |
+| 编译 | 只编 `rustdesk-management-agent`。终端启动不在主客户端里 |
+
+### 实测踩到的四个问题
+
+1. **`CreatePipe` 给的是不可继承句柄**。`CreateProcessW` 带 `bInheritHandles=true` 且列了 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 时，列出的句柄必须本身可继承，否则整次创建直接失败 `ERROR_INVALID_PARAMETER`，网页只看到 `terminal_start_failed`。修法是对子进程那两端显式 `SetHandleInformation(HANDLE_FLAG_INHERIT)`。
+2. **管道下的 cmd 是纯行输入**。逐字不回显，退格也只当普通字节：实测 `wxyz` + 4 个退格 + `hoami` + 回车什么都不执行，因为命令行实际成了 `wxyz\b\b\b\bhoami`。修法是 shell 用 `/Q` 关掉自己的整行回显，由 Agent 本地做行编辑：按键即时回显、退格删一个完整字符、只在回车时把整行加 CRLF 交给 cmd。PowerShell 自己逐字回显，不能补第二遍。
+3. **裸 CR 不执行**。xterm 回车发的是 `\r`，cmd 只认 CRLF。PowerShell 能执行裸 CR，但输出行尾缺 LF。
+4. **shell 按系统 ANSI 代码页读写**。管道进程没有控制台，cmd 与 PowerShell 都用 ACP（GEP 是 936/GBK），浏览器是 UTF-8，中文全乱码。不能靠 `chcp 65001`：实测它只改输出代码页，cmd 解析 stdin 那条命令行时仍按启动时的 936，UTF-8 中文被拆成非法字节后整条命令变成 `More?`。修法是 Agent 里做双向转码，并处理 DBCS 前导字节被管道读切断的情况。
+
+### 验收
+
+win10-gs 编译（2026-10-29）：`cargo test --locked --release --bin rustdesk-management-agent -- terminal::` 101 passed / 0 failed。构建产物 `4457f5c015000deb82d7482f8d0e68f2855c8f610a64e007ff3cbe5a8ef5a3eb`。
+
+GEP 现网替换后：服务 `RustDeskManagementAgent` Running；`terminal_open` 成功；PowerShell 与 cmd 都能输入、都能回显、命令能执行；`echo 中文测试` 显示正常，中文写入命令可执行。用户在网页上确认「没问题了」。
+
+已知限制：管道没有控制台窗口，`resize` 成功但不生效，全屏 TUI 只在 ConPTY 上成立。
+
 已知限制（代码审查确认，本轮不改）：
 - shell 自行退出时 pump 线程逐个收尾，每个约 200ms、最坏 2s 静默 + 2s 读线程；4 个会话同时退出最坏约 16s，期间其他会话的输入与输出暂停（心跳仍在 60s 判死线内）。
 - 读线程 2s 内未结束时仍按已收尾处理，之后到达的输出会丢。

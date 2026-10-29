@@ -23,6 +23,7 @@ DEFAULT_PATHS=(
   src/management_agent/terminal/shell.rs
   src/management_agent/terminal/output_ring.rs
   src/management_agent/terminal/job_windows.rs
+  src/management_agent/terminal/console_host.rs
   Cargo.toml
   Cargo.lock
 )

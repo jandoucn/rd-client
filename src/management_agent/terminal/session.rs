@@ -92,7 +92,8 @@ fn closed() -> TerminalError {
 }
 
 impl PtySession {
-    pub fn spawn(
+    /// 现有 ConPTY 实现。测试直接用它，避免在没有伪控制台的机器上被备选路径替换。
+    pub fn open_conpty(
         command: &ShellCommand,
         cwd: Option<&Path>,
         size: TerminalSize,
@@ -116,6 +117,31 @@ impl PtySession {
                 Err(error)
             }
         }
+    }
+
+    pub fn spawn(
+        command: &ShellCommand,
+        cwd: Option<&Path>,
+        size: TerminalSize,
+        ring_capacity: usize,
+    ) -> Result<Box<dyn super::TerminalSlot>, TerminalError> {
+        // ConPTY 从 Windows 10 1809 才有。没有 CreatePseudoConsole 的系统走管道备选；
+        // 有该 API 的系统仍只走现有实现，不经过备选。
+        #[cfg(windows)]
+        if !super::console_host::conpty_available() {
+            return Ok(Box::new(super::console_host::PipeSession::spawn(
+                command,
+                cwd,
+                size,
+                ring_capacity,
+            )?));
+        }
+        Ok(Box::new(Self::open_conpty(
+            command,
+            cwd,
+            size,
+            ring_capacity,
+        )?))
     }
 
     fn attach(

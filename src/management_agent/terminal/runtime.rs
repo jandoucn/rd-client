@@ -53,10 +53,10 @@ struct PtyFactory;
 impl SlotFactory for PtyFactory {
     fn spawn(&mut self, request: &OpenRequest) -> Result<Box<dyn TerminalSlot>, TerminalError> {
         let locations = ShellLocations::system();
-        let command = super::resolve_shell(request.shell, &locations, |path| path.exists())?;
+        let command =
+            super::resolve_shell(request.shell, super::shell_mode(), &locations, |path| path.exists())?;
         let cwd = request.cwd.as_deref().map(std::path::Path::new);
-        let session = PtySession::spawn(&command, cwd, request.size, AGENT_RING_BYTES)?;
-        Ok(Box::new(session))
+        PtySession::spawn(&command, cwd, request.size, AGENT_RING_BYTES)
     }
 }
 

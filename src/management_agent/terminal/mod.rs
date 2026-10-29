@@ -3,6 +3,8 @@
 //! 字段语义、错误码与超时以 `docs/terminal-protocol.zh.md` 为准。
 
 #[cfg(windows)]
+mod console_host;
+#[cfg(windows)]
 mod job_windows;
 mod manager;
 mod output_ring;
@@ -30,7 +32,17 @@ pub(crate) use session::READ_BUFFER_BYTES;
 #[allow(unused_imports)]
 pub use session::{Expiry, PtySession, SessionPolicy};
 #[allow(unused_imports)]
-pub use shell::{resolve_shell, ShellCommand, ShellKind, ShellLocations};
+pub use shell::{resolve_shell, ShellCommand, ShellKind, ShellLocations, ShellMode};
+
+/// 当前进程实际会用哪种终端承载。`PipeSession` 与 shell 启动参数必须用同一判定，
+/// 否则会给没有控制台的管道进程配上 ConPTY 专用参数。
+pub fn shell_mode() -> ShellMode {
+    #[cfg(windows)]
+    if !console_host::conpty_available() {
+        return ShellMode::Pipe;
+    }
+    ShellMode::Console
+}
 
 /// Agent 侧每个会话保留的输出字节上限（协议第 4 节）。
 pub const AGENT_RING_BYTES: usize = 4 * 1024 * 1024;

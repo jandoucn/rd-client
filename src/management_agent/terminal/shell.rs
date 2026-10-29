@@ -33,6 +33,23 @@ impl ShellKind {
 pub struct ShellCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// 由 agent 在本地做行编辑与回显，只把整行交给 shell。
+    ///
+    /// cmd 在管道输入下是纯行输入模式：不逐字回显，退格/方向键也只当普通字节。
+    /// 实测 `wxyz` + 4 个退格 + `hoami` + 回车什么都不执行，所以编辑必须在本地完成。
+    /// 配合 `/Q`（关掉 shell 自己的整行回显）才不会在按回车时看到两遍命令。
+    pub local_echo: bool,
+}
+
+/// 终端承载方式决定启动参数能怎么给。
+///
+/// ConPTY 是真实伪控制台：shell 有控制台，可以设 `[Console]` 编码，也能用 `>NUL` 这类重定向。
+/// 管道没有控制台：`-Command` 载荷会被 CreateProcessW 原样拼进命令行，含引号与 `>` 时
+/// cmd 会整串当成命令名执行；且 pipe 下 `/K <cmd>` 会吞掉随后的标准输入，第一条命令直接丢失。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellMode {
+    Console,
+    Pipe,
 }
 
 /// 只使用系统目录下的绝对路径，SYSTEM 身份下不按 PATH 查找程序。
@@ -74,6 +91,7 @@ impl ShellLocations {
 
 pub fn resolve_shell(
     kind: ShellKind,
+    mode: ShellMode,
     locations: &ShellLocations,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<ShellCommand, TerminalError> {
@@ -86,12 +104,23 @@ pub fn resolve_shell(
         .into_iter()
         .find(|path| exists(path))
         .ok_or(TerminalError::ShellUnavailable(kind))?;
-    let args = match kind {
-        ShellKind::Cmd => vec![
+    let args = match (kind, mode) {
+        // 管道下的 cmd 不能用 `/K <payload>`：载荷含 `>` 时 cmd 会把整串当成命令名，
+        // 报「不是内部或外部命令」；去掉重定向后它又会吃掉紧随 stdin 的第一条命令。
+        // `/Q` 关掉 shell 自己的整行回显：管道输入下它只在回车时把整行一次性吐出，
+        // 用户打字期间什么都看不到，按回车又会出现两遍。整行由 agent 本地回显。
+        (ShellKind::Cmd, ShellMode::Pipe) => vec!["/Q".to_owned(), "/K".to_owned()],
+        (ShellKind::Cmd, ShellMode::Console) => vec![
             "/K".to_owned(),
             format!("{} 65001 >NUL", locations.chcp().display()),
         ],
-        ShellKind::PowerShell | ShellKind::Pwsh => vec![
+        // 管道进程没有控制台，[Console]::InputEncoding/OutputEncoding 无处可设。
+        (ShellKind::PowerShell | ShellKind::Pwsh, ShellMode::Pipe) => vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NoExit".to_owned(),
+        ],
+        (ShellKind::PowerShell | ShellKind::Pwsh, ShellMode::Console) => vec![
             "-NoLogo".to_owned(),
             "-NoProfile".to_owned(),
             "-NoExit".to_owned(),
@@ -102,7 +131,13 @@ pub fn resolve_shell(
             ),
         ],
     };
-    Ok(ShellCommand { program, args })
+    // PowerShell 在管道输入下逐字回显并处理退格，本地再回显会重复；只有 cmd 需要。
+    let local_echo = kind == ShellKind::Cmd && mode == ShellMode::Pipe;
+    Ok(ShellCommand {
+        program,
+        args,
+        local_echo,
+    })
 }
 
 #[cfg(test)]
@@ -150,6 +185,7 @@ mod tests {
     fn powershell_prefers_powershell_7() {
         let command = resolve_shell(
             ShellKind::PowerShell,
+            ShellMode::Pipe,
             &locations(),
             present(&[pwsh(), windows_powershell()]),
         )
@@ -161,6 +197,7 @@ mod tests {
     fn powershell_falls_back_to_windows_powershell() {
         let command = resolve_shell(
             ShellKind::PowerShell,
+            ShellMode::Pipe,
             &locations(),
             present(&[windows_powershell()]),
         )
@@ -173,6 +210,7 @@ mod tests {
         assert_eq!(
             resolve_shell(
                 ShellKind::Pwsh,
+                ShellMode::Pipe,
                 &locations(),
                 present(&[windows_powershell(), cmd()])
             ),
@@ -184,26 +222,54 @@ mod tests {
     fn every_shell_absent_is_reported() {
         for kind in [ShellKind::PowerShell, ShellKind::Pwsh, ShellKind::Cmd] {
             assert_eq!(
-                resolve_shell(kind, &locations(), present(&[])),
+                resolve_shell(kind, ShellMode::Pipe, &locations(), present(&[])),
                 Err(TerminalError::ShellUnavailable(kind))
             );
         }
     }
 
+    /// 管道下的 cmd 必须关掉 shell 自己的整行回显并由本进程编辑：它逐字不回显、
+    /// 退格只当普通字节，只有 `/Q` 才不会在回车时把整行再吐一遍。
     #[test]
-    fn cmd_uses_system32_and_utf8_codepage() {
-        let command = resolve_shell(ShellKind::Cmd, &locations(), present(&[cmd()])).unwrap();
+    fn cmd_in_pipe_edits_locally_with_echo_off() {
+        let command =
+            resolve_shell(ShellKind::Cmd, ShellMode::Pipe, &locations(), present(&[cmd()])).unwrap();
         assert_eq!(command.program, cmd());
+        assert_eq!(command.args, vec!["/Q".to_owned(), "/K".to_owned()]);
+        assert!(command.local_echo);
+    }
+
+    #[test]
+    fn cmd_on_conpty_keeps_shell_side_echo_off_but_local_echo_disabled() {
+        let command =
+            resolve_shell(ShellKind::Cmd, ShellMode::Console, &locations(), present(&[cmd()]))
+                .unwrap();
         let chcp = locations().system32.join("chcp.com");
         assert_eq!(
             command.args,
             vec!["/K".to_owned(), format!("{} 65001 >NUL", chcp.display())]
         );
+        // 真实控制台自己回显，本进程再回显会重复。
+        assert!(!command.local_echo);
     }
 
+    /// PowerShell 在管道下自己逐字回显，本进程不能再补一遍。
+    #[test]
+    fn powershell_never_uses_local_echo() {
+        for mode in [ShellMode::Pipe, ShellMode::Console] {
+            let command =
+                resolve_shell(ShellKind::PowerShell, mode, &locations(), present(&[pwsh()]))
+                    .unwrap();
+            assert!(!command.local_echo, "{mode:?}");
+        }
+    }
+
+    /// Console 模式要给 chcp 与 [Console] 编码；三者都是真实控制台才成立的能力。
     #[test]
     fn powershell_runs_without_profile_and_with_utf8_console() {
-        let command = resolve_shell(ShellKind::Pwsh, &locations(), present(&[pwsh()])).unwrap();
+        let command =
+            resolve_shell(ShellKind::Pwsh, ShellMode::Console, &locations(), present(&[pwsh()]))
+                .unwrap();
         assert_eq!(
             &command.args[..4],
             ["-NoLogo", "-NoProfile", "-NoExit", "-Command"]

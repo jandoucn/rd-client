@@ -10,11 +10,11 @@
 后台 broker（WS 中转，复用现有 stream-broker 进程）
    ↕ WebSocket（设备签名鉴权）
 Agent（SYSTEM 服务）
-   ↕ 命名管道（本机）
-终端 helper 进程（ConPTY）
-   ↕ ConPTY
+   ↕ 本机会话
 powershell / pwsh / cmd
 ```
+
+有 `CreatePseudoConsole` 的系统（Windows 10 1809 / Server 2019 起）仍用 ConPTY，行为与改前一致。没有该 API 的系统（如 Server 2016）走管道备选：匿名管道接 shell 的标准输入输出，不经过伪控制台。三种 shell 共用这一处，协议字段不变。管道备选没有窗口尺寸和 VT 全屏；结束会话仍杀掉整棵进程树。
 
 两段都用 WebSocket，理由：终端是高频双向交互，任何轮询方案都会引入打字延迟。broker 现有的 SSE 已经同时支持「管理员会话」与「设备签名」两种鉴权，WS 复用同一套。
 

@@ -88,8 +88,9 @@ fn spawn_of_missing_program_is_start_failed() {
     let command = ShellCommand {
         program: std::env::temp_dir().join("rd-terminal-missing-shell.exe"),
         args: Vec::new(),
+        local_echo: false,
     };
-    match PtySession::spawn(&command, None, size(80, 24), 1024) {
+    match PtySession::open_conpty(&command, None, size(80, 24), 1024) {
         Err(error) => assert_eq!(error.code(), "terminal_start_failed"),
         Ok(_) => panic!("missing program must not start"),
     }
@@ -103,8 +104,9 @@ mod unix {
         let command = ShellCommand {
             program: "/bin/sh".into(),
             args: Vec::new(),
+            local_echo: false,
         };
-        PtySession::spawn(&command, None, size(80, 24), AGENT_RING_BYTES).unwrap()
+        PtySession::open_conpty(&command, None, size(80, 24), AGENT_RING_BYTES).unwrap()
     }
 
     #[test]
@@ -210,8 +212,9 @@ mod windows {
     use super::*;
 
     fn open(kind: ShellKind) -> Result<PtySession, TerminalError> {
-        let command = resolve_shell(kind, &ShellLocations::system(), |path| path.exists())?;
-        PtySession::spawn(&command, None, size(120, 30), AGENT_RING_BYTES)
+        let command =
+            resolve_shell(kind, ShellMode::Console, &ShellLocations::system(), |path| path.exists())?;
+        PtySession::open_conpty(&command, None, size(120, 30), AGENT_RING_BYTES)
     }
 
     fn pid_after(output: &[u8], marker: &str) -> u32 {

@@ -16,10 +16,7 @@ unsafe impl Send for KillOnCloseJob {}
 unsafe impl Sync for KillOnCloseJob {}
 
 impl KillOnCloseJob {
-    pub fn adopt(child: &(dyn portable_pty::Child + Send + Sync)) -> Result<Self, TerminalError> {
-        let process = child
-            .as_raw_handle()
-            .ok_or_else(|| TerminalError::StartFailed("shell process handle unavailable".into()))?;
+    pub fn adopt_handle(process: std::os::windows::io::RawHandle) -> Result<Self, TerminalError> {
         let job = unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) }
             .map_err(|error| TerminalError::StartFailed(format!("create job: {error}")))?;
         let job = Self(job);
@@ -37,6 +34,13 @@ impl KillOnCloseJob {
         unsafe { AssignProcessToJobObject(job.0, HANDLE(process as _)) }
             .map_err(|error| TerminalError::StartFailed(format!("assign job: {error}")))?;
         Ok(job)
+    }
+
+    pub fn adopt(child: &(dyn portable_pty::Child + Send + Sync)) -> Result<Self, TerminalError> {
+        let process = child
+            .as_raw_handle()
+            .ok_or_else(|| TerminalError::StartFailed("shell process handle unavailable".into()))?;
+        Self::adopt_handle(process)
     }
 
     pub fn terminate(&self) {

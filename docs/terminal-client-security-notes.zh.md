@@ -4,6 +4,10 @@
 > 范围：`src/management_agent/terminal/**`、`status.rs` 能力声明、`service_main` 挂钩。  
 > api 侧正式审查见 `rd-api/docs/terminal-security-review.zh.md`。
 
+## 2026-10-29 管道备选
+
+无 ConPTY 时 `PipeSession` 仍只启动 `resolve_shell` 给出的三个绝对路径（`powershell.exe` / `pwsh.exe` / `cmd.exe`），不按 PATH 查找，不接受网页传入的程序名。工作目录仍是可选 `cwd`，参数来自固定的 shell 解析，不拼接用户命令。进程以 `CREATE_SUSPENDED` 创建后先加入 KillOnClose Job 再恢复，关闭会话仍结束整棵树。句柄列表只含子进程的 stdin 读端和 stdout 写端，Agent 持有的另一端不继承。shell 与 Agent 同为 SYSTEM，与现有 ConPTY 会话身份相同，不新增权限。没有伪终端：不能靠控制台窗口隔离，也不能依赖窗口尺寸。
+
 ## 结论
 
 未发现 CRITICAL/HIGH。下列为已核对事实与低优先级注意。
