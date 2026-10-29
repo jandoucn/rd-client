@@ -278,6 +278,17 @@ def failed_release_cleanup_allowed(
         return False
 
 
+def oss_endpoint_mirrors(mirror_base, key):
+    """备用源：同一 bucket 的 OSS 默认域名。
+
+    阿里云禁止用 OSS 默认域名在公网分发 APK（ApkDownloadForbidden，HTTP 400），
+    这个备用源对 APK 永远不可用，发布探测也会失败，所以 APK 只保留 CNAME 主源。
+    """
+    if key.lower().endswith(".apk"):
+        return []
+    return [f"{mirror_base}/{key}"]
+
+
 def build_manifest(metadata, uploaded, repository, tag, download_base, mirror_base):
     primary_base = download_base.rstrip("/")
     mirror_base = mirror_base.rstrip("/")
@@ -298,7 +309,7 @@ def build_manifest(metadata, uploaded, repository, tag, download_base, mirror_ba
             "source_commit": release["source_commit"],
             "source_tag": release["source_tag"],
             "primary": f'{primary_base}/{asset["key"]}',
-            "mirrors": [f'{mirror_base}/{asset["key"]}'],
+            "mirrors": oss_endpoint_mirrors(mirror_base, asset["key"]),
             "size": asset["size"],
             "sha256": asset["sha256"],
             "signature": asset["signature"],

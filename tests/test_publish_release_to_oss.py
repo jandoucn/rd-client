@@ -603,6 +603,54 @@ class PublishReleaseToOssTest(unittest.TestCase):
         self.assertNotIn("github.com", mirrors[0])
         self.assertNotIn("//rustdesk/", mirrors[0])
 
+    def test_apk_target_has_no_oss_endpoint_mirror(self):
+        # 阿里云禁止用 OSS 默认域名在公网分发 APK（ApkDownloadForbidden，HTTP 400），
+        # 这个备用源对 APK 永远不可用，发布探测也会因此失败；APK 只走 CNAME 主源。
+        uploaded = {
+            "android-aarch64-apk-standard": {
+                "name": "rustdesk-1.5.0-standard-android-aarch64.apk",
+                "key": "rustdesk/stable/tag/rustdesk-1.5.0-standard-android-aarch64.apk",
+                "size": 10,
+                "sha256": "c" * 64,
+                "signature": "sig",
+            },
+            "windows-x86_64-msi-standard": {
+                "name": "rustdesk-1.5.0-standard-windows-x86_64.msi",
+                "key": "rustdesk/stable/tag/rustdesk-1.5.0-standard-windows-x86_64.msi",
+                "size": 10,
+                "sha256": "d" * 64,
+                "signature": "sig",
+            },
+        }
+        metadata = {
+            "version": "1.5.0",
+            "build_number": "20260930.5",
+            "build_seq": 2026093005,
+            "product": "rustdesk-yan",
+            "channel": "stable",
+            "source_commit": "a" * 40,
+        }
+
+        manifest = self.publisher.build_manifest(
+            metadata,
+            uploaded,
+            "owner/repo",
+            "tag",
+            "https://download.yan.life/",
+            "https://rustdesk-release.oss-cn-shanghai.aliyuncs.com/",
+        )
+
+        apk = manifest["targets"]["android-aarch64-apk-standard"]
+        self.assertEqual(apk["mirrors"], [])
+        self.assertEqual(
+            apk["primary"],
+            "https://download.yan.life/rustdesk/stable/tag/rustdesk-1.5.0-standard-android-aarch64.apk",
+        )
+        self.assertEqual(
+            manifest["targets"]["windows-x86_64-msi-standard"]["mirrors"],
+            ["https://rustdesk-release.oss-cn-shanghai.aliyuncs.com/rustdesk/stable/tag/rustdesk-1.5.0-standard-windows-x86_64.msi"],
+        )
+
     def test_manifest_rejects_mirror_base_equal_to_download_base(self):
         with self.assertRaises(self.publisher.PublishError):
             self.publisher.build_manifest(
