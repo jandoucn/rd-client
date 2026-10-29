@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/widgets/terminal_snippet_panel.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
@@ -203,7 +204,7 @@ class _TerminalPageState extends State<TerminalPage>
       body: LayoutBuilder(
         builder: (context, constraints) {
           final heightPx = constraints.maxHeight;
-          return TerminalMouseInteraction(
+          final terminalView = TerminalMouseInteraction(
             _terminalModel.terminal,
             controller: _terminalModel.terminalController,
             focusNode: _terminalFocusNode,
@@ -225,6 +226,20 @@ class _TerminalPageState extends State<TerminalPage>
                 }
               }
             },
+          );
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              terminalView,
+              Positioned(
+                top: 6,
+                right: 18,
+                child: TerminalSnippetButton(onPressed: () async {
+                  await showTerminalSnippetPicker(context, _terminalModel);
+                  _requestFocusIfSelected();
+                }),
+              ),
+            ],
           );
         },
       ),

@@ -801,5 +801,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Two-finger vertical swipe", "兩指垂直滑動"),
         ("Two-finger canvas movement", "雙指移動畫布"),
         ("Two-finger canvas scaling", "雙指縮放畫布"),
+        ("Terminal snippets", "終端常用語"),
+        ("Run", "執行"),
+        ("Log in to use terminal snippets", "請先登入帳號後使用終端常用語"),
+        ("Terminal snippets are only available to global administrators", "終端常用語僅對全域管理員開放"),
+        ("This server does not support terminal snippets", "目前伺服器不支援終端常用語"),
+        ("No terminal snippets yet, add them on the web terminal page", "還沒有常用語，請在 Web 後台的終端頁面新增"),
+        ("No matching terminal snippets", "沒有符合的常用語"),
+        ("Failed to load terminal snippets", "載入終端常用語失敗"),
+        ("Refresh failed, showing the last loaded terminal snippets", "重新整理失敗，顯示的是上次載入的常用語"),
     ].iter().cloned().collect();
 }

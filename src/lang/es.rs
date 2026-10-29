@@ -801,5 +801,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Two-finger vertical swipe", ""),
         ("Two-finger canvas movement", ""),
         ("Two-finger canvas scaling", ""),
+        ("Terminal snippets", ""),
+        ("Run", ""),
+        ("Log in to use terminal snippets", ""),
+        ("Terminal snippets are only available to global administrators", ""),
+        ("This server does not support terminal snippets", ""),
+        ("No terminal snippets yet, add them on the web terminal page", ""),
+        ("No matching terminal snippets", ""),
+        ("Failed to load terminal snippets", ""),
+        ("Refresh failed, showing the last loaded terminal snippets", ""),
     ].iter().cloned().collect();
 }

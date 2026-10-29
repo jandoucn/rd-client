@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
+import 'package:flutter_hbb/common/widgets/terminal_snippet_panel.dart';
 import 'package:flutter_hbb/models/input_modifier_utils.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -470,6 +471,18 @@ class _TerminalPageState extends State<TerminalPage>
           if (_showTerminalExtraKeys) _buildFloatingKeyboard(),
           // iOS-style circular close button in top-right corner
           if (isIOS) _buildCloseButton(),
+          Positioned(
+            top: 0,
+            right: 0,
+            child: SafeArea(
+              minimum: EdgeInsets.only(
+                  top: isIOS ? 68 : 8, right: isIOS ? 22 : 8),
+              child: TerminalSnippetButton(
+                onPressed: () =>
+                    showTerminalSnippetPicker(context, _terminalModel),
+              ),
+            ),
+          ),
         ],
       ),
     );
