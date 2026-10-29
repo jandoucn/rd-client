@@ -1,6 +1,6 @@
 ## 版本变化
 
-本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261029.4`，构建序号及 Android 基准 versionCode 为 `2026102904`。Android arm64 APK 预期实际 versionCode 为 `2026104904`。
+本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261029.5`，构建序号及 Android 基准 versionCode 为 `2026102905`。Android arm64 APK 预期实际 versionCode 为 `2026104905`。
 
 - **平台未知的设备也能开管理员 / SYSTEM 终端**：网页后台手动加入通讯录的设备没有平台信息，客户端此前会隐藏「终端（以管理员身份运行）」和「终端（SYSTEM）」。现在 Windows 或未知平台都显示，只有明确是 Linux、macOS、Android 时隐藏。
 - **常用语顺序同步**：客户端常用语列表按网页后台拖拽排好的顺序显示。
