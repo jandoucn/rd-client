@@ -1,6 +1,7 @@
 import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/terminal_admin_menu_rule.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
@@ -1024,7 +1025,7 @@ class RecentPeerCard extends BasePeerCard {
       _terminalAction(context),
     ];
 
-    if (peer.platform == kPeerPlatformWindows) {
+    if (terminalAdminMenusApply(peer.platform)) {
       menuItems.add(_terminalRunAsAdminAction(context));
       menuItems.add(_terminalSystemAction(context));
     }
@@ -1091,7 +1092,7 @@ class FavoritePeerCard extends BasePeerCard {
       _terminalAction(context),
     ];
 
-    if (peer.platform == kPeerPlatformWindows) {
+    if (terminalAdminMenusApply(peer.platform)) {
       menuItems.add(_terminalRunAsAdminAction(context));
       menuItems.add(_terminalSystemAction(context));
     }
@@ -1153,7 +1154,7 @@ class DiscoveredPeerCard extends BasePeerCard {
       _terminalAction(context),
     ];
 
-    if (peer.platform == kPeerPlatformWindows) {
+    if (terminalAdminMenusApply(peer.platform)) {
       menuItems.add(_terminalRunAsAdminAction(context));
       menuItems.add(_terminalSystemAction(context));
     }
@@ -1214,7 +1215,7 @@ class AddressBookPeerCard extends BasePeerCard {
       _terminalAction(context),
     ];
 
-    if (peer.platform == kPeerPlatformWindows) {
+    if (terminalAdminMenusApply(peer.platform)) {
       menuItems.add(_terminalRunAsAdminAction(context));
       menuItems.add(_terminalSystemAction(context));
     }
@@ -1373,7 +1374,7 @@ class MyGroupPeerCard extends BasePeerCard {
       _terminalAction(context),
     ];
 
-    if (peer.platform == kPeerPlatformWindows) {
+    if (terminalAdminMenusApply(peer.platform)) {
       menuItems.add(_terminalRunAsAdminAction(context));
       menuItems.add(_terminalSystemAction(context));
     }

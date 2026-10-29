@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common/terminal_admin_menu_rule.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
@@ -300,14 +301,13 @@ class _ConnectionPageState extends State<ConnectionPage>
   }
 
   /// Whether the admin / SYSTEM terminal entries apply to [id].
-  /// The peer card gates these on `peer.platform == kPeerPlatformWindows`, but a
-  /// manually typed ID has no peer object. Only a cached peer that is known to
-  /// be non-Windows hides the entries; an unknown ID keeps them, so the entry is
-  /// not lost for a device that is simply not in the address book.
+  /// Same rule as the peer card ([terminalAdminMenusApply]): only a cached peer
+  /// whose platform is known to be non-Windows hides the entries. An unknown ID
+  /// or an empty platform (e.g. a peer added from the web console) keeps them.
   bool _terminalAdminApplies(String id) {
     if (id.isEmpty) return true;
     for (final peer in _allPeersLoader.peers) {
-      if (peer.id == id) return peer.platform == kPeerPlatformWindows;
+      if (peer.id == id) return terminalAdminMenusApply(peer.platform);
     }
     return true;
   }

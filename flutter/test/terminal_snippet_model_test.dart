@@ -145,6 +145,20 @@ void main() {
       expect(result.limit, 200);
     });
 
+    test('keeps the server order instead of re-sorting by time', () async {
+      // 网页拖拽排序后的顺序由服务端返回顺序决定，客户端不能再按时间或 id 重排。
+      respond = () => http.Response(
+          '{"data":['
+          '{"id":3,"name":"丙","command":"c","created_at":30,"updated_at":30},'
+          '{"id":1,"name":"甲","command":"a","created_at":10,"updated_at":10},'
+          '{"id":2,"name":"乙","command":"b","created_at":20,"updated_at":20}'
+          '],"limit":200,"server_time":40}',
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'});
+      final result = await repo().load();
+      expect(result.snippets.map((s) => s.name), ['丙', '甲', '乙']);
+    });
+
     test('without a token it reports not logged in and never calls the API',
         () async {
       token = '';
