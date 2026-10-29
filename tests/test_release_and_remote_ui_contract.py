@@ -95,6 +95,10 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         self.assertIn("--source-dir release-source", workflow)
         self.assertIn("UPDATE_SIGNING_KEY", workflow)
         self.assertIn("UPDATE_PUBLISH_TOKEN", workflow)
+        self.assertIn(
+            "MIRROR_BASE: https://rustdesk-release.oss-cn-shanghai.aliyuncs.com", workflow
+        )
+        self.assertIn('--mirror-base "$MIRROR_BASE"', workflow)
         publisher = (ROOT / ".github/scripts/publish-release-to-oss.py").read_text()
         self.assertIn("oss2.resumable_upload(", publisher)
         self.assertIn("ThreadPoolExecutor(max_workers=4)", publisher)

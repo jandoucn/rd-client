@@ -50,6 +50,7 @@ jobs:
       OSS_PREFIX: rustdesk/stable
       RELEASE_TAG: ${{ inputs.tag }}
       DOWNLOAD_BASE: https://download.yan.life
+      MIRROR_BASE: https://rustdesk-release.oss-cn-shanghai.aliyuncs.com
       UPDATE_PUBLISH_URL: https://rdapi.yan.life/rd/update/v1/publish
       UPDATE_MANIFEST_URL: https://rdapi.yan.life/rd/update/v1/manifest/stable.json
     steps:
@@ -101,5 +102,6 @@ jobs:
             --endpoint "$OSS_ENDPOINT" \
             --prefix "$OSS_PREFIX" \
             --download-base "$DOWNLOAD_BASE" \
+            --mirror-base "$MIRROR_BASE" \
             --publish-url "$UPDATE_PUBLISH_URL" \
             --stable-manifest-url "$UPDATE_MANIFEST_URL"

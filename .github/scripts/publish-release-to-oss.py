@@ -278,10 +278,15 @@ def failed_release_cleanup_allowed(
         return False
 
 
-def build_manifest(metadata, uploaded, repository, tag, download_base):
+def build_manifest(metadata, uploaded, repository, tag, download_base, mirror_base):
+    primary_base = download_base.rstrip("/")
+    mirror_base = mirror_base.rstrip("/")
+    if not mirror_base.startswith("https://"):
+        raise PublishError("mirror base must use HTTPS")
+    if mirror_base == primary_base:
+        raise PublishError("mirror base must differ from download base")
     targets = {}
     for target_key, asset in uploaded.items():
-        name = asset["name"]
         release = asset.get("release") or {
             **metadata,
             "source_tag": tag,
@@ -292,8 +297,8 @@ def build_manifest(metadata, uploaded, repository, tag, download_base):
             "build_seq": release["build_seq"],
             "source_commit": release["source_commit"],
             "source_tag": release["source_tag"],
-            "primary": f'{download_base.rstrip("/")}/{asset["key"]}',
-            "mirrors": [f"https://github.com/{repository}/releases/download/{tag}/{name}"],
+            "primary": f'{primary_base}/{asset["key"]}',
+            "mirrors": [f'{mirror_base}/{asset["key"]}'],
             "size": asset["size"],
             "sha256": asset["sha256"],
             "signature": asset["signature"],
@@ -491,6 +496,7 @@ def parse_args():
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--download-base", required=True)
+    parser.add_argument("--mirror-base", required=True)
     parser.add_argument("--publish-url", required=True)
     parser.add_argument("--stable-manifest-url", required=True)
     return parser.parse_args()
@@ -626,7 +632,14 @@ def main():
             bucket.put_object(catalog_key, catalog_body)
             if bucket.head_object(catalog_key).content_length != len(catalog_body):
                 raise PublishError(f"OSS size mismatch for {catalog_key}")
-        manifest = build_manifest(metadata, uploaded, args.repository, args.tag, args.download_base)
+        manifest = build_manifest(
+            metadata,
+            uploaded,
+            args.repository,
+            args.tag,
+            args.download_base,
+            args.mirror_base,
+        )
         publish_and_verify_manifest(
             UrlHttpClient(),
             manifest,

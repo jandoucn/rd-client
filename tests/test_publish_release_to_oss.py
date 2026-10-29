@@ -530,13 +530,82 @@ class PublishReleaseToOssTest(unittest.TestCase):
         }
 
         manifest = self.publisher.build_manifest(
-            metadata, uploaded, "owner/repo", "tag", "https://download.yan.life"
+            metadata,
+            uploaded,
+            "owner/repo",
+            "tag",
+            "https://download.yan.life",
+            "https://rustdesk-release.oss-cn-shanghai.aliyuncs.com",
         )
 
         self.assertEqual(manifest["source_commit"], "a" * 40)
         target = manifest["targets"]["macos-aarch64-dmg-standard"]
-        self.assertTrue(target["primary"].endswith("/rustdesk-1.5.0-standard-macos-aarch64.dmg"))
-        self.assertTrue(target["mirrors"][0].endswith("/tag/rustdesk-1.5.0-standard-macos-aarch64.dmg"))
+        self.assertEqual(
+            target["primary"],
+            "https://download.yan.life/rustdesk/stable/tag/rustdesk-1.5.0-standard-macos-aarch64.dmg",
+        )
+        self.assertEqual(
+            target["mirrors"],
+            [
+                "https://rustdesk-release.oss-cn-shanghai.aliyuncs.com/"
+                "rustdesk/stable/tag/rustdesk-1.5.0-standard-macos-aarch64.dmg"
+            ],
+        )
+
+    def test_manifest_mirror_never_points_at_private_github_release(self):
+        uploaded = {
+            "windows-x86_64-msi-sos": {
+                "name": "rustdesk-1.5.0-sos-windows-x86_64.msi",
+                "key": "rustdesk/stable/tag/rustdesk-1.5.0-sos-windows-x86_64.msi",
+                "size": 10,
+                "sha256": "b" * 64,
+                "signature": "sig",
+            }
+        }
+        metadata = {
+            "version": "1.5.0",
+            "build_number": "20260930.5",
+            "build_seq": 2026093005,
+            "product": "rustdesk-yan",
+            "channel": "stable",
+            "source_commit": "a" * 40,
+        }
+
+        manifest = self.publisher.build_manifest(
+            metadata,
+            uploaded,
+            "owner/repo",
+            "tag",
+            "https://download.yan.life/",
+            "https://rustdesk-release.oss-cn-shanghai.aliyuncs.com/",
+        )
+
+        mirrors = manifest["targets"]["windows-x86_64-msi-sos"]["mirrors"]
+        self.assertEqual(len(mirrors), 1)
+        self.assertNotIn("github.com", mirrors[0])
+        self.assertNotIn("//rustdesk/", mirrors[0])
+
+    def test_manifest_rejects_mirror_base_equal_to_download_base(self):
+        with self.assertRaises(self.publisher.PublishError):
+            self.publisher.build_manifest(
+                {"build_seq": 1},
+                {},
+                "owner/repo",
+                "tag",
+                "https://download.yan.life",
+                "https://download.yan.life/",
+            )
+
+    def test_manifest_rejects_non_https_mirror_base(self):
+        with self.assertRaises(self.publisher.PublishError):
+            self.publisher.build_manifest(
+                {"build_seq": 1},
+                {},
+                "owner/repo",
+                "tag",
+                "https://download.yan.life",
+                "http://rustdesk-release.oss-cn-shanghai.aliyuncs.com",
+            )
 
     def test_schema_two_manifest_preserves_each_target_release_identity(self):
         metadata = {
@@ -573,7 +642,12 @@ class PublishReleaseToOssTest(unittest.TestCase):
         }
 
         manifest = self.publisher.build_manifest(
-            metadata, uploaded, "owner/repo", "new", "https://download.yan.life"
+            metadata,
+            uploaded,
+            "owner/repo",
+            "new",
+            "https://download.yan.life",
+            "https://rustdesk-release.oss-cn-shanghai.aliyuncs.com",
         )
 
         self.assertEqual(manifest["schema"], 2)
