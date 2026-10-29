@@ -1316,25 +1316,37 @@ async fn do_check_software_update_inner(
         }
         builder
     };
-    let latest_release_response = match build_request(&client).send().await {
-        Ok(resp) => {
-            upsert_tls_cache(tls_url, tls_type, false);
-            resp
-        }
-        Err(err) => {
-            if is_tls_not_cached && err.is_request() {
-                let tls_type = TlsType::NativeTls;
-                let client = create_http_client_async(tls_type, false);
-                let resp = build_request(&client).send().await?;
+    let backend_resp: hbb_common::ResultType<hbb_common::VersionCheckResponse> = async {
+        let latest_release_response = match build_request(&client).send().await {
+            Ok(resp) => {
                 upsert_tls_cache(tls_url, tls_type, false);
                 resp
-            } else {
-                return Err(err.into());
             }
-        }
-    };
-    let bytes = latest_release_response.error_for_status()?.bytes().await?;
-    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
+            Err(err) => {
+                if is_tls_not_cached && err.is_request() {
+                    let tls_type = TlsType::NativeTls;
+                    let client = create_http_client_async(tls_type, false);
+                    let resp = build_request(&client).send().await?;
+                    upsert_tls_cache(tls_url, tls_type, false);
+                    resp
+                } else {
+                    return Err(err.into());
+                }
+            }
+        };
+        let bytes = latest_release_response.error_for_status()?.bytes().await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+    .await;
+    #[cfg(not(target_os = "ios"))]
+    let resp = crate::updater::fallback_manifest::resolve_check_response(
+        backend_resp,
+        request_origin,
+        &target_key,
+    )
+    .await?;
+    #[cfg(target_os = "ios")]
+    let resp = backend_resp?;
     if update_check_should_stop(resp.update_available, &resp.mode, request_origin) {
         push_software_update_check_event(Some(&resp), "", "", request_origin, request_id);
         *SOFTWARE_UPDATE_RESPONSE.lock().unwrap() = Some(resp.clone());

@@ -461,6 +461,21 @@ def release_prefix_is_complete(bucket, list_keys, prefix, tag):
     return complete_release_catalog(bucket, list_keys, prefix, tag) is not None
 
 
+def fallback_manifest_key(prefix):
+    return f'{prefix.rstrip("/")}/manifest/stable.json'
+
+
+def publish_fallback_manifest(bucket, key, manifest):
+    body = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode()
+    bucket.put_object(
+        key,
+        body,
+        headers={"Content-Type": "application/json", "Cache-Control": "no-cache"},
+    )
+    if bucket.get_object(key).read() != body:
+        raise PublishError(f"OSS fallback manifest read-back mismatch for {key}")
+
+
 def cleanup_complete_releases(bucket, list_keys, prefix, retain):
     object_keys = set(list_keys(f"{prefix}/"))
     releases = {}
@@ -647,6 +662,13 @@ def main():
             args.publish_url,
             args.stable_manifest_url,
         )
+        try:
+            publish_fallback_manifest(bucket, fallback_manifest_key(args.prefix), manifest)
+        except Exception as fallback_error:
+            raise PublishError(
+                "Backend manifest is already published; only the OSS fallback manifest "
+                f"failed, rerun the same tag to retry: {fallback_error}"
+            ) from fallback_error
 
         print(json.dumps({"tag": args.tag, "uploaded": len(uploaded)}))
     except Exception as exc:

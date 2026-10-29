@@ -49,6 +49,24 @@ class FakeBucket:
         self.deleted.append(key)
 
 
+class FakeWritableBucket:
+    def __init__(self, corrupt_read=False):
+        self.objects = {}
+        self.headers = {}
+        self.corrupt_read = corrupt_read
+
+    def put_object(self, key, body, headers=None):
+        self.objects[key] = bytes(body)
+        self.headers[key] = dict(headers or {})
+
+    def get_object(self, key):
+        body = self.objects[key]
+        return FakeBody(body + b" " if self.corrupt_read else body)
+
+    def head_object(self, key):
+        return FakeHead(len(self.objects[key]))
+
+
 class FakeObject:
     def __init__(self, key):
         self.key = key
@@ -1085,6 +1103,62 @@ class PublishReleaseToOssTest(unittest.TestCase):
 
         self.assertEqual(retained, tags[1:][::-1])
         self.assertEqual(bucket.deleted, [keys[0]])
+
+    def test_fallback_manifest_key_lives_in_stable_prefix_outside_any_release(self):
+        key = self.publisher.fallback_manifest_key("rustdesk/stable/")
+
+        self.assertEqual(key, "rustdesk/stable/manifest/stable.json")
+        self.assertIsNone(self.publisher.compatible_tag_build_seq("manifest"))
+
+    def test_fallback_manifest_is_written_uncached_and_read_back(self):
+        bucket = FakeWritableBucket()
+        manifest = {"schema": 2, "build_seq": 2026102903, "targets": {"t": {"primary": "p"}}}
+
+        self.publisher.publish_fallback_manifest(
+            bucket, "rustdesk/stable/manifest/stable.json", manifest
+        )
+
+        body = bucket.objects["rustdesk/stable/manifest/stable.json"]
+        self.assertEqual(json.loads(body), manifest)
+        headers = bucket.headers["rustdesk/stable/manifest/stable.json"]
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Cache-Control"], "no-cache")
+
+    def test_fallback_manifest_read_back_mismatch_fails_publish(self):
+        bucket = FakeWritableBucket(corrupt_read=True)
+
+        with self.assertRaises(self.publisher.PublishError):
+            self.publisher.publish_fallback_manifest(
+                bucket, "rustdesk/stable/manifest/stable.json", {"schema": 2}
+            )
+
+    def test_release_cleanup_never_deletes_fallback_manifest(self):
+        prefix = "rustdesk/stable"
+        fallback = self.publisher.fallback_manifest_key(prefix)
+        keys = [fallback]
+        for day in range(1, 9):
+            keys.append(f"{prefix}/v1.5.0-build-2026.09.{day:02d}-01/a.msi")
+        bucket = FakeBucket({}, keys, {})
+
+        self.publisher.cleanup_complete_releases(
+            bucket,
+            lambda object_prefix: (key for key in keys if key.startswith(object_prefix)),
+            prefix,
+            2,
+        )
+
+        self.assertNotIn(fallback, bucket.deleted)
+        self.assertEqual(len(bucket.deleted), 6)
+
+    def test_fallback_manifest_is_written_only_after_backend_accepts_it(self):
+        source = inspect.getsource(self.publisher.main)
+
+        self.assertIn("publish_fallback_manifest(", source)
+        self.assertIn("rerun the same tag", source)
+        self.assertLess(
+            source.index("publish_and_verify_manifest("),
+            source.index("publish_fallback_manifest("),
+        )
 
 
 if __name__ == "__main__":

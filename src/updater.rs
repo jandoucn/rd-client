@@ -8,6 +8,9 @@ pub(crate) mod ordinary_update_receipts;
 #[path = "updater/install_state.rs"]
 mod install_state;
 
+#[path = "updater/fallback_manifest.rs"]
+pub(crate) mod fallback_manifest;
+
 use crate::{
     common::{
         do_check_software_update, do_check_software_update_with_context,
