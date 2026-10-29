@@ -1,7 +1,9 @@
 ## 版本变化
 
-本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261029.2`，构建序号及 Android 基准 versionCode 为 `2026102902`。Android arm64 APK 预期实际 versionCode 为 `2026104902`。
+本次 Windows、macOS、Android 发布版本为 `1.5.4`，构建号为 `20261029.4`，构建序号及 Android 基准 versionCode 为 `2026102904`。Android arm64 APK 预期实际 versionCode 为 `2026104904`。
 
+- **平台未知的设备也能开管理员 / SYSTEM 终端**：网页后台手动加入通讯录的设备没有平台信息，客户端此前会隐藏「终端（以管理员身份运行）」和「终端（SYSTEM）」。现在 Windows 或未知平台都显示，只有明确是 Linux、macOS、Android 时隐藏。
+- **常用语顺序同步**：客户端常用语列表按网页后台拖拽排好的顺序显示。
 - **终端支持旧版 Windows**：没有 ConPTY 的系统（Server 2016、Win8 及更早）改用匿名管道备选路径，网页终端不再一进就报错。输入回显、退格编辑、中文输出（GBK↔UTF-8 转码）在管道路径下均已验证正常；全屏 TUI 仍只在 ConPTY 下成立。
 
 - **桌面终端（以管理员身份运行）与终端（SYSTEM）**：Windows 被控端 peer 卡片与连接页快捷菜单新增「终端（以管理员身份运行）」和「终端（SYSTEM）」入口，仅在 Windows 被控或未知平台时显示；认证只需连接密码，不再另外弹本机管理员账号对话框；已安装 Windows 服务时会话身份为 LocalSystem（`whoami = nt authority\system`）；连接密码与记住逻辑与普通控屏完全一致。连接旧版被控端时会提示升级，不进入账号密码死循环。
