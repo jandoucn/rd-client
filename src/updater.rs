@@ -1668,6 +1668,16 @@ fn check_update_request(
     check_update_request_with_action(manually, command, request_origin, false)
 }
 
+// 桌前用户点了「更新」就要真的安装：默认策略 `notify` 也要升级为安装，
+// 否则检查结果会被当成无更新静默丢弃。`disabled` 已被判为 Ignore，仍然拦住。
+fn install_request_action(action: UpdateAction, install_requested: bool) -> UpdateAction {
+    if install_requested && matches!(action, UpdateAction::Notify | UpdateAction::Download) {
+        UpdateAction::AutoInstall
+    } else {
+        action
+    }
+}
+
 fn check_update_request_with_action(
     manually: bool,
     command: Option<&UpdateCommand>,
@@ -1765,10 +1775,7 @@ fn check_update_request_with_action(
         &response,
         update_option_enabled(&config::Config::get_option(keys::OPTION_ALLOW_AUTO_UPDATE)),
     );
-    // `disabled` 是设备上真正的开关，显式安装请求也不能越过它。
-    if install_requested && action == UpdateAction::Download {
-        action = UpdateAction::AutoInstall;
-    }
+    action = install_request_action(action, install_requested);
     if let Some(command) = command {
         action = match command.action {
             UpdateCommandAction::Check => UpdateAction::Notify,
@@ -3628,5 +3635,58 @@ mod tests {
             &rx,
             Some(Duration::from_secs(60 * 60))
         ));
+    }
+}
+
+#[cfg(test)]
+mod install_request_action_tests {
+    use super::*;
+
+    fn response(mode: &str, update_available: bool) -> hbb_common::VersionCheckResponse {
+        hbb_common::VersionCheckResponse {
+            update_available,
+            mode: mode.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn action_for(mode: &str, update_available: bool, install_requested: bool) -> UpdateAction {
+        install_request_action(
+            decide_update_action(&response(mode, update_available), false),
+            install_requested,
+        )
+    }
+
+    #[test]
+    fn explicit_install_upgrades_notify_policy_to_install() {
+        assert_eq!(action_for("notify", true, true), UpdateAction::AutoInstall);
+    }
+
+    #[test]
+    fn explicit_install_upgrades_download_policy_to_install() {
+        assert_eq!(action_for("download", true, true), UpdateAction::AutoInstall);
+        assert_eq!(action_for("auto_install", true, true), UpdateAction::AutoInstall);
+    }
+
+    #[test]
+    fn explicit_install_upgrades_unknown_mode_that_falls_back_to_notify() {
+        assert_eq!(action_for("", true, true), UpdateAction::AutoInstall);
+    }
+
+    #[test]
+    fn explicit_install_never_overrides_disabled_policy() {
+        assert_eq!(action_for("disabled", true, true), UpdateAction::Ignore);
+    }
+
+    #[test]
+    fn explicit_install_without_offered_update_stays_ignored() {
+        assert_eq!(action_for("notify", false, true), UpdateAction::Ignore);
+    }
+
+    #[test]
+    fn plain_check_keeps_policy_action() {
+        assert_eq!(action_for("notify", true, false), UpdateAction::Notify);
+        assert_eq!(action_for("download", true, false), UpdateAction::Download);
+        assert_eq!(action_for("disabled", true, false), UpdateAction::Ignore);
     }
 }
