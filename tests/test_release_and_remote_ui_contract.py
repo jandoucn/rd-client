@@ -73,7 +73,20 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         validator = (ROOT / ".github/scripts/validate-release-selection.py").read_text()
         self.assertIn("桌面发布快照必须同时构建 standard 和 SOS", validator)
         self.assertIn("Android 发布必须构建 standard", validator)
-        self.assertIn("inputs.platforms != 'android'", caller)
+        self.assertIn("(inputs.platforms || 'all') != 'android'", caller)
+
+    def test_release_build_starts_from_a_pushed_version_tag(self):
+        caller = (ROOT / ".github/workflows/flutter-tag.yml").read_text()
+        trigger = caller[: caller.index("concurrency:")]
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertIn("  push:\n    tags:\n      - 'v*-build-*'", trigger)
+        self.assertNotIn("branches:", trigger)
+        # 推送的 tag 已经存在：计算序号时必须排除它本身，且只在推送触发时跳过已存在检查。
+        self.assertIn('git tag --list | grep -vxF -- "$CUSTOM_TAG"', caller)
+        self.assertIn('if [ "$EVENT_NAME" != "push" ] && git ls-remote --exit-code --tags origin', caller)
+        self.assertIn('Custom tag must match version.json', caller)
+        for expression in ("inputs.tag != ''", "${{ inputs.standard }}", "${{ inputs.sos }}"):
+            self.assertNotIn(expression, caller)
 
     def test_android_release_builds_only_the_standard_edition(self):
         workflow = (ROOT / ".github/workflows/flutter-build.yml").read_text()
@@ -112,7 +125,10 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         self.assertIn("needs: [release-tag, publish-release]", caller)
         self.assertIn("uses: ./.github/workflows/publish-oss.yml", caller)
         self.assertIn("secrets: inherit", caller)
-        self.assertIn('CUSTOM_TAG: ${{ inputs.tag }}', caller)
+        self.assertIn(
+            "CUSTOM_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}",
+            caller,
+        )
         self.assertNotIn('if [ "${{ inputs.tag }}"', caller)
         self.assertIn('tag_base="v${version}-build-${formatted_date}"', caller)
         self.assertIn('build_seq=$(python3 -c', caller)
@@ -128,7 +144,7 @@ class ReleaseAndRemoteUiContractTest(unittest.TestCase):
         self.assertIn("group: flutter-tag-release", caller)
         self.assertIn("cancel-in-progress: false", caller)
         self.assertIn(
-            "if: inputs.standard && (inputs.sos || inputs.platforms == 'android')",
+            "if: (github.event_name == 'push' || inputs.standard) && ((github.event_name == 'push' || inputs.sos) || (inputs.platforms || 'all') == 'android')",
             caller,
         )
         self.assertIn("校验 Android 发布签名", caller)

@@ -18,9 +18,9 @@
 
 ## 定制仓库
 
-这个仓库是私人定制客户端。以后按下面做，不要再改回自动构建，也不要写成英文说明。
+这个仓库是私人定制客户端。以后按下面做，不要给提交或定时任务加自动构建，也不要写成英文说明。
 
-* 安装包只由手动触发的 **Flutter Tag Build** 产出。不要给提交、定时任务或打版本号 tag 加自动构建。
+* 安装包只由 **发布构建**（`.github/workflows/flutter-tag.yml`）产出。推送符合 `v*-build-*` 的版本 tag 自动触发全量构建（standard 与 SOS、全部平台），也保留手动触发（用户 2026-10-30 决定）。推 master、普通提交和定时任务不得触发构建。推送的 tag 必须与 `version.json` 推算出的名字完全一致，否则构建直接失败；tag 用不带说明的轻量 tag。
 * 发版 tag 的构建号规则固定为：
   * 日期段取**当天北京时间**，形如 `20261025`；北京时间以 UTC+8 计算，跨过北京时间零点即算新的一天，不得沿用 `version.json` 里上一次的日期。
   * 序号为两位，同一自然日内从 `01` 起递增，得到 `build_seq = 日期 * 100 + 序号`，例如 `2026102501`。
@@ -77,7 +77,7 @@
   * `AGENT_TEST_API_ROOT=D:\github\rd-api`（冻结的后端副本，不要随意更新）
 * **破坏性实验室用例**：`RUSTDESK_LAB_HOST=YAN`（即本机 `COMPUTERNAME`）只在明确要跑的那几个测试套件前临时设置，跑完立即清空；不得设成机器级变量，也不得带着它跑整个 `cargo test`。这些用例会停止、删除 RustDesk 服务和清空安装目录，执行前按上面「Windows 真机测试」的备份、看门狗和恢复要求处理。未设置时这些用例以 `RUSTDESK_LAB_HOST must name this machine` 失败，属于预期。
 * **以 SYSTEM 运行计划任务时的缓存路径**：SYSTEM 的用户目录与 Administrator 不同，构建脚本里要显式指定 `PUB_CACHE=C:\Users\Administrator\AppData\Local\Pub\Cache` 和 `NUGET_PACKAGES=C:\Users\Administrator\.nuget\packages`。后者是必须的：`C:\RustDeskBuildTools\MSBuild\Current\Bin\MSBuild.exe` 是 32 位程序，访问 `C:\Windows\system32\config\systemprofile` 下的 nuget 缓存会被重定向到 SysWOW64，WiX 扩展被静默跳过，报 `WIX0200 ... WixUI`。pub 缓存若出现空的包目录（2026-10-21 有 16 个 Windows 插件包被清空过），`flutter analyze` 会报大量 `uri_does_not_exist`，删掉空目录后重新 `flutter pub get` 即可。
-* **代码同步（重要）**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master`，但 **win10-gs 上 `git pull` 不可用**：SSH 是非交互会话，Git 凭据管理器（wincredman）无法持久化，拉取会报 `could not read Username for 'https://github.com'`。正确做法是 **用 `termark upload` 把改动的源文件逐个覆盖到 `D:\github\rd-client` 对应路径，然后直接编译**。上传后 win10-gs 工作树相对其 HEAD 会显示为已修改，这是预期状态，不要试图在远端修复。推 master 不触发构建，只有打 tag 才触发 Flutter Tag Build。
+* **代码同步（重要）**：改动在 Mac 上完成并提交中文说明 → 推 `origin/master`，但 **win10-gs 上 `git pull` 不可用**：SSH 是非交互会话，Git 凭据管理器（wincredman）无法持久化，拉取会报 `could not read Username for 'https://github.com'`。正确做法是 **用 `termark upload` 把改动的源文件逐个覆盖到 `D:\github\rd-client` 对应路径，然后直接编译**。上传后 win10-gs 工作树相对其 HEAD 会显示为已修改，这是预期状态，不要试图在远端修复。推 master 不触发构建，只有推送版本 tag 才触发发布构建。
 
 ## 测试与验收约束
 
