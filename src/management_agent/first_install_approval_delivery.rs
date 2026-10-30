@@ -173,8 +173,62 @@ pub fn fetch_loopback_fixture(
     fetch_manifest_http(ManifestSource::Loopback(address, budget))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredProduct {
+    code: String,
+    name: String,
+    location: String,
+}
+
+/// Failed upgrades and reinstalls can leave several RustDesk MSI registrations behind.
+/// Only those installed at the fixed directory can belong to the running client; every
+/// other registration is ignored instead of failing the whole check. Which candidate
+/// is the running build is settled by delivery, which accepts only the product whose
+/// registered source is the current build's signed package.
+fn select_install_candidates(
+    products: &[RegisteredProduct],
+    normal_install: &Path,
+) -> Result<Vec<String>, DeliveryError> {
+    let normal = normal_install.to_string_lossy();
+    let normal = normal.trim_end_matches(['\\', '/']);
+    let rustdesk: Vec<_> = products.iter().filter(|p| p.name == "RustDesk").collect();
+    if rustdesk.is_empty() {
+        return Err(DeliveryError::MsiProductAbsent);
+    }
+    let candidates: Vec<String> = rustdesk
+        .into_iter()
+        .filter(|p| {
+            p.location
+                .trim_end_matches(['\\', '/'])
+                .eq_ignore_ascii_case(normal)
+        })
+        .map(|p| p.code.clone())
+        .collect();
+    if candidates.is_empty() {
+        return Err(DeliveryError::MsiLocationMismatch);
+    }
+    Ok(candidates)
+}
+
+/// Tries each candidate until one is delivered. Only a registered-source mismatch is
+/// specific to a candidate; anything else (source, signature, build, gates) would be
+/// the same for the next one, so it ends the search.
+fn coordinate_candidates(
+    candidates: &[String],
+    mut attempt: impl FnMut(&str) -> Result<CoordinationOutcome, DeliveryError>,
+) -> Result<CoordinationOutcome, DeliveryError> {
+    let mut last = Err(DeliveryError::MsiProductAbsent);
+    for code in candidates {
+        last = attempt(code);
+        if last != Err(DeliveryError::RegisteredSourceMismatch) {
+            return last;
+        }
+    }
+    last
+}
+
 #[cfg(not(test))]
-fn current_product_code() -> Result<String, DeliveryError> {
+fn current_product_codes() -> Result<Vec<String>, DeliveryError> {
     #[link(name = "msi")]
     extern "system" {
         fn MsiEnumProductsExW(
@@ -196,7 +250,7 @@ fn current_product_code() -> Result<String, DeliveryError> {
             count: *mut u32,
         ) -> u32;
     }
-    let mut found = None;
+    let mut products = Vec::new();
     for index in 0..4096 {
         let mut code = [0u16; 39];
         let mut context = 0;
@@ -213,12 +267,20 @@ fn current_product_code() -> Result<String, DeliveryError> {
             )
         };
         if status == 259 {
-            return found.ok_or(DeliveryError::RegisteredSourceMismatch);
+            return select_install_candidates(
+                &products,
+                &super::system_dirs::get().normal_install(),
+            );
+        }
+        // ERROR_BAD_CONFIGURATION: one damaged registration (often left by a failed
+        // upgrade) must not hide the others.
+        if status == 1610 {
+            continue;
         }
         if status != 0 || context != 4 {
-            return Err(DeliveryError::RegisteredSourceMismatch);
+            return Err(DeliveryError::MsiEnumerationFailed);
         }
-        let query = |property: &str| -> Result<String, DeliveryError> {
+        let query = |property: &str| -> Option<String> {
             let property: Vec<u16> = property.encode_utf16().chain(Some(0)).collect();
             let mut buffer = vec![0u16; 32768];
             let mut count = buffer.len() as u32;
@@ -233,26 +295,27 @@ fn current_product_code() -> Result<String, DeliveryError> {
                 )
             };
             if result != 0 || count as usize >= buffer.len() {
-                return Err(DeliveryError::RegisteredSourceMismatch);
+                return None;
             }
-            String::from_utf16(&buffer[..count as usize])
-                .map_err(|_| DeliveryError::RegisteredSourceMismatch)
+            String::from_utf16(&buffer[..count as usize]).ok()
         };
-        if query("InstalledProductName")? != "RustDesk" {
+        // A registration whose properties cannot be read is a leftover, not the running
+        // client: an unreadable name skips it, an unreadable location keeps it out of
+        // the candidates exactly like a registration outside the fixed directory.
+        let (Some(name), Ok(code)) = (
+            query("InstalledProductName"),
+            String::from_utf16(&code[..38]),
+        ) else {
             continue;
-        }
-        if !query("InstallLocation")?
-            .trim_end_matches(['\\', '/'])
-            .eq_ignore_ascii_case(&super::system_dirs::get().normal_install().to_string_lossy())
-            || found.is_some()
-        {
-            return Err(DeliveryError::RegisteredSourceMismatch);
-        }
-        found = Some(
-            String::from_utf16(&code[..38]).map_err(|_| DeliveryError::RegisteredSourceMismatch)?,
-        );
+        };
+        let location = query("InstallLocation").unwrap_or_default();
+        products.push(RegisteredProduct {
+            code,
+            name,
+            location,
+        });
     }
-    Err(DeliveryError::RegisteredSourceMismatch)
+    Err(DeliveryError::MsiEnumerationFailed)
 }
 
 /// An MSI major upgrade installs a new product code, so an approval kept from the
@@ -272,6 +335,47 @@ fn approval_superseded(bytes: &[u8], installed_code: &str) -> bool {
         .is_ok_and(|old| old.schema == 1 && !old.product_code.eq_ignore_ascii_case(installed_code))
 }
 
+/// The build an approval was issued for, read from its manifest's entry for `key`.
+/// `None` when the approval or that entry cannot be read; callers then do not guess.
+fn approval_build(bytes: &[u8], key: &str) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Approval {
+        schema: u32,
+        #[allow(dead_code)]
+        product_code: String,
+        manifest: serde_json::Value,
+    }
+    let approval = serde_json::from_slice::<Approval>(bytes)
+        .ok()
+        .filter(|approval| approval.schema == 1)?;
+    let manifest: hbb_common::UpdateManifest = serde_json::from_value(approval.manifest).ok()?;
+    let target = manifest.targets.get(key)?;
+    base::update::update_target_release(&manifest, target)
+        .ok()
+        .map(|(_, build, _)| build)
+}
+
+/// An approval issued for another build is superseded: after an upgrade a failed MSI
+/// transaction can leave the previous product registered at the fixed directory, so
+/// its product code stays a candidate while the approval still names the old build.
+/// Otherwise, with several candidates, an approval stays valid while it is bound to
+/// any of them and is superseded only once its product is no longer a candidate.
+fn approval_superseded_by(
+    bytes: &[u8],
+    candidates: &[String],
+    running: Option<(&str, u64)>,
+) -> bool {
+    let older_build = running.is_some_and(|(key, build)| {
+        approval_build(bytes, key).is_some_and(|approved| approved != build)
+    });
+    older_build
+        || (!candidates.is_empty()
+            && candidates
+                .iter()
+                .all(|code| approval_superseded(bytes, code)))
+}
+
 const DISCARD_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const DISCARD_GUARD_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -289,8 +393,9 @@ fn locally_gated(agent: &Path) -> bool {
 fn discard_superseded_at<G>(
     agent: &Path,
     mut guard: impl FnMut() -> std::io::Result<Option<G>>,
-    installed_code: impl FnOnce() -> Result<String, DeliveryError>,
+    installed_codes: impl FnOnce() -> Result<Vec<String>, DeliveryError>,
     read: impl FnOnce(&Path) -> Result<Vec<u8>, DeliveryError>,
+    running: Option<(&str, u64)>,
     wait: std::time::Duration,
     retry: std::time::Duration,
 ) -> Result<bool, DeliveryError> {
@@ -305,7 +410,7 @@ fn discard_superseded_at<G>(
     }
     // The product code is not guarded by the install lock (msiexec does not take it),
     // so it is read before waiting for the lock rather than while holding it.
-    let code = installed_code()?;
+    let codes = installed_codes()?;
     let deadline = std::time::Instant::now() + wait;
     let _guard = loop {
         match guard() {
@@ -314,7 +419,7 @@ fn discard_superseded_at<G>(
             _ => return Err(DeliveryError::Busy),
         }
     };
-    if locally_gated(agent) || !approval_superseded(&read(&path)?, &code) {
+    if locally_gated(agent) || !approval_superseded_by(&read(&path)?, &codes, running) {
         return Ok(false);
     }
     std::fs::remove_file(&path).map_err(|_| DeliveryError::Busy)?;
@@ -323,15 +428,26 @@ fn discard_superseded_at<G>(
 
 #[cfg(not(test))]
 pub fn discard_superseded_approval() -> Result<bool, DeliveryError> {
+    let agent = super::system_dirs::get().agent();
+    // Without a readable target or build the build check is skipped, not guessed.
+    let key = read_locked(&agent.join("state/agent.json"), 65536, false)
+        .ok()
+        .and_then(|(_, bytes)| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|state| state["target_key"].as_str().map(str::to_owned));
+    let build = serde_json::from_str::<serde_json::Value>(include_str!("../../version.json"))
+        .ok()
+        .and_then(|metadata| metadata["build_seq"].as_u64());
+    let running = key.as_deref().zip(build);
     discard_superseded_at(
-        &super::system_dirs::get().agent(),
+        &agent,
         install_guard::InstallGuard::try_acquire,
-        current_product_code,
+        current_product_codes,
         |path| {
             workspace::verify_file(path).map_err(|_| DeliveryError::UntrustedPath)?;
             let (_held, bytes) = read_locked(path, LIMIT, false)?;
             Ok(bytes)
         },
+        running,
         DISCARD_GUARD_WAIT,
         DISCARD_GUARD_RETRY,
     )
@@ -357,7 +473,7 @@ pub fn coordinate_current_installation() -> Result<CoordinationOutcome, Delivery
     let key = state["target_key"]
         .as_str()
         .ok_or(DeliveryError::TargetMismatch)?;
-    // Check the target before enumerating MSI products: `current_product_code`
+    // Check the target before enumerating MSI products: `current_product_codes`
     // reports `RegisteredSourceMismatch` on any machine whose EXE install left an
     // old MSI registration behind, which is exactly the EXE case this guard covers.
     if !approval_applies_to(key) {
@@ -378,41 +494,50 @@ pub fn coordinate_current_installation() -> Result<CoordinationOutcome, Delivery
             .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .iter()
-    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
-    {
+    .any(|p| {
+        identity
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&p.to_string_lossy())
+    }) {
         return Err(DeliveryError::IdentityMismatch);
     }
     let (_, config) = read_locked(&identity.with_file_name("RustDesk2.toml"), 65536, true)?;
-    let code = current_product_code()?;
+    let codes = current_product_codes()?;
     let request = Request {
         manifest: &[],
         installation_id: installation,
         target_key: key,
         current_build: build,
-        product_code: &code,
+        product_code: &codes[0],
     };
     gates(agent, &bytes, &config, &request)?;
     let health = super::health_windows::probe_blocking(
         r"\\.\pipe\RustDesk\management-health-v2",
-        &super::system_dirs::get().normal_install().join("RustDesk.exe"),
+        &super::system_dirs::get()
+            .normal_install()
+            .join("RustDesk.exe"),
         build,
         std::time::Duration::from_secs(3),
     )
     .map_err(|_| DeliveryError::BuildMismatch)?;
     if health.no_active_sessions != Some(true) {
-        return Err(DeliveryError::LocallyBlocked);
+        return Err(DeliveryError::SessionsActive);
     }
     drop(_installed_read);
-    coordinate_approval(
-        CurrentInstallation {
-            installation_id: installation,
-            target_key: key,
-            current_build: build,
-            product_code: &code,
-        },
-        fetch_fixed_manifest,
-        deliver_installed_msi_approval,
-    )
+    // The manifest does not depend on the candidate, so it is fetched once.
+    let manifest = fetch_fixed_manifest();
+    coordinate_candidates(&codes, |code| {
+        coordinate_approval(
+            CurrentInstallation {
+                installation_id: installation,
+                target_key: key,
+                current_build: build,
+                product_code: code,
+            },
+            || manifest.clone(),
+            deliver_installed_msi_approval,
+        )
+    })
 }
 
 pub struct Request<'a> {
@@ -430,12 +555,56 @@ pub enum DeliveryError {
     IdentityMismatch,
     SignatureInvalid,
     RegisteredSourceMismatch,
+    /// No RustDesk MSI product is registered on this machine.
+    MsiProductAbsent,
+    /// RustDesk MSI products are registered, but none at the fixed install directory.
+    MsiLocationMismatch,
+    /// Windows Installer could not enumerate the registered products.
+    MsiEnumerationFailed,
+    /// A remote session is active or the client could not confirm there is none;
+    /// approval waits rather than reinstalling under a connected user.
+    SessionsActive,
     LocallyBlocked,
     UntrustedPath,
     InvalidInput,
     ExistingApproval,
     Busy,
     PublishFailed,
+}
+
+impl DeliveryError {
+    /// Stable snake_case code reported in `first-install-status` and status `rescue`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::BuildMismatch => "build_mismatch",
+            Self::TargetMismatch => "target_mismatch",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::RegisteredSourceMismatch => "registered_source_mismatch",
+            Self::MsiProductAbsent => "msi_product_absent",
+            Self::MsiLocationMismatch => "msi_location_mismatch",
+            Self::MsiEnumerationFailed => "msi_enumeration_failed",
+            Self::LocallyBlocked => "locally_blocked",
+            Self::SessionsActive => "sessions_active",
+            Self::UntrustedPath => "untrusted_path",
+            Self::InvalidInput => "invalid_input",
+            Self::ExistingApproval => "existing_approval",
+            Self::Busy => "busy",
+            Self::PublishFailed => "publish_failed",
+        }
+    }
+}
+
+impl CoordinationOutcome {
+    /// A still-waiting outcome, as a report code; delivered or not applicable is `None`.
+    pub fn pending_code(self) -> Option<&'static str> {
+        match self {
+            Self::Delivered | Self::NotApplicable => None,
+            Self::WaitingSource => Some("waiting_source"),
+            Self::WaitingSignature => Some("waiting_signature"),
+            Self::WaitingExactBuild => Some("waiting_exact_build"),
+        }
+    }
 }
 
 pub fn deliver_installed_msi_approval(request: Request<'_>) -> Result<(), DeliveryError> {
@@ -449,8 +618,11 @@ pub fn deliver_installed_msi_approval(request: Request<'_>) -> Result<(), Delive
             .join(r"RustDesk\config\RustDesk.toml"),
     ]
     .iter()
-    .any(|p| identity.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
-    {
+    .any(|p| {
+        identity
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&p.to_string_lossy())
+    }) {
         return Err(DeliveryError::IdentityMismatch);
     }
     let agent = super::system_dirs::get().agent();
@@ -947,8 +1119,9 @@ mod approval_scope_tests {
         discard_superseded_at(
             root,
             guard,
-            code,
+            || code().map(|code| vec![code]),
             |path| std::fs::read(path).map_err(|_| DeliveryError::UntrustedPath),
+            None,
             std::time::Duration::from_millis(30),
             std::time::Duration::from_millis(5),
         )
@@ -1079,8 +1252,9 @@ mod approval_scope_tests {
         let result = discard_superseded_at(
             &root,
             || Ok(Some(1u8)),
-            || Ok(NEW_CODE.into()),
+            || Ok(vec![NEW_CODE.to_owned()]),
             |_| Err(DeliveryError::UntrustedPath),
+            None,
             std::time::Duration::from_millis(30),
             std::time::Duration::from_millis(5),
         );
@@ -1133,5 +1307,281 @@ mod approval_scope_tests {
             br#"{"schema":1,"product_code":"{11111111-1111-1111-1111-111111111111}","manifest":{},"extra":1}"#,
             "{22222222-2222-2222-2222-222222222222}"
         ));
+    }
+
+    fn product(code: &str, name: &str, location: &str) -> RegisteredProduct {
+        RegisteredProduct {
+            code: code.into(),
+            name: name.into(),
+            location: location.into(),
+        }
+    }
+
+    const NORMAL: &str = r"C:\Program Files\RustDesk";
+
+    // 多次失败升级、重装后，本机可能登记了多个 RustDesk MSI。只认装在固定安装目录的那些，
+    // 其他登记（装在别处、非 RustDesk）一律忽略，不再整体判为登记源不符。
+    #[test]
+    fn candidates_keep_every_rustdesk_product_at_the_normal_install() {
+        let products = [
+            product(OLD_CODE, "RustDesk", r"C:\Program Files\RustDesk\"),
+            product("{33333333-3333-3333-3333-333333333333}", "Other", NORMAL),
+            product(
+                "{44444444-4444-4444-4444-444444444444}",
+                "RustDesk",
+                r"D:\Old\RustDesk",
+            ),
+            product(NEW_CODE, "RustDesk", r"c:\program files\rustdesk"),
+        ];
+        assert_eq!(
+            select_install_candidates(&products, std::path::Path::new(NORMAL)),
+            Ok(vec![OLD_CODE.to_owned(), NEW_CODE.to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_single_registration_is_the_only_candidate() {
+        let products = [product(NEW_CODE, "RustDesk", NORMAL)];
+        assert_eq!(
+            select_install_candidates(&products, std::path::Path::new(NORMAL)),
+            Ok(vec![NEW_CODE.to_owned()])
+        );
+    }
+
+    #[test]
+    fn no_rustdesk_registration_is_reported_as_absent() {
+        let products = [product(OLD_CODE, "Other", NORMAL)];
+        assert_eq!(
+            select_install_candidates(&products, std::path::Path::new(NORMAL)),
+            Err(DeliveryError::MsiProductAbsent)
+        );
+        assert_eq!(
+            select_install_candidates(&[], std::path::Path::new(NORMAL)),
+            Err(DeliveryError::MsiProductAbsent)
+        );
+    }
+
+    #[test]
+    fn rustdesk_registered_only_elsewhere_is_a_location_mismatch() {
+        let products = [product(OLD_CODE, "RustDesk", r"D:\RustDesk")];
+        assert_eq!(
+            select_install_candidates(&products, std::path::Path::new(NORMAL)),
+            Err(DeliveryError::MsiLocationMismatch)
+        );
+    }
+
+    // 多个候选时逐个尝试：只有登记源是当前构建签名包的那一个能通过交付校验，
+    // 它就是当前运行主程序对应的 MSI。前面的候选不符不能挡住后面的。
+    #[test]
+    fn coordination_tries_each_candidate_until_one_is_delivered() {
+        let tried = std::cell::RefCell::new(Vec::new());
+        let outcome = coordinate_candidates(&[OLD_CODE.to_owned(), NEW_CODE.to_owned()], |code| {
+            tried.borrow_mut().push(code.to_owned());
+            if code == NEW_CODE {
+                Ok(CoordinationOutcome::Delivered)
+            } else {
+                Err(DeliveryError::RegisteredSourceMismatch)
+            }
+        });
+        assert_eq!(outcome, Ok(CoordinationOutcome::Delivered));
+        assert_eq!(
+            *tried.borrow(),
+            vec![OLD_CODE.to_owned(), NEW_CODE.to_owned()]
+        );
+    }
+
+    #[test]
+    fn coordination_reports_mismatch_when_no_candidate_matches() {
+        let outcome = coordinate_candidates(&[OLD_CODE.to_owned(), NEW_CODE.to_owned()], |_| {
+            Err(DeliveryError::RegisteredSourceMismatch)
+        });
+        assert_eq!(outcome, Err(DeliveryError::RegisteredSourceMismatch));
+    }
+
+    // 拉清单、签名、构建号和本地门禁与选哪个产品无关，第一次就该停下，不再拿下一个候选重试。
+    #[test]
+    fn a_candidate_independent_result_stops_the_search() {
+        for result in [
+            Ok(CoordinationOutcome::WaitingSource),
+            Ok(CoordinationOutcome::WaitingExactBuild),
+            Err(DeliveryError::LocallyBlocked),
+            Err(DeliveryError::SessionsActive),
+            Err(DeliveryError::Busy),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let outcome =
+                coordinate_candidates(&[OLD_CODE.to_owned(), NEW_CODE.to_owned()], |_| {
+                    calls.set(calls.get() + 1);
+                    result
+                });
+            assert_eq!(outcome, result);
+            assert_eq!(calls.get(), 1, "{result:?}");
+        }
+    }
+
+    // 已有审批只要绑定任一候选就保留；绑定的产品已不在候选里才算作废。
+    #[test]
+    fn an_approval_is_superseded_only_when_no_candidate_matches() {
+        let old = format!(r#"{{"schema":1,"product_code":"{OLD_CODE}","manifest":{{}}}}"#);
+        assert!(!approval_superseded_by(
+            old.as_bytes(),
+            &[NEW_CODE.to_owned(), OLD_CODE.to_ascii_lowercase()],
+            None
+        ));
+        assert!(approval_superseded_by(
+            old.as_bytes(),
+            &[NEW_CODE.to_owned()],
+            None
+        ));
+        assert!(!approval_superseded_by(
+            b"not json",
+            &[NEW_CODE.to_owned()],
+            None
+        ));
+        assert!(!approval_superseded_by(old.as_bytes(), &[], None));
+    }
+
+    #[test]
+    fn a_superseded_approval_with_several_registrations_is_removed() {
+        let root = discard_root("several");
+        let result = discard_superseded_at(
+            &root,
+            || Ok(Some(1u8)),
+            || {
+                Ok(vec![
+                    NEW_CODE.to_owned(),
+                    "{55555555-5555-5555-5555-555555555555}".to_owned(),
+                ])
+            },
+            |path| std::fs::read(path).map_err(|_| DeliveryError::UntrustedPath),
+            None,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(5),
+        );
+        assert_eq!(result, Ok(true));
+        assert!(!approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 上报给后台的原因码固定为 snake_case，后台按它给出处理建议。
+    #[test]
+    fn delivery_errors_have_stable_report_codes() {
+        let cases = [
+            (DeliveryError::BuildMismatch, "build_mismatch"),
+            (DeliveryError::TargetMismatch, "target_mismatch"),
+            (DeliveryError::IdentityMismatch, "identity_mismatch"),
+            (DeliveryError::SignatureInvalid, "signature_invalid"),
+            (
+                DeliveryError::RegisteredSourceMismatch,
+                "registered_source_mismatch",
+            ),
+            (DeliveryError::MsiProductAbsent, "msi_product_absent"),
+            (DeliveryError::MsiLocationMismatch, "msi_location_mismatch"),
+            (
+                DeliveryError::MsiEnumerationFailed,
+                "msi_enumeration_failed",
+            ),
+            (DeliveryError::LocallyBlocked, "locally_blocked"),
+            (DeliveryError::SessionsActive, "sessions_active"),
+            (DeliveryError::UntrustedPath, "untrusted_path"),
+            (DeliveryError::InvalidInput, "invalid_input"),
+            (DeliveryError::ExistingApproval, "existing_approval"),
+            (DeliveryError::Busy, "busy"),
+            (DeliveryError::PublishFailed, "publish_failed"),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code);
+        }
+        for (outcome, code) in [
+            (CoordinationOutcome::Delivered, None),
+            (CoordinationOutcome::NotApplicable, None),
+            (CoordinationOutcome::WaitingSource, Some("waiting_source")),
+            (
+                CoordinationOutcome::WaitingSignature,
+                Some("waiting_signature"),
+            ),
+            (
+                CoordinationOutcome::WaitingExactBuild,
+                Some("waiting_exact_build"),
+            ),
+        ] {
+            assert_eq!(outcome.pending_code(), code);
+        }
+    }
+
+    const KEY: &str = "windows-x86_64-msi-standard";
+
+    fn approval_for_build(code: &str, build: u64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "product_code": code,
+            "manifest": {"schema": 1, "build_seq": build, "targets": {KEY: {}}}
+        }))
+        .unwrap()
+    }
+
+    // 升级失败残留了旧构建的登记：批准绑定的旧产品仍在候选里，但批准的是上一构建。
+    // 只看产品码会永远保留它，救援包就永远换不成新构建；批准构建不是当前构建就作废。
+    #[test]
+    fn an_approval_for_an_older_build_is_superseded_even_if_its_product_remains() {
+        let approval = approval_for_build(OLD_CODE, 2026102901);
+        assert!(approval_superseded_by(
+            &approval,
+            &[OLD_CODE.to_owned(), NEW_CODE.to_owned()],
+            Some((KEY, 2026103001))
+        ));
+    }
+
+    #[test]
+    fn an_approval_for_the_running_build_is_kept() {
+        let approval = approval_for_build(NEW_CODE, 2026103001);
+        assert!(!approval_superseded_by(
+            &approval,
+            &[OLD_CODE.to_owned(), NEW_CODE.to_owned()],
+            Some((KEY, 2026103001))
+        ));
+    }
+
+    // 读不出本目标构建号时不臆断，退回只按产品码判断。
+    #[test]
+    fn an_approval_without_a_readable_build_falls_back_to_product_codes() {
+        let other_target = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "product_code": OLD_CODE,
+            "manifest": {"schema": 1, "build_seq": 1, "targets": {"windows-x86_64-msi-sos": {}}}
+        }))
+        .unwrap();
+        assert!(!approval_superseded_by(
+            &other_target,
+            &[OLD_CODE.to_owned()],
+            Some((KEY, 2026103001))
+        ));
+        assert_eq!(approval_build(&other_target, KEY), None);
+        assert_eq!(
+            approval_build(&approval_for_build(OLD_CODE, 7), KEY),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn an_older_approval_is_removed_through_the_discard_path() {
+        let root = discard_root("older-build");
+        std::fs::write(
+            root.join("release-cache/first-install.json"),
+            approval_for_build(OLD_CODE, 2026102901),
+        )
+        .unwrap();
+        let result = discard_superseded_at(
+            &root,
+            || Ok(Some(1u8)),
+            || Ok(vec![OLD_CODE.to_owned(), NEW_CODE.to_owned()]),
+            |path| std::fs::read(path).map_err(|_| DeliveryError::UntrustedPath),
+            Some((KEY, 2026103001)),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(5),
+        );
+        assert_eq!(result, Ok(true));
+        assert!(!approval_kept(&root));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

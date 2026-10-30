@@ -329,9 +329,10 @@ pub fn snapshot(agent: &Path, installation: &str, key: &str) -> serde_json::Valu
         bundle_build(&agent.join("rescue/current")),
         agent_build(),
     );
+    let first_install = read(&agent.join("first-install-status/last-check.json"), 32768).ok();
     if result["error_code"] == "bundle_missing" {
-        if let Ok(bytes) = read(&agent.join("first-install-status/last-check.json"), 32768) {
-            if let Ok(report) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        if let Some(bytes) = &first_install {
+            if let Ok(report) = serde_json::from_slice::<serde_json::Value>(bytes) {
                 if report["error_code"] == "waiting_approval" {
                     result["error_code"] = "waiting_approval".into();
                 }
@@ -344,7 +345,52 @@ pub fn snapshot(agent: &Path, installation: &str, key: &str) -> serde_json::Valu
             }
         }
     }
+    attach_rotation_reason(&mut result, first_install.as_deref(), agent_build());
     result
+}
+
+/// When the bundle is missing or older than the agent, forwards why the first-install
+/// worker did not (re)build it during the running build. Only short snake_case codes leave the machine; the
+/// report's raw error text can name local paths and stays local.
+fn attach_rotation_reason(
+    result: &mut serde_json::Value,
+    report: Option<&[u8]>,
+    build: Option<u64>,
+) {
+    if !matches!(
+        result["error_code"].as_str(),
+        Some("bundle_build_mismatch" | "bundle_missing" | "waiting_approval")
+    ) {
+        return;
+    }
+    let Some(report) =
+        report.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+    else {
+        return;
+    };
+    // A report left from before the last upgrade describes another build.
+    if build.is_none() || report["agent_build"].as_u64() != build {
+        return;
+    }
+    let mut rotation = serde_json::Map::new();
+    for field in ["error_code", "reason", "coordination_error"] {
+        if let Some(value) = report_code(&report[field]) {
+            rotation.insert(field.into(), value.into());
+        }
+    }
+    if !rotation.is_empty() {
+        result["rotation"] = rotation.into();
+    }
+}
+
+fn report_code(value: &serde_json::Value) -> Option<&str> {
+    value.as_str().filter(|text| {
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    })
 }
 
 fn agent_build() -> Option<u64> {
@@ -553,5 +599,115 @@ mod build_mismatch_tests {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../../version.json")).unwrap();
         assert_eq!(agent_build(), expected["build_seq"].as_u64());
+    }
+}
+
+#[cfg(test)]
+mod rotation_reason_tests {
+    use super::*;
+
+    fn mismatch() -> serde_json::Value {
+        serde_json::json!({"state":"unavailable","error_code":"bundle_build_mismatch"})
+    }
+
+    // 救援包旧时，把首装线程最近一次没能换新的原因一起上报，后台才能给出处理办法。
+    #[test]
+    fn an_outdated_bundle_reports_why_it_was_not_replaced() {
+        let mut result = mismatch();
+        attach_rotation_reason(
+            &mut result,
+            Some(br#"{"state":"unavailable","error_code":"waiting_approval","coordination_error":"msi_location_mismatch","ready":false,"agent_build":7}"#),
+            Some(7),
+        );
+        assert_eq!(
+            result["rotation"],
+            serde_json::json!({"error_code":"waiting_approval","coordination_error":"msi_location_mismatch"})
+        );
+        assert_eq!(result["error_code"], "bundle_build_mismatch");
+    }
+
+    #[test]
+    fn a_refused_preparation_reports_its_reason_but_never_the_raw_error() {
+        let mut result = mismatch();
+        attach_rotation_reason(
+            &mut result,
+            Some(br#"{"state":"unavailable","error_code":"preparation_refused","reason":"sessions_active","error":"C:\\secret path","ready":false,"agent_build":7}"#),
+            Some(7),
+        );
+        assert_eq!(
+            result["rotation"],
+            serde_json::json!({"error_code":"preparation_refused","reason":"sessions_active"})
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_report_adds_nothing() {
+        for report in [None, Some(&b"not json"[..]), Some(&b"[]"[..])] {
+            let mut result = mismatch();
+            attach_rotation_reason(&mut result, report, Some(7));
+            assert_eq!(result, mismatch());
+        }
+    }
+
+    // 字段只接受短的 snake_case 码，任何别的内容都丢掉。
+    #[test]
+    fn only_short_codes_are_forwarded() {
+        let mut result = mismatch();
+        attach_rotation_reason(
+            &mut result,
+            Some(br#"{"error_code":"Bad Code","reason":"x\\y","coordination_error":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","agent_build":7}"#),
+            Some(7),
+        );
+        assert_eq!(result, mismatch());
+    }
+
+    // 救援包正常时不附带任何轮换原因。
+    #[test]
+    fn a_healthy_bundle_carries_no_rotation_reason() {
+        let mut result = serde_json::json!({"state":"degraded","error_code":null});
+        attach_rotation_reason(
+            &mut result,
+            Some(
+                br#"{"error_code":"waiting_approval","coordination_error":"busy","agent_build":7}"#,
+            ),
+            Some(7),
+        );
+        assert!(result.get("rotation").is_none());
+    }
+
+    #[test]
+    fn a_missing_bundle_also_reports_the_reason() {
+        for code in ["bundle_missing", "waiting_approval"] {
+            let mut result = serde_json::json!({"state":"unavailable","error_code":code});
+            attach_rotation_reason(
+                &mut result,
+                Some(br#"{"error_code":"waiting_approval","coordination_error":"msi_product_absent","agent_build":7}"#),
+            Some(7),
+            );
+            assert_eq!(
+                result["rotation"]["coordination_error"], "msi_product_absent",
+                "{code}"
+            );
+        }
+    }
+
+    // 上一次升级前留下的报告描述的是旧构建，不能当成现在没换新的原因上报。
+    #[test]
+    fn a_report_from_another_build_is_not_forwarded() {
+        for (report, build) in [
+            (
+                &br#"{"error_code":"waiting_approval","agent_build":6}"#[..],
+                Some(7),
+            ),
+            (&br#"{"error_code":"waiting_approval"}"#[..], Some(7)),
+            (
+                &br#"{"error_code":"waiting_approval","agent_build":7}"#[..],
+                None,
+            ),
+        ] {
+            let mut result = mismatch();
+            attach_rotation_reason(&mut result, Some(report), build);
+            assert_eq!(result, mismatch());
+        }
     }
 }

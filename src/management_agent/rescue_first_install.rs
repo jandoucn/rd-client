@@ -350,8 +350,8 @@ enum ExistingBundle {
 }
 
 /// A client updater upgrade installs a newer MSI without touching `rescue/current`,
-/// which then restores the old build and its old product code. An older bundle of
-/// the same identity is rotated; anything else keeps the previous behaviour.
+/// which then restores the old build and its old product code. Any older bundle is
+/// rotated; a same-or-newer bundle keeps the previous behaviour.
 fn existing_bundle_action(
     old_schema: u32,
     old_build: u64,
@@ -360,10 +360,12 @@ fn existing_bundle_action(
     build: u64,
     reference: &str,
 ) -> ExistingBundle {
-    if !identity_matches {
-        ExistingBundle::Preserve
-    } else if old_build < build {
+    if old_build < build {
+        // An older build can only restore an outdated client, whatever identity it was
+        // captured with; the running build replaces it and it is kept as `previous`.
         ExistingBundle::Rotate
+    } else if !identity_matches {
+        ExistingBundle::Preserve
     } else if old_schema == 2 && old_reference == reference {
         ExistingBundle::Keep
     } else {
@@ -545,10 +547,30 @@ fn rotation_compatible(
     super::verify(path, installation, key, public)?;
     let bundle: Bundle = serde_json::from_slice(&read(&path.join("bundle.json"), 65536, false)?)
         .map_err(|_| "first installation rotation bundle malformed")?;
-    if bundle.build_seq > build {
+    rotation_image_allowed(
+        bundle.build_seq,
+        &bundle.identity_sha256,
+        build,
+        identity_sha256,
+    )
+}
+
+/// Rotation validates every image it touches: the staged one, `current` before and
+/// after publishing, and `previous`. The image of the running build must carry the
+/// current identity. An older-build image is only being retired and may have been
+/// captured under an identity this machine no longer has (reinstall, new ID); it
+/// still passes `super::verify` (signature, installation, target) but is not held to
+/// the current identity, or it could never be replaced.
+fn rotation_image_allowed(
+    image_build: u64,
+    image_identity: &str,
+    build: u64,
+    identity_sha256: &str,
+) -> Result<(), String> {
+    if image_build > build {
         return Err("first installation rotation downgrade refused".into());
     }
-    if bundle.identity_sha256 != identity_sha256 {
+    if image_build == build && image_identity != identity_sha256 {
         return Err("first installation rotation identity mismatch".into());
     }
     Ok(())
@@ -556,6 +578,61 @@ fn rotation_compatible(
 
 fn waiting() -> serde_json::Value {
     serde_json::json!({"state":"unavailable","error_code":"waiting_approval","ready":false})
+}
+
+/// The worker's `first-install-status` report. A refused preparation keeps its raw
+/// error for local diagnostics and adds a stable `reason`; a failed or still-waiting
+/// approval coordination adds `coordination_error`. Status forwards only those codes.
+fn first_install_report(
+    prepared: Result<serde_json::Value, String>,
+    coordination: Option<&str>,
+    build: Option<u64>,
+) -> serde_json::Value {
+    let mut report = match prepared {
+        Ok(report) => report,
+        Err(error) => serde_json::json!({"state":"unavailable","error_code":"preparation_refused",
+            "reason":refusal_reason(&error),"error":error,"ready":false}),
+    };
+    if let Some(fields) = report.as_object_mut() {
+        if let Some(code) = coordination {
+            fields.insert("coordination_error".into(), code.into());
+        }
+        // Status forwards the reason only while the report describes the running build.
+        if let Some(build) = build {
+            fields.insert("agent_build".into(), build.into());
+        }
+    }
+    report
+}
+
+/// Groups preparation refusals by what an administrator can do about them.
+fn refusal_reason(error: &str) -> &'static str {
+    const REASONS: [(&[&str], &str); 11] = [
+        (&["sessions active"], "sessions_active"),
+        (&["live source changed"], "source_changed"),
+        (&["locally blocked", "user stopped"], "locally_blocked"),
+        (
+            &["busy", "guard unavailable", "active transaction"],
+            "installation_busy",
+        ),
+        (&["service not healthy", "health"], "client_unhealthy"),
+        (&["bootstrap not installed"], "bootstrap_missing"),
+        (
+            &["existing bundle preserved", "identity mismatch"],
+            "existing_bundle_preserved",
+        ),
+        (&["rotation pending"], "rotation_pending"),
+        (&["occupied", "staging preserved"], "staging_occupied"),
+        (
+            &["registered", "installed MSI source", "MSI binding"],
+            "registered_source_mismatch",
+        ),
+        (&["package"], "package_invalid"),
+    ];
+    REASONS
+        .iter()
+        .find(|(needles, _)| needles.iter().any(|needle| error.contains(needle)))
+        .map_or("preparation_refused", |(_, reason)| reason)
 }
 
 /// First-install approval and the rescue bundle exist for MSI installs only. An EXE
@@ -1402,9 +1479,14 @@ fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope
                 if let Err(error)=super::super::first_install_approval_delivery::discard_superseded_approval(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation superseded approval check unavailable: {error:?}");}
                 #[cfg(not(test))]
                 if let Err(error)=reclaim_orphaned_staging(&layout){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation orphaned staging not reclaimed: {error}");}
+                #[allow(unused_mut)]
+                let mut coordination: Option<&'static str> = None;
                 #[cfg(not(test))]
                 if absent(&layout.agent.join("release-cache/first-install.json"))? {
-                    if let Err(error)=super::super::first_install_approval_delivery::coordinate_current_installation(){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation approval unavailable: {error:?}");}
+                    coordination=match super::super::first_install_approval_delivery::coordinate_current_installation(){
+                        Ok(outcome)=>outcome.pending_code(),
+                        Err(error)=>{hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation approval unavailable: {error:?}");Some(error.code())}
+                    };
                 }
                 #[cfg(test)]
                 if absent(&layout.agent.join("release-cache/first-install.json"))? {
@@ -1415,7 +1497,7 @@ fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope
                         }
                     });
                 }
-                let report=match prepare(&layout,public.as_deref(),registered,live){Ok(report)=>report,Err(error)=>serde_json::json!({"state":"unavailable","error_code":"preparation_refused","error":error,"ready":false})};
+                let report=first_install_report(prepare(&layout,public.as_deref(),registered,live),coordination,agent_build());
                 let reports=layout.agent.join("first-install-status");if absent(&reports)?{workspace::create(&reports)?;}workspace::verify(&reports)?;
                 super::super::state_store::publish(&reports.join("last-check.json"),&serde_json::to_vec(&report).map_err(|_|"first installation status encoding")?).map_err(|e|e.to_string())?;
                 Ok::<(),String>(())})();
@@ -1643,9 +1725,23 @@ mod rotation_tests {
             existing_bundle_action(1, 4, "old", true, 5, "r"),
             ExistingBundle::Rotate
         );
-        // 身份不一致、降级、同构建不同来源、同构建旧格式：都保留原包，不替换。
+        // 旧构建的包一律换成当前运行主程序的构建，身份不一致（重装、换身份后留下的）也一样，
+        // 旧包轮换后保留为 previous，不会丢。
         assert_eq!(
             existing_bundle_action(2, 4, "old", false, 5, "r"),
+            ExistingBundle::Rotate
+        );
+        assert_eq!(
+            existing_bundle_action(1, 4, "old", false, 5, "r"),
+            ExistingBundle::Rotate
+        );
+        // 同构建或更新构建且身份不一致、降级、同构建不同来源、同构建旧格式：保留原包，不替换。
+        assert_eq!(
+            existing_bundle_action(2, 5, "r", false, 5, "r"),
+            ExistingBundle::Preserve
+        );
+        assert_eq!(
+            existing_bundle_action(2, 6, "new", false, 5, "r"),
             ExistingBundle::Preserve
         );
         assert_eq!(
@@ -1981,5 +2077,138 @@ mod rotation_tests {
         let f = Fixture::new(false);
         assert!(!finish_pending_rotation(&f.dest(), &f.rotation(), |_| Ok(())).unwrap());
         assert_eq!(f.build("current"), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod rotation_image_tests {
+    use super::*;
+
+    // 身份不一致的旧构建包要能被轮换退役，否则“旧构建一律轮换”只会每 5 分钟空转一次。
+    #[test]
+    fn an_older_image_with_another_identity_can_be_retired() {
+        assert_eq!(rotation_image_allowed(4, "old-id", 5, "new-id"), Ok(()));
+    }
+
+    #[test]
+    fn the_running_build_image_must_carry_the_current_identity() {
+        assert_eq!(rotation_image_allowed(5, "new-id", 5, "new-id"), Ok(()));
+        assert_eq!(
+            rotation_image_allowed(5, "old-id", 5, "new-id"),
+            Err("first installation rotation identity mismatch".into())
+        );
+    }
+
+    #[test]
+    fn a_newer_image_is_never_accepted() {
+        assert_eq!(
+            rotation_image_allowed(6, "new-id", 5, "new-id"),
+            Err("first installation rotation downgrade refused".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    // 批准协调失败只打日志时，后台只能看到「救援包旧」，看不到为什么没换；原因码要落进报告。
+    #[test]
+    fn a_coordination_failure_is_recorded_beside_the_report() {
+        let report = first_install_report(Ok(waiting()), Some("registered_source_mismatch"), None);
+        assert_eq!(report["error_code"], "waiting_approval");
+        assert_eq!(report["coordination_error"], "registered_source_mismatch");
+    }
+
+    #[test]
+    fn a_successful_coordination_adds_nothing() {
+        let report = first_install_report(Ok(waiting()), None, None);
+        assert_eq!(report, waiting());
+    }
+
+    #[test]
+    fn a_refused_preparation_carries_a_stable_reason() {
+        let report = first_install_report(
+            Err("first installation sessions active or unknown".into()),
+            Some("locally_blocked"),
+            None,
+        );
+        assert_eq!(report["state"], "unavailable");
+        assert_eq!(report["error_code"], "preparation_refused");
+        assert_eq!(report["reason"], "sessions_active");
+        assert_eq!(report["coordination_error"], "locally_blocked");
+        assert_eq!(report["ready"], false);
+    }
+
+    // 报告带上生成时的 Agent 构建，状态只转发与当前构建对应的原因，升级后不会把上一轮的旧原因当成现在的。
+    #[test]
+    fn the_report_records_the_agent_build() {
+        let report = first_install_report(Ok(waiting()), None, Some(2026103001));
+        assert_eq!(report["agent_build"], 2026103001);
+    }
+
+    #[test]
+    fn refusals_are_classified_into_actionable_reasons() {
+        for (error, reason) in [
+            (
+                "first installation sessions active or unknown",
+                "sessions_active",
+            ),
+            ("first installation busy", "installation_busy"),
+            ("first installation guard unavailable", "installation_busy"),
+            ("first installation locally blocked", "locally_blocked"),
+            ("first installation user stopped", "locally_blocked"),
+            ("first installation service not healthy", "client_unhealthy"),
+            (
+                "first installation bootstrap not installed",
+                "bootstrap_missing",
+            ),
+            (
+                "first installation existing bundle preserved",
+                "existing_bundle_preserved",
+            ),
+            ("first installation rotation pending", "rotation_pending"),
+            (
+                "first installation occupied assets preserved",
+                "staging_occupied",
+            ),
+            (
+                "first installation previous appeared; staging preserved",
+                "staging_occupied",
+            ),
+            (
+                "first installation registered basename mismatch",
+                "registered_source_mismatch",
+            ),
+            (
+                "installed MSI source query failed: 1605",
+                "registered_source_mismatch",
+            ),
+            (
+                "first installation MSI binding mismatch",
+                "registered_source_mismatch",
+            ),
+            (
+                "first installation package integrity mismatch",
+                "package_invalid",
+            ),
+            (
+                "first installation live source changed; staging preserved",
+                "source_changed",
+            ),
+            ("first installation active transaction", "installation_busy"),
+            ("health server executable mismatch", "client_unhealthy"),
+            (
+                "rescue bundle identity mismatch",
+                "existing_bundle_preserved",
+            ),
+            (
+                "first installation rotation identity mismatch",
+                "existing_bundle_preserved",
+            ),
+            ("something unexpected", "preparation_refused"),
+        ] {
+            assert_eq!(refusal_reason(error), reason, "{error}");
+        }
     }
 }
