@@ -2081,12 +2081,8 @@ impl Connection {
             }
         }
         // Terminal feature is supported on desktop only
-        #[allow(unused_mut)]
-        let mut terminal = cfg!(not(any(target_os = "android", target_os = "ios")));
-        #[cfg(target_os = "windows")]
-        {
-            terminal = terminal && portable_pty::win::check_support().is_ok();
-        }
+        // 没有 ConPTY 的 Windows 走匿名管道备选（terminal_pipe_win），桌面端始终支持终端。
+        let terminal = cfg!(not(any(target_os = "android", target_os = "ios")));
         pi.username = username;
         pi.sas_enabled = sas_enabled;
         pi.features = Some(Features {

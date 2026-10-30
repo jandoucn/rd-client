@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "windows")]
+#[path = "terminal_service_pipe.rs"]
+mod pipe_open;
 // Windows-specific imports from terminal_helper module
 #[cfg(target_os = "windows")]
 use super::terminal_helper::{
@@ -753,6 +756,9 @@ pub struct TerminalSession {
     // Handle to helper process for termination when session closes
     #[cfg(target_os = "windows")]
     helper_process_handle: Option<SendableHandle>,
+    // 没有 ConPTY 时 shell 跑在匿名管道上（terminal_service_pipe.rs）
+    #[cfg(target_os = "windows")]
+    is_pipe_mode: bool,
 }
 
 impl TerminalSession {
@@ -778,6 +784,8 @@ impl TerminalSession {
             is_helper_mode: false,
             #[cfg(target_os = "windows")]
             helper_process_handle: None,
+            #[cfg(target_os = "windows")]
+            is_pipe_mode: false,
         }
     }
 
@@ -790,6 +798,15 @@ impl TerminalSession {
     fn stop(&mut self) {
         self.state = SessionState::Closed;
         self.exiting.store(true, Ordering::SeqCst);
+
+        // 管道没有 ConPTY 那样可以关掉来解开阻塞的伪终端：shell 不读 stdin 时写线程会卡在
+        // 写管道上，下面的 join 就永远等不到。先结束 shell，两端管道随之断开。
+        #[cfg(target_os = "windows")]
+        if self.is_pipe_mode {
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.kill();
+            }
+        }
 
         // Drop the input channel to signal writer thread to exit
         if let Some(input_tx) = self.input_tx.take() {
@@ -1162,6 +1179,10 @@ impl TerminalServiceProxy {
         if self.user_token.is_some() {
             return self.handle_open_with_helper(service, open);
         }
+        #[cfg(target_os = "windows")]
+        if !super::terminal_pipe_win::conpty_available() {
+            return self.handle_open_with_pipe(service, open);
+        }
 
         // Create new terminal session
         log::info!(
@@ -1192,6 +1213,8 @@ impl TerminalServiceProxy {
 
         #[cfg(target_os = "windows")]
         configure_utf8_shell_command(&shell, &mut cmd);
+        #[cfg(target_os = "windows")]
+        super::terminal_pipe_win::apply_temp_override(&mut cmd);
 
         // macOS-specific terminal configuration
         // 1. Use login shell (-l) to load user's shell profile (~/.zprofile, ~/.bash_profile)

@@ -122,6 +122,9 @@ const PIPE_DEFAULT_TIMEOUT_MS: u32 = 5000;
 /// Timeout for waiting for helper process to connect to pipes
 pub const PIPE_CONNECTION_TIMEOUT_MS: u32 = 10000;
 
+#[path = "terminal_helper_pipe.rs"]
+mod pipe_helper;
+
 /// Message type constants for helper protocol.
 /// Used to distinguish between terminal data and control commands.
 /// Note: Using non-zero values to make debugging easier (0x00 could indicate uninitialized memory).
@@ -848,6 +851,9 @@ pub fn run_terminal_helper(args: &[String]) -> Result<()> {
     // Open named pipes (created by the service)
     let input_pipe = open_pipe(input_pipe_name, true)?;
     let mut output_pipe = open_pipe(output_pipe_name, false)?;
+    if !super::terminal_pipe_win::conpty_available() {
+        return pipe_helper::run(input_pipe, output_pipe);
+    }
 
     // Create ConPTY and shell
     let pty_size = PtySize {
