@@ -476,13 +476,9 @@ impl AnsiCodec {
             return chunk.to_vec();
         }
         self.pending.extend_from_slice(chunk);
-        // DBCS 前导字节落在块尾时，后半个字符还在管道里，先别急着转。
-        let held = matches!(self.pending.last(), Some(&last) if is_lead_byte(self.codepage, last));
-        let split = if held {
-            self.pending.len() - 1
-        } else {
-            self.pending.len()
-        };
+        // 末尾落单的 DBCS 前导字节，后半个字符还在管道里，先别急着转。
+        let codepage = self.codepage;
+        let split = complete_dbcs_prefix(&self.pending, |byte| is_lead_byte(codepage, byte));
         if split == 0 {
             return Vec::new();
         }
@@ -492,6 +488,24 @@ impl AnsiCodec {
             None => ready,
         }
     }
+}
+
+/// 从头成对扫描，返回完整字符的字节数，只把末尾落单的前导字节留下。
+/// 不能只看最后一个字节：GBK 尾字节 0x40..=0xFE 与前导字节 0x81..=0xFE 重叠，
+/// 「中」= D6 D0 的尾字节 D0 也会被判成前导字节。
+fn complete_dbcs_prefix(bytes: &[u8], is_lead: impl Fn(u8) -> bool) -> usize {
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_lead(bytes[index]) {
+            if index + 1 == bytes.len() {
+                return index;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
 }
 
 fn is_lead_byte(codepage: u32, byte: u8) -> bool {
@@ -595,6 +609,20 @@ struct LineEditor {
     line: Vec<u8>,
     /// 上一个字节是 CR：紧跟的 LF 要吞掉，避免同一行被提交两次。
     swallow_lf: bool,
+    /// 方向键、Home 等发送的转义序列管道下的 cmd 处理不了，整段丢弃，可能跨多次输入。
+    escape: Escape,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Escape {
+    #[default]
+    None,
+    /// 刚收到 ESC。
+    Esc,
+    /// `ESC [`，直到 0x40..=0x7E 的终止字节。
+    Csi,
+    /// `ESC O`，后面再跟一个字节。
+    Ss3,
 }
 
 impl LineEditor {
@@ -608,6 +636,9 @@ impl LineEditor {
                 if byte == b'\n' {
                     continue;
                 }
+            }
+            if self.skip_escape(byte) {
+                continue;
             }
             match byte {
                 b'\r' | b'\n' => {
@@ -635,6 +666,35 @@ impl LineEditor {
             }
         }
         (to_shell, echo)
+    }
+
+    /// 返回 true 表示该字节属于转义序列，已被丢弃。
+    fn skip_escape(&mut self, byte: u8) -> bool {
+        match self.escape {
+            Escape::None if byte == 0x1b => {
+                self.escape = Escape::Esc;
+                true
+            }
+            Escape::None => false,
+            Escape::Esc => {
+                self.escape = match byte {
+                    b'[' => Escape::Csi,
+                    b'O' => Escape::Ss3,
+                    _ => Escape::None,
+                };
+                self.escape != Escape::None
+            }
+            Escape::Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    self.escape = Escape::None;
+                }
+                true
+            }
+            Escape::Ss3 => {
+                self.escape = Escape::None;
+                true
+            }
+        }
     }
 
     fn backspace(&mut self, echo: &mut Vec<u8>) {
@@ -833,6 +893,69 @@ mod tests {
         let (to_shell, echo) = editor.feed(&[b'\t']);
         assert_eq!(to_shell, vec![b'\t']);
         assert!(echo.is_empty());
+    }
+
+    /// 方向键整段丢弃，不能让 `[A` 混进命令行。
+    #[test]
+    fn line_editor_drops_csi_sequences() {
+        let mut editor = LineEditor::default();
+        editor.feed(b"dir");
+        let (to_shell, echo) = editor.feed(b"\x1b[A\x1b[1;5C");
+        assert!(to_shell.is_empty());
+        assert!(echo.is_empty());
+        let (to_shell, _) = editor.feed(b"\r");
+        assert_eq!(to_shell, b"dir\r\n");
+    }
+
+    #[test]
+    fn line_editor_drops_ss3_sequences() {
+        let mut editor = LineEditor::default();
+        editor.feed(b"a");
+        let (to_shell, echo) = editor.feed(b"\x1bOH");
+        assert!(to_shell.is_empty());
+        assert!(echo.is_empty());
+        assert_eq!(editor.feed(b"\r").0, b"a\r\n");
+    }
+
+    /// 转义序列被拆成多条输入消息时状态要保持。
+    #[test]
+    fn line_editor_escape_state_survives_split_feeds() {
+        let mut editor = LineEditor::default();
+        editor.feed(b"x");
+        editor.feed(b"\x1b");
+        editor.feed(b"[");
+        editor.feed(b"1;");
+        editor.feed(b"5A");
+        assert_eq!(editor.feed(b"\r").0, b"x\r\n");
+    }
+
+    /// ESC 后跟其他字节时只丢 ESC，后面的字节照常处理。
+    #[test]
+    fn line_editor_lone_escape_drops_only_esc() {
+        let mut editor = LineEditor::default();
+        let (_, echo) = editor.feed(b"\x1bq");
+        assert_eq!(echo, b"q");
+        assert_eq!(editor.feed(b"\r").0, b"q\r\n");
+    }
+
+    fn gbk_lead(byte: u8) -> bool {
+        (0x81..=0xfe).contains(&byte)
+    }
+
+    /// 尾字节 D0 与前导字节范围重叠：整个「中」都完整，不能扣留。
+    #[test]
+    fn dbcs_prefix_does_not_hold_trail_byte_that_looks_like_lead() {
+        assert_eq!(complete_dbcs_prefix(&[0xd6, 0xd0], gbk_lead), 2);
+        assert_eq!(complete_dbcs_prefix(&[0xd6, 0xd0, 0xd6, 0xd0], gbk_lead), 4);
+    }
+
+    #[test]
+    fn dbcs_prefix_holds_only_a_dangling_lead_byte() {
+        assert_eq!(complete_dbcs_prefix(&[b'a', 0xd6], gbk_lead), 1);
+        assert_eq!(complete_dbcs_prefix(&[0xd6, 0xd0, 0xd6], gbk_lead), 2);
+        assert_eq!(complete_dbcs_prefix(&[0xd6], gbk_lead), 0);
+        assert_eq!(complete_dbcs_prefix(b"ascii", gbk_lead), 5);
+        assert_eq!(complete_dbcs_prefix(&[], gbk_lead), 0);
     }
 
     #[test]
