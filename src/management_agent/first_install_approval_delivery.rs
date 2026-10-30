@@ -1317,21 +1317,21 @@ mod approval_scope_tests {
         }
     }
 
-    const NORMAL: &str = r"C:\Program Files\RustDesk";
+    const NORMAL: &str = r"E:\Program Files\RustDesk";
 
     // 多次失败升级、重装后，本机可能登记了多个 RustDesk MSI。只认装在固定安装目录的那些，
     // 其他登记（装在别处、非 RustDesk）一律忽略，不再整体判为登记源不符。
     #[test]
     fn candidates_keep_every_rustdesk_product_at_the_normal_install() {
         let products = [
-            product(OLD_CODE, "RustDesk", r"C:\Program Files\RustDesk\"),
+            product(OLD_CODE, "RustDesk", r"E:\Program Files\RustDesk\"),
             product("{33333333-3333-3333-3333-333333333333}", "Other", NORMAL),
             product(
                 "{44444444-4444-4444-4444-444444444444}",
                 "RustDesk",
                 r"D:\Old\RustDesk",
             ),
-            product(NEW_CODE, "RustDesk", r"c:\program files\rustdesk"),
+            product(NEW_CODE, "RustDesk", r"e:\program files\rustdesk"),
         ];
         assert_eq!(
             select_install_candidates(&products, std::path::Path::new(NORMAL)),

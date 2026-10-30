@@ -631,7 +631,7 @@ mod rotation_reason_tests {
         let mut result = mismatch();
         attach_rotation_reason(
             &mut result,
-            Some(br#"{"state":"unavailable","error_code":"preparation_refused","reason":"sessions_active","error":"C:\\secret path","ready":false,"agent_build":7}"#),
+            Some(br#"{"state":"unavailable","error_code":"preparation_refused","reason":"sessions_active","error":"E:\\secret path","ready":false,"agent_build":7}"#),
             Some(7),
         );
         assert_eq!(
