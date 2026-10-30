@@ -21,7 +21,10 @@ LAB_MARKERS = ("RustDeskAgentLab",)
 
 
 def lex(source):
-    """返回 (字符串字面量列表[(起点, 内容)], 需要跳过的区间列表)。"""
+    """返回 (字符串字面量列表[(起点, 内容)], 需要跳过的区间列表)。
+
+    跳过区间包含注释、字符字面量，以及每个字符串字面量从前缀到结束引号的完整范围。
+    """
     strings, skipped = [], []
     i, n = 0, len(source)
     while i < n:
@@ -51,6 +54,7 @@ def lex(source):
             end = source.find('"' + hashes, start)
             end = n if end < 0 else end
             strings.append((i, source[start:end]))
+            skipped.append((i, end + 1 + len(hashes)))
             i = end + 1 + len(hashes)
             continue
         if c == '"' or (c == "b" and source.startswith('b"', i)):
@@ -64,6 +68,7 @@ def lex(source):
                     buf.append(source[j])
                     j += 1
             strings.append((i, "".join(buf)))
+            skipped.append((i, j + 1))
             i = j + 1
             continue
         if c == "'":
@@ -78,8 +83,8 @@ def lex(source):
 
 def test_item_ranges(source):
     """`#[cfg(test)]` 以及 `#[cfg(all(test, ...))]` 修饰的条目所占的区间。"""
-    strings, comments = lex(source)
-    blocked = sorted(comments + [(p, p + len(s) + 2) for p, s in strings])
+    _, blocked = lex(source)
+    blocked = sorted(blocked)
 
     def in_blocked(pos):
         return any(a <= pos < b for a, b in blocked)
@@ -156,6 +161,23 @@ fn lab() { let d = r"C:\\RustDeskAgentLab\\x"; let e = r#"{"a":"C:/x"}"#; }
             and not any(m in v for m in LAB_MARKERS)
         ]
         self.assertEqual(live, [r"C:\Program Files\RustDesk", '{"a":"C:/x"}'])
+
+    def test_prefixed_string_ending_in_brace_keeps_test_item_open(self):
+        # 原始字符串和字节串带前缀与 # 号，区间要覆盖整段；否则末尾的 } 会被当成代码，
+        # 测试模块被提前截断，后面单测里的 C: 假路径就成了误报。
+        source = '''
+#[cfg(test)]
+mod tests {
+    fn raw() { let a = br#"{"state":"x","agent_build":7}"#; }
+    fn bytes() { let b = b"{}}"; }
+    fn later() { let c = r"C:\\Program Files\\RustDesk"; }
+}
+fn prod() { let d = r"C:\\Windows"; }
+'''
+        strings, _ = lex(source)
+        tests = test_item_ranges(source)
+        live = [v for p, v in strings if DRIVE_C.search(v) and not any(a <= p < b for a, b in tests)]
+        self.assertEqual(live, [r"C:\Windows"])
 
 
 if __name__ == "__main__":
