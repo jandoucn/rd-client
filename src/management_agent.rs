@@ -32,6 +32,8 @@ mod recovery_windows;
 #[cfg(windows)]
 #[path = "management_agent/status.rs"]
 mod status;
+#[path = "management_agent/status_generation.rs"]
+mod status_generation;
 #[path = "management_agent/bootstrap_policy.rs"]
 mod bootstrap_policy;
 #[cfg(windows)]
@@ -1160,6 +1162,26 @@ fn set_hidden_system_attribute(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// 后台告知代号过旧时，把本地启动代号前进到后台值之上并先落盘再生效。
+/// 本地已经领先或后台值不可信时不改动；写盘失败时内存状态保持原值。
+fn apply_stale_session_generation(
+    state: &mut AgentState,
+    state_path: &Path,
+    server_current: u64,
+) -> std::io::Result<Option<u64>> {
+    let Some(next) = status_generation::advance(state.status_session_generation, server_current)
+    else {
+        return Ok(None);
+    };
+    let advanced = AgentState {
+        status_session_generation: next,
+        ..state.clone()
+    };
+    write_state(state_path, &advanced)?;
+    *state = advanced;
+    Ok(Some(next))
+}
+
 pub fn write_state(path: &Path, state: &AgentState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1708,6 +1730,9 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
     let boot_id = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
     let mut status_sequence = 0u64;
     let mut session_generation = None;
+    // 每次启动最多按后台代号前进一次：整机克隆的两台设备共用身份时，
+    // 不让它们无休止地互相把代号顶上去，第二次起只记日志。
+    let mut stale_generation_advanced = false;
     let mut bootstrap_initialized = false;
     let local_repair_worker =
         local_repair_schedule::start().map_err(windows_service::Error::Winapi)?;
@@ -1723,6 +1748,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
         .spawn(move || terminal::runtime::run(terminal_paths, terminal_stop))
         .map_err(windows_service::Error::Winapi)?;
     let (status_tx, status_rx) = mpsc::sync_channel::<(Option<serde_json::Value>, AgentState)>(1);
+    let (stale_generation_tx, stale_generation_rx) = mpsc::sync_channel::<u64>(1);
     let (policy_tx, policy_rx) = mpsc::sync_channel::<AgentState>(1);
     let (operations_tx, operations_rx) = mpsc::sync_channel::<AgentState>(1);
     let operations_paths = paths.clone();
@@ -1755,6 +1781,10 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                 }
                 if let Some(payload) = payload {
                     if let Err(error) = status::send(&payload) {
+                        if let status::SendError::StaleSession { current } = error {
+                            // 交给主循环前进本地代号；满了说明上一条还没处理，丢弃即可。
+                            let _ = stale_generation_tx.try_send(current);
+                        }
                         hbb_common::throttled_log!(
                             Duration::from_secs(60),
                             warn,
@@ -1837,6 +1867,32 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) -> windows_service::Result<
                 continue;
             }
             session_generation = Some(generation);
+        }
+        if let Ok(current) = stale_generation_rx.try_recv() {
+            if stale_generation_advanced {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(300),
+                    warn,
+                    "agent session generation still stale after advancing (server {current}); another instance may share this identity"
+                );
+            } else {
+                // 写盘失败时内存状态不变，下一次 409 会再触发，不跳过本轮其余工作。
+                match apply_stale_session_generation(&mut state, &state_path, current) {
+                    Ok(Some(generation)) => {
+                        hbb_common::log::info!(
+                            "agent session generation advanced past server {current} to {generation}"
+                        );
+                        session_generation = Some(generation);
+                        stale_generation_advanced = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "agent session advance save failed: {error}"
+                    ),
+                }
+            }
         }
         if state.normal_install_path.is_empty() {
             if let Some(path) = discover_normal_install_path() {
@@ -2335,6 +2391,45 @@ mod tests {
             assert_eq!(saved, state);
             assert!(!path.with_extension(format!("bak-{}", std::process::id())).exists());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_session_generation_advances_forward_only_and_persists() {
+        let root = std::env::temp_dir().join(format!(
+            "rustdesk-agent-stale-generation-{}-{}",
+            std::process::id(),
+            hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(8))
+        ));
+        let paths = AgentPaths::from_program_data(&root, Edition::Standard);
+        let path = paths.state.join("agent.json");
+        let saved = |path: &Path| -> AgentState {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        let mut state = AgentState::new(Edition::Standard, &paths);
+        state.agent_installation_id = "a".repeat(32);
+        // 回退：本地 54、后台 60。
+        state.status_session_generation = 54;
+        write_state(&path, &state).unwrap();
+        assert_eq!(apply_stale_session_generation(&mut state, &path, 60).unwrap(), Some(61));
+        assert_eq!(state.status_session_generation, 61);
+        assert_eq!(saved(&path).status_session_generation, 61);
+        assert_eq!(saved(&path).agent_installation_id, "a".repeat(32));
+        // 相等：本地与后台都是 61 也要越过。
+        assert_eq!(apply_stale_session_generation(&mut state, &path, 61).unwrap(), Some(62));
+        assert_eq!(saved(&path).status_session_generation, 62);
+        // 本地已领先（迟到的旧 409）：不后退、不写盘。
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(apply_stale_session_generation(&mut state, &path, 60).unwrap(), None);
+        assert_eq!(apply_stale_session_generation(&mut state, &path, u64::MAX).unwrap(), None);
+        assert_eq!(state.status_session_generation, 62);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // 写盘失败时内存状态保持原值。
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&paths.agent).unwrap();
+        std::fs::write(&paths.state, b"not-a-directory").unwrap();
+        assert!(apply_stale_session_generation(&mut state, &path, 70).is_err());
+        assert_eq!(state.status_session_generation, 62);
         std::fs::remove_dir_all(root).unwrap();
     }
 

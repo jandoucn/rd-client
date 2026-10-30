@@ -393,7 +393,39 @@ pub fn snapshot(
     Ok(payload)
 }
 
-pub fn send(payload: &serde_json::Value) -> Result<(), String> {
+/// 状态上报失败。`StaleSession` 只对应 rd-api 明确标注的“代号过旧”409，
+/// 其他失败（含其他 409）一律是 `Other`，行为与以前相同。
+#[derive(Debug, PartialEq)]
+pub enum SendError {
+    StaleSession { current: u64 },
+    Other(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleSession { current } => write!(
+                f,
+                "agent status HTTP 409 Conflict (session generation stale, server {current})"
+            ),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl PartialEq<&str> for SendError {
+    fn eq(&self, other: &&str) -> bool {
+        self.to_string() == *other
+    }
+}
+
+impl From<String> for SendError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+pub fn send(payload: &serde_json::Value) -> Result<(), SendError> {
     let identity = identity::load_existing()?;
     send_with_identity(
         payload,
@@ -406,15 +438,15 @@ fn send_with_identity(
     payload: &serde_json::Value,
     identity: &identity::DeviceIdentity,
     url: &str,
-) -> Result<(), String> {
+) -> Result<(), SendError> {
     if payload["client_id"].as_str() != Some(&identity.id)
         || payload["client_uuid"].as_str() != Some(&identity.uuid)
     {
-        return Err("agent status identity changed".into());
+        return Err(SendError::Other("agent status identity changed".into()));
     }
     let body = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
     if body.len() > 65536 {
-        return Err("agent status too large".into());
+        return Err(SendError::Other("agent status too large".into()));
     }
     let timestamp = unix_timestamp() as i64;
     let nonce = hex::encode(hbb_common::sodiumoxide::randombytes::randombytes(16));
@@ -451,8 +483,16 @@ fn send_with_identity(
         .send()
         .map_err(|error| error.to_string())?;
     let code = response.status();
+    if code == reqwest::StatusCode::CONFLICT {
+        let mut conflict = Vec::new();
+        let _ = response.take(4096).read_to_end(&mut conflict);
+        if let Some(current) = super::status_generation::stale_generation_from_conflict(&conflict) {
+            return Err(SendError::StaleSession { current });
+        }
+        return Err(SendError::Other(format!("agent status HTTP {code}")));
+    }
     if !code.is_success() {
-        return Err(format!("agent status HTTP {code}"));
+        return Err(SendError::Other(format!("agent status HTTP {code}")));
     }
     let mut acknowledgement = Vec::new();
     response
@@ -460,12 +500,12 @@ fn send_with_identity(
         .read_to_end(&mut acknowledgement)
         .map_err(|error| error.to_string())?;
     if acknowledgement.len() > 65536 {
-        return Err("agent status acknowledgement too large".into());
+        return Err(SendError::Other("agent status acknowledgement too large".into()));
     }
     let ack: serde_json::Value =
         serde_json::from_slice(&acknowledgement).map_err(|error| error.to_string())?;
     if ack["ok"] != true || ack["accepted_sequence"] != payload["sequence"] {
-        return Err("agent status acknowledgement mismatch".into());
+        return Err(SendError::Other("agent status acknowledgement mismatch".into()));
     }
     Ok(())
 }
@@ -887,7 +927,7 @@ mod tests {
             serde_json::json!({"client_id":"other", "client_uuid":identity.uuid, "sequence":9});
         assert_eq!(
             send_with_identity(&mismatched, &identity, "http://127.0.0.1:1").unwrap_err(),
-            "agent status identity changed"
+            SendError::Other("agent status identity changed".into())
         );
         let payload =
             serde_json::json!({ "client_id":identity.id,"client_uuid":identity.uuid,"sequence":9 });
@@ -898,6 +938,36 @@ mod tests {
             ));
             assert!(send_with_identity(&payload, &identity, &url).is_err());
             fixture.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn stale_generation_conflict_is_distinguished_from_other_conflicts() {
+        let identity = test_identity();
+        let payload =
+            serde_json::json!({ "client_id":identity.id,"client_uuid":identity.uuid,"sequence":9 });
+        let conflict = |body: &str| {
+            let (url, fixture) = response_fixture(&format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ));
+            let error = send_with_identity(&payload, &identity, &url).unwrap_err();
+            fixture.join().unwrap();
+            error
+        };
+        assert_eq!(
+            conflict(r#"{"error":"agent 旧启动会话已结束","code":"session_generation_stale","current_session_generation":60}"#),
+            SendError::StaleSession { current: 60 }
+        );
+        for body in [
+            r#"{"error":"agent sequence 已过期"}"#,
+            r#"{"error":"agent 实例变化，需要重新登记"}"#,
+            r#"{"error":"x","code":"session_generation_stale","current_session_generation":-5}"#,
+            "not-json",
+        ] {
+            let error = conflict(body);
+            assert_eq!(error, SendError::Other("agent status HTTP 409 Conflict".into()), "{body}");
+            assert_eq!(error.to_string(), "agent status HTTP 409 Conflict");
         }
     }
 }

@@ -177,3 +177,77 @@ fn delivery_status_uses_accepted_enrollment_and_preserves_unbound_snapshot() {
     assert!(foreign.get("enrollment_generation").is_none());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// 启动代号回退：agent.json 被还原成旧代号后，真实 rd-api 以“代号过旧”409 回报当前代号，
+// 客户端前进并落盘后下一次上报即被接受；实例变化等其他 409 仍是普通错误。
+#[test]
+fn delivery_regressed_generation_recovers_through_real_api() {
+    use std::process::{Command, Stdio};
+    let api = std::path::PathBuf::from(std::env::var_os("AGENT_TEST_API_ROOT").expect("frozen API required"));
+    let php = std::env::var("AGENT_TEST_PHP").unwrap();
+    let ini = std::env::var("AGENT_TEST_PHP_INI").unwrap();
+    let root = std::env::temp_dir().join(format!("agent-status-test-contract-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir(&root).unwrap();
+    let db = root.join("agent-status-test.db");
+    let identity = identity::load_existing().unwrap();
+    let sql = |code: &str| {
+        let out = Command::new(&php).args(["-c", &ini, "-r", code])
+            .env("API", &api).env("DB", &db).env("ID", &identity.id).env("UUID", &identity.uuid)
+            .env("PK", STANDARD.encode(identity.public.as_ref())).output().unwrap();
+        assert!(out.status.success(), "PHP fixture: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    sql(r#"require getenv('API').'/sqlite/lib.php';$db=new PDO('sqlite:'.getenv('DB'));configure_pdo($db);ensure_schema($db);db_insert_ignore($db,'device_update_keys',['device_id'=>getenv('ID'),'uuid'=>getenv('UUID'),'public_key'=>getenv('PK'),'first_seen_at'=>time(),'last_seen_at'=>time()]);"#);
+    let row = || sql(r#"$db=new PDO('sqlite:'.getenv('DB'));echo implode('|',$db->query('SELECT boot_id,session_generation,sequence FROM device_agent_status')->fetch(PDO::FETCH_NUM)),'|',$db->query('SELECT COUNT(*) FROM device_agent_status')->fetchColumn();"#);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();drop(listener);
+    let child = Command::new(&php).args(["-c", &ini, "-S", &address.to_string()])
+        .arg(api.join("tests/agent_status_http_router.php"))
+        .env("AGENT_HTTP_FIXTURE_DB", &db).env("RUSTDESK_DB_DRIVER", "sqlite")
+        .env("RUSTDESK_INSTALL_CONFIG", root.join("absent.json"))
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    struct Server(std::process::Child);
+    impl Drop for Server { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+    let server = Server(child);
+    for _ in 0..100 { if std::net::TcpStream::connect(address).is_ok() {break;} thread::sleep(Duration::from_millis(20)); }
+    let url = format!("http://{address}/rd/update/v1/agent/status");
+    let paths = AgentPaths::from_program_data(&root, super::super::super::Edition::Standard);
+    std::fs::create_dir_all(&paths.state).unwrap();
+    let state_path = paths.state.join("agent.json");
+    let mut state = AgentState::new(super::super::super::Edition::Standard, &paths);
+    state.agent_installation_id = "a".repeat(32);
+    // 后台记录的是代号 60 的会话。
+    state.status_session_generation = 60;
+    send_with_identity(&snapshot(&state,&paths,&state.agent_installation_id,&"b".repeat(32),1).unwrap(),&identity,&url).unwrap();
+    assert_eq!(row(), format!("{}|60|1|1", "b".repeat(32)));
+    // 还原出旧 agent.json：本次启动代号 54，以及相等的 60，都被判过旧并带回 60。
+    let boot = "c".repeat(32);
+    for generation in [54, 60] {
+        state.status_session_generation = generation;
+        let stale = snapshot(&state,&paths,&state.agent_installation_id,&boot,1).unwrap();
+        assert_eq!(send_with_identity(&stale,&identity,&url).unwrap_err(), SendError::StaleSession { current: 60 });
+        assert_eq!(row(), format!("{}|60|1|1", "b".repeat(32)));
+    }
+    state.status_session_generation = 54;
+    super::super::super::write_state(&state_path,&state).unwrap();
+    // 下一个周期：前进到 61 并落盘，同一 boot 重报即被接受。
+    assert_eq!(super::super::super::apply_stale_session_generation(&mut state,&state_path,60).unwrap(), Some(61));
+    let saved: AgentState = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(saved.status_session_generation, 61);
+    send_with_identity(&snapshot(&state,&paths,&state.agent_installation_id,&boot,2).unwrap(),&identity,&url).unwrap();
+    assert_eq!(row(), format!("{boot}|61|2|1"));
+    // 正常递增：重启后 62 照常接受。
+    state.status_session_generation = 62;
+    send_with_identity(&snapshot(&state,&paths,&state.agent_installation_id,&"d".repeat(32),1).unwrap(),&identity,&url).unwrap();
+    assert_eq!(row(), format!("{}|62|1|1", "d".repeat(32)));
+    // 其他 409：未授权的新实例仍是普通 409，不带代号，库不变。
+    let mut other = state.clone();
+    other.agent_installation_id = "e".repeat(32);
+    other.status_session_generation = 1;
+    let rejected = send_with_identity(&snapshot(&other,&paths,&other.agent_installation_id,&"f".repeat(32),1).unwrap(),&identity,&url).unwrap_err();
+    assert_eq!(rejected, SendError::Other("agent status HTTP 409 Conflict".into()));
+    assert_eq!(row(), format!("{}|62|1|1", "d".repeat(32)));
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
