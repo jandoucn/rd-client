@@ -34,6 +34,34 @@ fn sid(sid: PSID) -> Result<String, String> {
     unsafe { text.to_string() }.map_err(|e| e.to_string())
 }
 
+/// Rights a principal other than SYSTEM, Administrators or TrustedInstaller may hold on a trusted
+/// ancestor. `flags` excludes INHERITED_ACE.
+fn other_ace_allowed(drive_root: bool, state: bool, who: &str, flags: u8, mask: u32) -> bool {
+    const USERS: &str = "S-1-5-32-545";
+    if who == "S-1-3-0" && flags == 0x0b && mask == 0x10000000 {
+        return true;
+    }
+    if who == USERS && flags == 2 && matches!(mask, 0x116 | 0x110) {
+        return true;
+    }
+    if mask & !0x1200a9 == 0 && (!state || who == USERS) {
+        return true;
+    }
+    if state || !drive_root {
+        return false;
+    }
+    // A drive root may let users create child directories and carry inherit-only rights for new
+    // children; neither lets them replace or modify the existing protected ancestors below it.
+    // Windows client images grant this to Authenticated Users ((A;;LC;;;AU), inherit-only
+    // modify), Windows Server images to Users: (A;CI;LC;;;BU) adds subdirectories,
+    // (A;CIIO;DC;;;BU) only applies to new children. Same set as purge_marker.
+    match who {
+        "S-1-5-11" => (flags == 0 && mask == 4) || (flags == 0x0b && mask == 0xe0010000),
+        USERS => (flags == 0x02 && mask == 4) || (flags == 0x0a && mask == 2),
+        _ => false,
+    }
+}
+
 fn directory_acl(path: &Path, state: bool) -> Result<(), String> {
     const SYSTEM: &str = "S-1-5-18";
     const ADMINS: &str = "S-1-5-32-544";
@@ -97,21 +125,7 @@ fn directory_acl(path: &Path, state: bool) -> Result<(), String> {
             }
             continue;
         }
-        if who == "S-1-3-0" && flags == 0x0b && ace.Mask == 0x10000000 {
-            continue;
-        }
-        if who == "S-1-5-32-545" && flags == 2 && matches!(ace.Mask, 0x116 | 0x110) {
-            continue;
-        }
-        if ace.Mask & !0x1200a9 == 0 && (!state || who == "S-1-5-32-545") {
-            continue;
-        }
-        // C:\ permits new child directories and inherit-only user rights; neither replaces existing protected ancestors.
-        if !state
-            && path.parent().is_none()
-            && who == "S-1-5-11"
-            && ((flags == 0 && ace.Mask == 4) || (flags == 0x0b && ace.Mask == 0xe0010000))
-        {
+        if other_ace_allowed(path.parent().is_none(), state, &who, flags, ace.Mask) {
             continue;
         }
         return Err(format!(
@@ -274,10 +288,89 @@ pub(super) fn hold_installed_root(root: &Path) -> Result<Vec<File>, String> {
         );
         directory_acl(path, false)?;
         #[cfg(test)]
-        #[cfg(test)]
         if ROOT_SCOPE.with(|v| v.borrow().as_deref() == Some(path)) {
             break;
         }
     }
     Ok(locks)
+}
+
+#[cfg(test)]
+mod root_acl_lab_tests {
+    use super::*;
+
+    // gep 的 C:\ 是 Windows Server 风格的默认根目录权限：普通用户可新建子目录 (A;CI;LC;;;BU)，
+    // 另有只继承给子对象的新建文件 (A;CIIO;DC;;;BU)。实验室把这份 SDDL 设到一个目录上并用 subst
+    // 映射成盘符根目录，RD_ACL_ROOT_LAB 指向该盘符（如 R:\）；没有该变量时跳过。
+    #[test]
+    fn a_default_windows_drive_root_is_a_trusted_ancestor() {
+        let Ok(root) = std::env::var("RD_ACL_ROOT_LAB") else {
+            return;
+        };
+        let root = Path::new(&root);
+        assert!(root.parent().is_none(), "{root:?} must be a drive root");
+        assert_eq!(directory_acl(root, false), Ok(()));
+        // 状态目录的规则更严，同样的权限不能被放行。
+        assert!(directory_acl(root, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod other_ace_tests {
+    use super::other_ace_allowed;
+    const USERS: &str = "S-1-5-32-545";
+    const AUTHENTICATED: &str = "S-1-5-11";
+
+    // Windows Server 默认的 C:\：普通用户可建子目录、可新建文件（仅继承给子对象）。
+    #[test]
+    fn the_default_drive_root_rights_of_users_are_trusted() {
+        assert!(other_ace_allowed(true, false, USERS, 0x02, 0x4));
+        assert!(other_ace_allowed(true, false, USERS, 0x0a, 0x2));
+    }
+
+    // 只在盘符根目录放行；状态目录与普通目录上同样的权限都不可信。
+    #[test]
+    fn the_same_rights_elsewhere_stay_untrusted() {
+        for (root, state) in [(false, false), (true, true), (false, true)] {
+            assert!(!other_ace_allowed(root, state, USERS, 0x02, 0x4), "{root} {state}");
+            assert!(!other_ace_allowed(root, state, USERS, 0x0a, 0x2), "{root} {state}");
+        }
+    }
+
+    // 标志或权限稍有不同（作用到对象本身、能写已有内容、其他主体）都不放行。
+    #[test]
+    fn near_misses_on_the_root_are_rejected() {
+        for (who, flags, mask) in [
+            (USERS, 0x03, 0x4),        // also applies to files
+            (USERS, 0x06, 0x4),        // no-propagate variant
+            (USERS, 0x0b, 0x2),        // object-inherit variant
+            (USERS, 0x0e, 0x2),        // no-propagate inherit-only variant
+            (USERS, 0x02, 0x100004),   // extra SYNCHRONIZE
+            (AUTHENTICATED, 0x02, 0x4), // principal and flags swapped
+            (USERS, 0x00, 0x4),
+            (USERS, 0x02, 0x6),        // add subdirectory and write data on the root
+            (USERS, 0x02, 0x2),        // create files directly in the root
+            (USERS, 0x00, 0x2),        // effective on the root itself
+            (USERS, 0x0a, 0x1f01ff),   // full control for new children
+            (USERS, 0x02, 0x1f01ff),   // full control
+            ("S-1-1-0", 0x02, 0x4),    // Everyone
+            ("S-1-5-4", 0x0a, 0x2),    // Interactive
+        ] {
+            assert!(!other_ace_allowed(true, false, who, flags, mask), "{who} {flags:#x} {mask:#x}");
+        }
+    }
+
+    // 原有规则保持不变：旧镜像的“经过身份验证的用户”根目录写法、ProgramData 的用户条目、只读权限。
+    #[test]
+    fn existing_rules_are_unchanged() {
+        assert!(other_ace_allowed(true, false, AUTHENTICATED, 0x00, 0x4));
+        assert!(other_ace_allowed(true, false, AUTHENTICATED, 0x0b, 0xe0010000));
+        assert!(!other_ace_allowed(false, false, AUTHENTICATED, 0x00, 0x4));
+        assert!(other_ace_allowed(false, false, USERS, 0x02, 0x116));
+        assert!(other_ace_allowed(false, true, USERS, 0x02, 0x110));
+        assert!(other_ace_allowed(false, true, USERS, 0x03, 0x1200a9));
+        assert!(other_ace_allowed(false, false, "S-1-1-0", 0x03, 0x1200a9));
+        assert!(!other_ace_allowed(false, true, "S-1-1-0", 0x03, 0x1200a9));
+        assert!(other_ace_allowed(false, true, "S-1-3-0", 0x0b, 0x10000000));
+    }
 }

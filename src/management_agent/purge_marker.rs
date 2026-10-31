@@ -21,6 +21,18 @@ fn sid(value: PSID) -> Result<String, String> {
     unsafe { text.to_string() }.map_err(|e|e.to_string())
 }
 
+/// Drive-root rights that let users add children without touching existing ones; same set as
+/// preservation_state_read. Windows client images grant them to Authenticated Users
+/// ((A;;LC;;;AU), inherit-only modify), Windows Server images to Users ((A;CI;LC;;;BU) adds
+/// subdirectories, (A;CIIO;DC;;;BU) only applies to new children). `flags` excludes INHERITED_ACE.
+fn drive_root_ace_allowed(principal: &str, flags: u8, mask: u32) -> bool {
+    match principal {
+        "S-1-5-11" => (flags == 0 && mask == 4) || (flags == 0x0b && mask == 0xe0010000),
+        "S-1-5-32-545" => (flags == 0x02 && mask == 4) || (flags == 0x0a && mask == 2),
+        _ => false,
+    }
+}
+
 // Same narrow inherited-directory grants as preservation_state_read, but
 // checked on pinned handles. This authorizes creation only, never replacement.
 fn acl(file: &File, directory: bool, volume_root: bool) -> Result<(), String> {
@@ -60,7 +72,7 @@ fn acl(file: &File, directory: bool, volume_root: bool) -> Result<(), String> {
             // new marker receives an explicit protected descriptor atomically.
             if principal=="S-1-5-32-545" && flags==2 && matches!(ace.Mask,0x116|0x110) {continue;}
             if ace.Mask & !0x1200a9 ==0 {continue;}
-            if volume_root && principal=="S-1-5-11" && ((flags==0 && ace.Mask==4)||(flags==0x0b && ace.Mask==0xe0010000)) {continue;}
+            if volume_root && drive_root_ace_allowed(&principal,flags,ace.Mask) {continue;}
         }
         return Err("purge marker untrusted rights; replacement refused".into());
     }
@@ -133,3 +145,49 @@ fn validate_marker(file:&File)->Result<(),String> {
 
 #[cfg(test)]
 pub fn fixture(state:&Path,recheck:impl Fn()->Result<(),String>)->Result<HeldMarker,String> {create_at(state,recheck)}
+
+#[cfg(test)]
+mod drive_root_tests {
+    use super::drive_root_ace_allowed;
+
+    #[test]
+    fn client_and_server_default_drive_roots_are_accepted() {
+        assert!(drive_root_ace_allowed("S-1-5-11", 0x00, 0x4));
+        assert!(drive_root_ace_allowed("S-1-5-11", 0x0b, 0xe0010000));
+        assert!(drive_root_ace_allowed("S-1-5-32-545", 0x02, 0x4));
+        assert!(drive_root_ace_allowed("S-1-5-32-545", 0x0a, 0x2));
+    }
+
+    // 实验室：RD_ACL_ROOT_LAB 指向一个用 subst 映射、权限与 Windows Server 默认 C:\ 相同的盘符根目录。
+    #[test]
+    fn a_server_default_drive_root_handle_is_trusted() {
+        let Ok(root) = std::env::var("RD_ACL_ROOT_LAB") else {
+            return;
+        };
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x02000000 | 0x00200000)
+            .open(&root)
+            .unwrap();
+        assert_eq!(super::acl(&file, true, true), Ok(()));
+        assert!(super::acl(&file, true, false).is_err());
+    }
+
+    #[test]
+    fn near_misses_are_rejected() {
+        for (who, flags, mask) in [
+            ("S-1-5-32-545", 0x03, 0x4),
+            ("S-1-5-32-545", 0x06, 0x4),
+            ("S-1-5-32-545", 0x0b, 0x2),
+            ("S-1-5-32-545", 0x0e, 0x2),
+            ("S-1-5-32-545", 0x02, 0x100004),
+            ("S-1-5-32-545", 0x00, 0x4),
+            ("S-1-5-11", 0x02, 0x4),
+            ("S-1-1-0", 0x02, 0x4),
+        ] {
+            assert!(!drive_root_ace_allowed(who, flags, mask), "{who} {flags:#x} {mask:#x}");
+        }
+    }
+}
