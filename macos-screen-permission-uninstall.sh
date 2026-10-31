@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-app=${RUSTDESK_APP:-"/Applications/RustDesk Yan.app"}
+app=${RUSTDESK_APP:-"/Applications/RustDesk.app"}
 bundle_id=${RUSTDESK_BUNDLE_ID:-com.carriez.rustdesk}
 sleep_seconds=${RUSTDESK_PERMISSION_SLEEP_SECONDS:-1}
 log_file=${RUSTDESK_UNINSTALL_LOG_FILE:-"${TMPDIR:-/tmp}/rustdesk-yan-uninstall-$(date +%Y%m%d-%H%M%S).log"}
@@ -12,7 +12,7 @@ usage() {
     cat <<'EOF'
 用法：macos-screen-permission-uninstall.sh [选项]
 
-默认操作：退出 RustDesk Yan、清除 TCC 权限记录、删除 RustDesk Yan.app。
+默认操作：退出 RustDesk、清除 TCC 权限记录、删除 RustDesk.app。
 默认保留 RustDesk 配置、设备 ID、日志和用户数据。
 
 选项：
@@ -90,23 +90,23 @@ run_logged() {
 }
 
 stop_app() {
-    say "- 正在退出 RustDesk Yan..."
-    run_logged pkill -x "RustDesk Yan" || true
+    say "- 正在退出 RustDesk..."
+    run_logged pkill -x "RustDesk" || true
     run_logged pkill -f "$app/Contents/MacOS/" || true
     sleep "$sleep_seconds"
 
     # RustDesk 可能拦截 AppleScript quit 并返回 -128；只有进程仍在时才尝试它。
-    if pgrep -x "RustDesk Yan" >/dev/null 2>&1; then
-        run_logged osascript -e 'tell application "RustDesk Yan" to quit' || true
+    if pgrep -x "RustDesk" >/dev/null 2>&1; then
+        run_logged osascript -e 'tell application "RustDesk" to quit' || true
         sleep "$sleep_seconds"
-        run_logged pkill -x "RustDesk Yan" || true
+        run_logged pkill -x "RustDesk" || true
         run_logged pkill -f "$app/Contents/MacOS/" || true
     fi
 
     elapsed=0
-    while pgrep -x "RustDesk Yan" >/dev/null 2>&1; do
+    while pgrep -x "RustDesk" >/dev/null 2>&1; do
         if [ "$elapsed" -ge 10 ]; then
-            fail "RustDesk Yan 进程仍未退出，请手动结束后重试。"
+            fail "RustDesk 进程仍未退出，请手动结束后重试。"
         fi
         sleep 1
         elapsed=$((elapsed + 1))
@@ -114,7 +114,7 @@ stop_app() {
 }
 
 reset_tcc() {
-    say "- 清除 RustDesk Yan 的 macOS 权限记录..."
+    say "- 清除 RustDesk 的 macOS 权限记录..."
     for service in ScreenCapture Accessibility ListenEvent; do
         if run_logged tccutil reset "$service" "$bundle_id"; then
             :
@@ -149,7 +149,7 @@ case "$app" in
     *) fail "应用路径必须以 .app 结尾：$app" ;;
 esac
 
-say "RustDesk Yan macOS 卸载"
+say "RustDesk macOS 卸载"
 say "应用：$app"
 say "Bundle ID：$bundle_id"
 [ -n "$log_file" ] && say "日志文件：$log_file"

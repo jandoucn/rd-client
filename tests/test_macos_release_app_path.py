@@ -19,6 +19,17 @@ def macos_product_name() -> str:
     return match.group(1)
 
 
+def runtime_app_name() -> str:
+    config = (REPO_ROOT / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
+    match = re.search(
+        r'APP_NAME: RwLock<String> = RwLock::new\("(?P<name>[^"]+)"\.to_owned\(\)\)',
+        config,
+    )
+    if match is None:
+        raise AssertionError("APP_NAME default is missing from hbb_common config")
+    return match.group("name")
+
+
 def macos_rename_script() -> str:
     workflow = (
         REPO_ROOT / ".github/workflows/flutter-build.yml"
@@ -129,6 +140,13 @@ class MacosReleaseAppPathTest(unittest.TestCase):
         source = (REPO_ROOT / "src/platform/macos.rs").read_text(encoding="utf-8")
 
         self.assertIn("USER_UPDATE_RESULT_ROOT", source)
+        self.assertIn(
+            'USER_UPDATE_RESULT_ROOT: &str = "/Library/Application Support/RustDesk/update-results"',
+            source,
+        )
+        self.assertIn('app_support.join("RustDesk")', source)
+        self.assertNotIn("Application Support/RustDesk Yan", source)
+        self.assertNotIn('app_support.join("RustDesk Yan")', source)
         self.assertIn("ensure_user_update_result_directory", source)
         self.assertNotIn('/Users/Shared/.rustdeskupdate_result-', source)
         self.assertIn("update_result_paths_for_uid", source)
@@ -187,8 +205,9 @@ class MacosReleaseAppPathTest(unittest.TestCase):
 
     def test_release_scripts_use_configured_product_name(self) -> None:
         product_name = macos_product_name()
-        self.assertIn(" ", product_name)
+        self.assertEqual(product_name, runtime_app_name())
         app_name = f"{product_name}.app"
+        legacy_app_name = "RustDesk Yan.app"
 
         build_script = (REPO_ROOT / "build.py").read_text(encoding="utf-8")
         workflow = (
@@ -234,15 +253,16 @@ class MacosReleaseAppPathTest(unittest.TestCase):
         ]
         self.assertTrue(any(app_name in command for command in system_commands))
         self.assertFalse(
-            any(
-                "./build/macos/Build/Products/Release/RustDesk.app" in command
-                for command in system_commands
-            )
+            any(legacy_app_name in command for command in system_commands)
         )
-        self.assertNotIn(
-            "./flutter/build/macos/Build/Products/Release/RustDesk.app",
-            workflow,
-        )
+        self.assertNotIn(legacy_app_name, workflow)
+        for script in (
+            "macos-screen-permission.sh",
+            "macos-screen-permission-uninstall.sh",
+        ):
+            text = (REPO_ROOT / script).read_text(encoding="utf-8")
+            self.assertIn(f'"/Applications/{app_name}"', text)
+            self.assertNotIn(legacy_app_name, text)
         self.assertIn("--build-name", build_script)
         self.assertIn("--build-number", build_script)
         self.assertIn("validate-macos-app-version.py", workflow)

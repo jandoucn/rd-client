@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-app=${RUSTDESK_APP:-"/Applications/RustDesk Yan.app"}
+app=${RUSTDESK_APP:-"/Applications/RustDesk.app"}
 open_command=${RUSTDESK_OPEN_COMMAND:-open}
 bundle_id=${RUSTDESK_BUNDLE_ID:-}
 executable=${RUSTDESK_EXECUTABLE:-}
@@ -64,16 +64,16 @@ read_plist() {
 }
 
 stop_app() {
-    say "- 正在退出 RustDesk Yan..."
-    run_logged osascript -e 'tell application "RustDesk Yan" to quit' || true
+    say "- 正在退出 RustDesk..."
+    run_logged osascript -e 'tell application "RustDesk" to quit' || true
     sleep "$sleep_seconds"
-    run_logged pkill -x "RustDesk Yan" || true
+    run_logged pkill -x "RustDesk" || true
     run_logged pkill -f "$app/Contents/MacOS/" || true
 
     elapsed=0
-    while pgrep -x "RustDesk Yan" >/dev/null 2>&1; do
+    while pgrep -x "RustDesk" >/dev/null 2>&1; do
         if [ "$elapsed" -ge 10 ]; then
-            fail "RustDesk Yan 进程仍未退出，请手动结束后重试。"
+            fail "RustDesk 进程仍未退出，请手动结束后重试。"
         fi
         sleep 1
         elapsed=$((elapsed + 1))
@@ -109,7 +109,7 @@ repair_signature_if_needed() {
     fi
     if ! run_logged codesign --force --sign - "$app"; then
         run_logged sudo codesign --force --sign - "$app" || \
-            fail "无法为 RustDesk Yan.app 重新签名。"
+            fail "无法为 RustDesk.app 重新签名。"
     fi
     run_logged codesign --verify --deep --strict --verbose=2 "$app" || \
         fail "临时签名完成后校验仍失败。"
@@ -129,7 +129,7 @@ if [ -z "$executable" ] && [ -f "$app/Contents/Info.plist" ]; then
 fi
 [ -z "$executable" ] || [ -x "$executable" ] || fail "应用主程序不存在或不可执行：$executable"
 
-say "RustDesk Yan macOS 启动修复"
+say "RustDesk macOS 启动修复"
 say "应用：$app"
 say "Bundle ID：$bundle_id"
 [ -n "$log_file" ] && say "日志文件：$log_file"
@@ -139,8 +139,8 @@ stop_app
 clear_quarantine
 repair_signature_if_needed
 
-say "- 正在启动 RustDesk Yan..."
-run_logged "$open_command" -n "$app" || fail "无法启动 RustDesk Yan。"
+say "- 正在启动 RustDesk..."
+run_logged "$open_command" -n "$app" || fail "无法启动 RustDesk。"
 sleep "$sleep_seconds"
 
 say ""

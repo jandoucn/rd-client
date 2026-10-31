@@ -1,5 +1,5 @@
 [Unit]
-Description=RustDesk Yan
+Description=RustDesk
 Requires=network.target
 After=systemd-user-sessions.service
 

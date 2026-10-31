@@ -62,7 +62,7 @@ fn get_update_temp_dir_string() -> String {
 
 const ROOT_UPDATE_RESULT_PATH: &str = "/var/root/.rustdeskupdate_result";
 const ROOT_UPDATE_RESULT_CLAIM_PATH: &str = "/var/root/.rustdeskupdate_result.claimed";
-const USER_UPDATE_RESULT_ROOT: &str = "/Library/Application Support/RustDesk Yan/update-results";
+const USER_UPDATE_RESULT_ROOT: &str = "/Library/Application Support/RustDesk/update-results";
 const ROOT_UPDATE_LOCK_PATH: &str = "/var/run/rustdesk-update.lock";
 
 fn acquire_root_update_lock() -> ResultType<std::fs::File> {
@@ -143,7 +143,7 @@ fn ensure_user_update_result_directory(uid: u32) -> ResultType<()> {
         return Ok(());
     }
     let app_support = Path::new("/Library/Application Support");
-    let product_dir = app_support.join("RustDesk Yan");
+    let product_dir = app_support.join("RustDesk");
     let result_root = Path::new(USER_UPDATE_RESULT_ROOT);
     ensure_root_owned_directory(&product_dir, 0o755)?;
     ensure_root_owned_directory(result_root, 0o755)?;

@@ -990,13 +990,13 @@ jobs:
         if: env.MACOS_P12_BASE64 == null || env.MACOS_P12_BASE64 == ''
         run: |
           python3 .github/scripts/validate-macos-app-version.py \
-            "./flutter/build/macos/Build/Products/Release/RustDesk Yan.app" \
+            "./flutter/build/macos/Build/Products/Release/RustDesk.app" \
             --version "${{ env.VERSION }}" \
             --build "${{ env.BUILD_SEQ }}"
           # Xcode already ad-hoc signed the app with hardened runtime off.
           # The copied service is unsigned. Sign that binary, then reseal the
           # app without --options runtime so Gatekeeper still accepts xattr -cr.
-          app="./flutter/build/macos/Build/Products/Release/RustDesk Yan.app"
+          app="./flutter/build/macos/Build/Products/Release/RustDesk.app"
           codesign --force --sign - "$app/Contents/MacOS/service"
           codesign --force --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
@@ -1013,8 +1013,8 @@ jobs:
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
-          app="./flutter/build/macos/Build/Products/Release/RustDesk Yan.app"
-          create-dmg --icon "RustDesk Yan.app" 200 190 --hide-extension "RustDesk Yan.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-${{ matrix.job.arch }}.dmg "$app"
+          app="./flutter/build/macos/Build/Products/Release/RustDesk.app"
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-${{ matrix.job.arch }}.dmg "$app"
 
       - name: Upload unsigned macOS app
         if: env.UPLOAD_ARTIFACT == 'true' && (env.MACOS_P12_BASE64 == null || env.MACOS_P12_BASE64 == '')
@@ -1027,7 +1027,7 @@ jobs:
         if: env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'
         run: |
           python3 .github/scripts/validate-macos-app-version.py \
-            "./flutter/build/macos/Build/Products/Release/RustDesk Yan.app" \
+            "./flutter/build/macos/Build/Products/Release/RustDesk.app" \
             --version "${{ env.VERSION }}" \
             --build "${{ env.BUILD_SEQ }}"
           # Patch create-dmg to give more attempts to unmount image
@@ -1040,12 +1040,12 @@ jobs:
           # start sign the rustdesk.app and dmg
           rm -rf *.dmg || true
           # the identity secret carries its own shell quoting, so expand it inline like the dmg codesign below
-          app="./flutter/build/macos/Build/Products/Release/RustDesk Yan.app"
+          app="./flutter/build/macos/Build/Products/Release/RustDesk.app"
           bash ./.github/scripts/sign-macos-app.sh \
             "$app" \
             ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
             ./flutter/macos/Runner/Release.entitlements
-          create-dmg --icon "RustDesk Yan.app" 200 190 --hide-extension "RustDesk Yan.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-macos.dmg "$app"
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-macos.dmg "$app"
           codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-macos.dmg -vvv
           # notarize the rustdesk-${{ env.VERSION }}-${{ env.EDITION }}-macos.dmg
           rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}-${{ env.BUILD_SEQ }}-${{ env.EDITION }}-macos.dmg

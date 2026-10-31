@@ -39,7 +39,7 @@ BEGIN
    VALUE "FileVersion", "{version}+{build}\0"
    VALUE "ProductVersion", "{version}+{build}\0"
    VALUE "FileDescription", "RustDesk Management Agent\0"
-   VALUE "ProductName", "RustDesk Yan\0"
+   VALUE "ProductName", "RustDesk\0"
    VALUE "OriginalFilename", "rustdesk-management-agent.exe\0"
   END
  END
