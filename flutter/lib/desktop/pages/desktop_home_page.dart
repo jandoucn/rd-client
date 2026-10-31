@@ -14,6 +14,9 @@ import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
 import 'package:flutter_hbb/desktop/widgets/desktop_update_card.dart';
+import 'package:flutter_hbb/desktop/widgets/mac_permission_guide.dart';
+import 'package:flutter_hbb/desktop/widgets/mac_permission_guide_runtime.dart';
+import 'package:flutter_hbb/desktop/widgets/mac_quit_offline.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -58,6 +61,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   StreamSubscription? _uniLinksSubscription;
   var svcStopped = false.obs;
   var watchIsCanScreenRecording = false;
+  MacPermissionGuide? _macPermissionGuide;
   var watchIsProcessTrust = false;
   var watchIsInputMonitoring = false;
   var watchIsCanRecordAudio = false;
@@ -766,7 +770,12 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     _leftPaneCollapsed.value = desktopSidebarCollapsedFromLocalOption(
       bind.getLocalFlutterOption(k: kOptionDesktopSidebarCollapsed),
     );
+    startMacPermissionGuide().then((guide) => _macPermissionGuide = guide);
+    if (isMacOS) {
+      installMacQuitOffline((k) => bind.mainSetCommon(key: k, value: 'Y'));
+    }
     _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
+      if (_macPermissionGuide?.tick() == true) setState(() {});
       await gFFI.serverModel.fetchID();
       final error = await bind.mainGetError();
       if (systemError != error) {

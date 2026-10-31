@@ -37,6 +37,17 @@ class RdPlatformChannel {
         .invokeMethod("setWindowTheme", {"themeName": theme.name});
   }
 
+  /// Handle the macOS Dock "reopen" request forwarded by the native delegate
+  /// while the main window is hidden.
+  void setReopenMainWindowHandler(Future<void> Function() onReopen) {
+    _hostMethodChannel.setMethodCallHandler((call) async {
+      if (call.method == "reopenMainWindow") {
+        await onReopen();
+      }
+      return null;
+    });
+  }
+
   /// Terminate .app manually.
   Future<void> terminate() {
     assert(isMacOS);

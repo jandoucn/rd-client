@@ -18,6 +18,7 @@ import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_hbb/utils/platform_channel.dart';
+import 'package:flutter_hbb/utils/window_close_policy.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:get/get_rx/src/rx_workers/utils/debouncer.dart';
@@ -2847,6 +2848,14 @@ Future<void> onActiveWindowChanged() async {
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
+    if (!quitWhenAllWindowsClosed(isMacOS: isMacOS)) {
+      try {
+        await rustDeskWinManager.closeAllSubWindows();
+      } catch (err) {
+        debugPrintStack(label: "$err");
+      }
+      return;
+    }
     // close all sub windows
     try {
       if (isLinux) {

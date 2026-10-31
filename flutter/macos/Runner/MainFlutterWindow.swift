@@ -36,6 +36,9 @@ class RelativeMouseState {
 }
 
 class MainFlutterWindow: NSWindow {
+    /// Host channel of the main engine; the Dock reopen request is sent here.
+    static var mainHostChannel: FlutterMethodChannel?
+
     private static let fullscreenWorkAreaSizes = NSMapTable<NSWindow, NSValue>(
         keyOptions: [.weakMemory, .objectPointerPersonality],
         valueOptions: .strongMemory
@@ -64,7 +67,7 @@ class MainFlutterWindow: NSWindow {
         self.setFrame(windowFrame, display: true)
         // register self method handler
         let registrar = flutterViewController.registrar(forPlugin: "RustDeskPlugin")
-        setMethodHandler(registrar: registrar)
+        MainFlutterWindow.mainHostChannel = setMethodHandler(registrar: registrar)
 
         RegisterGeneratedPlugins(registry: flutterViewController)
 
@@ -198,7 +201,8 @@ class MainFlutterWindow: NSWindow {
         }
     }
 
-    public func setMethodHandler(registrar: FlutterPluginRegistrar) {
+    @discardableResult
+    public func setMethodHandler(registrar: FlutterPluginRegistrar) -> FlutterMethodChannel {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
         channel.setMethodCallHandler({
             (call, result) -> Void in
@@ -312,5 +316,6 @@ class MainFlutterWindow: NSWindow {
                     result(FlutterMethodNotImplemented)
                 }
         })
+        return channel
     }
 }

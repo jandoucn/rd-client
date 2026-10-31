@@ -520,7 +520,7 @@ fn update_daemon_agent(agent_plist_file: String, update_source_dir: String, sync
     }
 }
 
-fn correct_app_name(s: &str) -> String {
+pub(super) fn correct_app_name(s: &str) -> String {
     let mut s = s.to_owned();
     if let Some(bundleid) = get_bundle_id() {
         s = s.replace("com.carriez.rustdesk", &bundleid);
@@ -1865,6 +1865,13 @@ pub fn update_from_dmg_as_root(
         bail!("[root-update] Active session detected after extraction, deferring update.");
     }
 
+    let stale_privacy_reset = super::macos_tcc::stale_privacy_reset_for_update(
+        &app_bundle,
+        &src_app,
+        "privacy_uids",
+        &format!("{}/rustdesk_root_update.log", tmp_dir),
+        &super::macos_tcc::privacy_handled_marker(&runtime_app_name, event.build_seq)?,
+    );
     // Let the detached-script launch settle before taking the affected-user
     // snapshot. The final IPC check then happens after the delay and as close
     // as possible to stopping those exact launchd domains.
@@ -2304,6 +2311,10 @@ relaunch_gui() {{
 rollback_transaction() {{
     [ "$rollback_done" -eq 0 ] || return 0
     rollback_done=1
+    if [ "$privacy_reset_done" -ne 0 ]; then
+        echo "[root-update] CRITICAL: rolled back after stale privacy grants were reset" >> {tmp_dir}/rustdesk_root_update.log
+        /usr/bin/logger -t rustdesk-root-update "CRITICAL: rolled back after stale privacy grants were reset" || true
+    fi
     rm -f "$installed_result_stage" 2>/dev/null || true
     restore_failed=0
     if [ "$install_topology" = "managed" ]; then
@@ -2343,6 +2354,8 @@ rollback_transaction() {{
         echo "[root-update] Rollback verified healthy" >> {tmp_dir}/rustdesk_root_update.log
     fi
 }}
+privacy_uids="{uid_list}"
+{stale_privacy_reset}
 trap rollback_transaction EXIT
 for agent_uid in {uid_list}; do
     for pid in $(pgrep -u "$agent_uid" -x "{app_name}" || true); do
@@ -2459,7 +2472,7 @@ if [ "$install_topology" = "managed" ]; then
 elif ! codesign --verify --deep --strict "{app_bundle}" >> {tmp_dir}/rustdesk_root_update.log 2>&1; then
     echo "[root-update] standalone bundle verification failed" >> {tmp_dir}/rustdesk_root_update.log
     exit 1
-elif [ -z "$gui_uids" ] || ! relaunch_gui; then
+elif [ -z "$gui_uids" ] || ! reset_stale_privacy || ! relaunch_gui; then
     echo "[root-update] standalone GUI failed readiness check" >> {tmp_dir}/rustdesk_root_update.log
     exit 1
 fi
@@ -2483,6 +2496,7 @@ if ! rm -rf "{app_bundle}.bak"; then
     echo "[root-update] WARNING: committed update but could not remove backup" >> {tmp_dir}/rustdesk_root_update.log
 fi
 if [ "$install_topology" = "managed" ]; then
+    reset_stale_privacy
     relaunch_gui || echo "[root-update] WARNING: GUI relaunch failed after managed commit" >> {tmp_dir}/rustdesk_root_update.log
 fi
 echo "[root-update] Done!" >> {tmp_dir}/rustdesk_root_update.log
@@ -2512,6 +2526,7 @@ rm -rf "{tmp_dir}"
         installed_app_uid = installed_app_uid,
         installed_app_gid = installed_app_gid,
         result_uid = result_uid,
+        stale_privacy_reset = stale_privacy_reset,
     );
 
     {

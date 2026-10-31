@@ -132,6 +132,27 @@ pub extern "C" fn handle_applicationShouldOpenUntitledFile() {
     crate::platform::macos::handle_application_should_open_untitled_file();
 }
 
+/// Called by the native `applicationWillTerminate`, independent of which
+/// Flutter engine currently receives exit requests.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn rustdesk_mac_will_quit() {
+    // The connection manager (--cm) shares this delegate and quits after every
+    // session; only the main window's quit may take the device offline.
+    if !crate::is_main() {
+        return;
+    }
+    crate::platform::macos_tcc::go_offline_for_quit();
+}
+
+/// Called by the native delegate when the system is logging out, restarting
+/// or shutting down: that termination must leave the service online.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn rustdesk_mac_mark_programmatic_quit() {
+    crate::platform::macos_tcc::mark_programmatic_quit();
+}
+
 #[cfg(windows)]
 #[no_mangle]
 pub extern "C" fn rustdesk_core_main_args(args_len: *mut c_int) -> *mut *mut c_char {

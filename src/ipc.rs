@@ -902,6 +902,7 @@ async fn handle(data: Data, stream: &mut Connection) {
                     }
                     #[cfg(target_os = "macos")]
                     {
+                        crate::platform::macos_tcc::mark_programmatic_quit();
                         // our launchagent interval is 1 second
                         hbb_common::sleep(1.5).await;
                         std::process::Command::new("open")

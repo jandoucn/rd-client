@@ -2715,6 +2715,15 @@ pub fn main_get_printer_names() -> SyncReturn<String> {
 }
 
 pub fn main_get_common(key: String) -> String {
+    #[cfg(target_os = "macos")]
+    if key == "mac-has-active-incoming-connections" {
+        return crate::platform::macos_tcc::has_active_incoming_connections().to_string();
+    }
+    #[cfg(target_os = "macos")]
+    // Blocks on the administrator prompt; called once per build by the GUI.
+    if let Some(missing) = key.strip_prefix("mac-admin-setup:") {
+        return crate::platform::macos_tcc::run_admin_setup(missing);
+    }
     #[cfg(target_os = "android")]
     if key == "pending-android-update-ready" {
         return crate::updater::pending_android_update_ready();
@@ -2820,6 +2829,16 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(target_os = "macos")]
+    if _key == "mac-programmatic-quit" {
+        crate::platform::macos_tcc::mark_programmatic_quit();
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if _key == "mac-restore-after-quit" {
+        crate::platform::macos_tcc::restore_online_after_quit();
+        return;
+    }
     #[cfg(not(target_os = "ios"))]
     if _key == "install-verified-update" {
         if let Err(err) = crate::updater::install_update_now() {
