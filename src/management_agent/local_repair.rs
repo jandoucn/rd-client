@@ -484,12 +484,17 @@ fn prepare_checked(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String> {
     }
     let _package = package_gate::lock_verified_file(&source, approved)?;
     let metadata = super::msi_metadata::inspect(&source)?;
-    let registered = super::msi_metadata::installed_source(&metadata.product_code)?;
+    let registered = super::msi_metadata::registered_package(&metadata.product_code, &source)?;
     let name = package_gate::cache_name(&approved.primary, "msi")?;
-    if registered.package_name != name {
+    if registered.package_name() != name {
         return Err("local repair MSI basename differs from registered source".into());
     }
-    let _registered = package_gate::lock_verified_file(&registered.source, approved)?;
+    let _registered = match &registered {
+        super::msi_metadata::RegisteredPackage::Source(installed) => {
+            Some(package_gate::lock_verified_file(&installed.source, approved)?)
+        }
+        super::msi_metadata::RegisteredPackage::PackageCode { .. } => None,
+    };
     let edition = if key.ends_with("sos") {
         "sos"
     } else {
@@ -1537,17 +1542,25 @@ impl Backend for LocalBackend {
         self.wait_ready(false)?;
         self.verify_agent()?;
         original_identity(&self.directory, &self.plan)?;
-        let registered = super::msi_metadata::installed_source(&self.plan.product_code)?;
-        let _source = package_gate::lock_verified_file(
-            &registered.source,
-            &hbb_common::UpdateTarget {
-                size: self.plan.package.size,
-                sha256: self.plan.package.sha256.clone(),
-                ..Default::default()
-            },
+        let registered = super::msi_metadata::registered_package(
+            &self.plan.product_code,
+            &self.directory.join(&self.plan.package.relative_path),
         )?;
+        let _source = match &registered {
+            super::msi_metadata::RegisteredPackage::Source(installed) => Some(
+                package_gate::lock_verified_file(
+                    &installed.source,
+                    &hbb_common::UpdateTarget {
+                        size: self.plan.package.size,
+                        sha256: self.plan.package.sha256.clone(),
+                        ..Default::default()
+                    },
+                )?,
+            ),
+            super::msi_metadata::RegisteredPackage::PackageCode { .. } => None,
+        };
         let matches = self.inventory()?.matches_directory(&normal())?
-            && registered.package_name == self.plan.package.relative_path;
+            && registered.package_name() == self.plan.package.relative_path;
         #[cfg(test)]
         let matches = matches && !self.fail_validation;
         #[cfg(not(test))]

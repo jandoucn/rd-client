@@ -172,12 +172,18 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
     }
     let _source = package_gate::lock_verified_file(&source, approved)?;
     let metadata = super::super::msi_metadata::inspect(&source)?;
-    let registered = super::super::msi_metadata::installed_source(&metadata.product_code)?;
+    let registered =
+        super::super::msi_metadata::registered_package(&metadata.product_code, &source)?;
     let name = package_gate::cache_name(&approved.primary, "msi")?;
-    if registered.package_name != name {
+    if registered.package_name() != name {
         return Err("total loss registered source name mismatch".into());
     }
-    let _registered = package_gate::lock_verified_file(&registered.source, approved)?;
+    let _registered = match &registered {
+        super::super::msi_metadata::RegisteredPackage::Source(installed) => Some(
+            package_gate::lock_verified_file(&installed.source, approved)?,
+        ),
+        super::super::msi_metadata::RegisteredPackage::PackageCode { .. } => None,
+    };
     let edition = if key.ends_with("-sos") {
         "sos"
     } else {

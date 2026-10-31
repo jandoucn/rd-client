@@ -71,6 +71,49 @@ fn manifest_normal_install_path(manifest: &BootstrapManifest) -> String {
 struct BootstrapBudget {
     failures: u8,
     next_at: u64,
+    /// First time the agent was seen running again after a start; omitted when unset so budgets
+    /// written by this build stay readable by earlier ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    healthy_since: Option<u64>,
+}
+
+/// Two consecutive task runs (five minutes apart) seeing the agent running; the margin absorbs
+/// trigger jitter.
+const BOOTSTRAP_HEALTHY_WINDOW: u64 = 240;
+
+/// The recovery task already runs every five minutes, so one five-minute delay keeps a crash loop
+/// to a single start per run. The former one-hour tier left devices unmanaged for an hour after a
+/// second incident, and older builds never cleared it.
+const BOOTSTRAP_RETRY_DELAY: u64 = 300;
+
+/// A `next_at` further out than the retry delay can only come from an older build's one-hour
+/// tier; it must not hold back recovery after an upgrade.
+fn bootstrap_retry_due(budget: &BootstrapBudget, now: u64) -> bool {
+    now >= budget.next_at || budget.next_at > now.saturating_add(BOOTSTRAP_RETRY_DELAY)
+}
+
+/// Earlier starts stop delaying the next one only after the agent has stayed up across two task
+/// runs, so an agent that dies right after starting keeps its backoff. Budgets written by earlier
+/// builds were never cleared (7 failures on test devices), so a longer window let that old debt
+/// push the next real recovery an hour out. Returns whether the budget changed and must be saved.
+fn settle_budget(budget: &mut BootstrapBudget, running_trusted: bool, now: u64) -> bool {
+    if !running_trusted {
+        return budget.healthy_since.take().is_some();
+    }
+    if budget.failures == 0 && budget.next_at == 0 {
+        return budget.healthy_since.take().is_some();
+    }
+    match budget.healthy_since {
+        None => {
+            budget.healthy_since = Some(now);
+            true
+        }
+        Some(since) if now.saturating_sub(since) >= BOOTSTRAP_HEALTHY_WINDOW => {
+            *budget = BootstrapBudget::default();
+            true
+        }
+        Some(_) => false,
+    }
 }
 
 fn root(paths: &AgentPaths) -> PathBuf {
@@ -491,7 +534,7 @@ fn recreate_missing_agent(
             disabled_start: false,
             agent_locally_disabled: blocked,
             maintenance: false,
-            retry_due: super::unix_timestamp() >= budget.next_at,
+            retry_due: bootstrap_retry_due(&budget, super::unix_timestamp()),
         },
         recovery_windows::read_intent()? == recovery::Intent::Enabled,
     );
@@ -536,8 +579,7 @@ fn recreate_missing_agent(
     }
     super::workspace::verify_restore_target(&paths.state.join("service-recovery-enabled"), false)?;
     budget.failures = budget.failures.saturating_add(1);
-    budget.next_at =
-        super::unix_timestamp().saturating_add(if budget.failures <= 3 { 300 } else { 3600 });
+    budget.next_at = super::unix_timestamp().saturating_add(BOOTSTRAP_RETRY_DELAY);
     save_budget(budget_path, budget)?;
     let mut args: Vec<OsString> = vec![
         "--service".into(),
@@ -697,7 +739,7 @@ fn restore_missing_agent(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => BootstrapBudget::default(),
         Err(_) => return Err("agent restore budget unreadable".into()),
     };
-    if super::unix_timestamp() < budget.next_at {
+    if !bootstrap_retry_due(&budget, super::unix_timestamp()) {
         return Err("agent restore budget deferred".into());
     }
     let build: serde_json::Value = serde_json::from_str(include_str!("../../version.json"))
@@ -706,14 +748,40 @@ fn restore_missing_agent(
         .as_u64()
         .ok_or("agent restore build absent")?;
     #[cfg(not(test))]
-    let key:Option<Vec<u8>>=None;
-    #[cfg(test)]let key=RESTORE_KEY_FIXTURE.with(|value|value.borrow().clone());
-    super::agent_restore::restore(&manifest.agent_sha256,config.edition.name(),config.package_kind.extension(),build,key.as_deref(),||{
-        check()?;budget.failures=budget.failures.saturating_add(1);budget.next_at=super::unix_timestamp().saturating_add(if budget.failures<=3{300}else{3600});save_budget(&budget_path,&budget)
-    },&check)?;
-    check()?;service.start::<&str>(&[]).map_err(|e|format!("agent restore start failed: {e}"))?;
-    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(30);
-    loop{let status=service.query_status().map_err(|e|e.to_string())?;if status.current_state==ServiceState::Running&&status.process_id.is_some(){return Ok(());}if status.current_state!=ServiceState::StartPending||std::time::Instant::now()>=deadline{return Err("restored agent did not reach Running".into());}std::thread::sleep(std::time::Duration::from_millis(250));}
+    let key: Option<Vec<u8>> = None;
+    #[cfg(test)]
+    let key = RESTORE_KEY_FIXTURE.with(|value| value.borrow().clone());
+    super::agent_restore::restore(
+        &manifest.agent_sha256,
+        config.edition.name(),
+        config.package_kind.extension(),
+        build,
+        key.as_deref(),
+        || {
+            check()?;
+            budget.failures = budget.failures.saturating_add(1);
+            budget.next_at = super::unix_timestamp().saturating_add(BOOTSTRAP_RETRY_DELAY);
+            save_budget(&budget_path, &budget)
+        },
+        &check,
+    )?;
+    check()?;
+    service
+        .start::<&str>(&[])
+        .map_err(|e| format!("agent restore start failed: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = service.query_status().map_err(|e| e.to_string())?;
+        if status.current_state == ServiceState::Running && status.process_id.is_some() {
+            return Ok(());
+        }
+        if status.current_state != ServiceState::StartPending
+            || std::time::Instant::now() >= deadline
+        {
+            return Err("restored agent did not reach Running".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String> {
@@ -827,12 +895,21 @@ pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String
         agent_locally_disabled: super::purge_marker_path(paths).exists()
             || paths.state.join("disable-agent").exists(),
         maintenance: paths.state.join("maintenance.json").exists(),
-        retry_due: super::unix_timestamp() >= budget.next_at,
+        retry_due: bootstrap_retry_due(&budget, super::unix_timestamp()),
     });
+    if action != BootstrapAction::StartAgent
+        && settle_budget(
+            &mut budget,
+            observed.current_state == ServiceState::Running && trusted,
+            super::unix_timestamp(),
+        )
+    {
+        save_budget(&budget_path, &budget)?;
+    }
     if action == BootstrapAction::StartAgent {
+        budget.healthy_since = None;
         budget.failures = budget.failures.saturating_add(1);
-        budget.next_at =
-            super::unix_timestamp().saturating_add(if budget.failures <= 3 { 300 } else { 3600 });
+        budget.next_at = super::unix_timestamp().saturating_add(BOOTSTRAP_RETRY_DELAY);
         save_budget(&budget_path, &budget)?;
         service
             .start::<&str>(&[])
@@ -906,6 +983,7 @@ mod tests {
                 &BootstrapBudget {
                     failures: 0,
                     next_at: 0,
+                    healthy_since: None,
                 },
             )
             .unwrap();
@@ -926,6 +1004,7 @@ mod tests {
                         &BootstrapBudget {
                             failures: 1,
                             next_at: 300,
+                            healthy_since: None,
                         },
                     )
                 },
@@ -1021,6 +1100,7 @@ mod tests {
             &BootstrapBudget {
                 failures: 2,
                 next_at: 17,
+                healthy_since: None,
             },
         )
         .unwrap();
@@ -1041,6 +1121,7 @@ mod tests {
                     &BootstrapBudget {
                         failures: 3,
                         next_at: 300,
+                        healthy_since: None,
                     },
                 )
             },
@@ -1084,6 +1165,7 @@ mod tests {
                     &BootstrapBudget {
                         failures: 1,
                         next_at: 300,
+                        healthy_since: None,
                     },
                 )
             },
@@ -1646,6 +1728,7 @@ mod tests {
             &BootstrapBudget {
                 failures: 1,
                 next_at: 1000,
+                healthy_since: None,
             },
         )
         .unwrap();
@@ -1654,6 +1737,7 @@ mod tests {
             &BootstrapBudget {
                 failures: 2,
                 next_at: 2000,
+                healthy_since: None,
             },
         )
         .unwrap();
@@ -1727,5 +1811,76 @@ mod tests {
                 "scheduler readback missing {expected}: {source}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_window_tests {
+    use super::*;
+
+    fn spent() -> BootstrapBudget {
+        BootstrapBudget {
+            failures: 4,
+            next_at: 5_000,
+            healthy_since: None,
+        }
+    }
+
+    #[test]
+    fn a_running_agent_clears_the_budget_on_the_next_task_run() {
+        let mut budget = spent();
+        assert!(settle_budget(&mut budget, true, 1_000));
+        assert_eq!((budget.failures, budget.healthy_since), (4, Some(1_000)));
+        assert!(!settle_budget(&mut budget, true, 1_239));
+        assert_eq!(budget.failures, 4);
+        // The next five-minute task run, even when triggered a little early.
+        assert!(settle_budget(&mut budget, true, 1_290));
+        assert_eq!(
+            (budget.failures, budget.next_at, budget.healthy_since),
+            (0, 0, None)
+        );
+        assert!(!settle_budget(&mut budget, true, 9_000));
+    }
+
+    #[test]
+    fn a_crash_loop_restarts_the_window() {
+        let mut budget = spent();
+        settle_budget(&mut budget, true, 1_000);
+        assert!(settle_budget(&mut budget, false, 1_300));
+        assert_eq!(budget.healthy_since, None);
+        settle_budget(&mut budget, true, 1_400);
+        assert!(!settle_budget(&mut budget, true, 1_500));
+        assert_eq!(budget.failures, 4);
+    }
+
+    #[test]
+    fn retries_wait_at_most_one_task_run_even_with_an_old_hour_long_budget() {
+        let pending = BootstrapBudget {
+            failures: 9,
+            next_at: 1_300,
+            healthy_since: None,
+        };
+        assert!(!bootstrap_retry_due(&pending, 1_000));
+        assert!(bootstrap_retry_due(&pending, 1_300));
+        // Written by an older build's one-hour tier.
+        let legacy = BootstrapBudget {
+            failures: 7,
+            next_at: 1_000 + 3_600,
+            healthy_since: None,
+        };
+        assert!(bootstrap_retry_due(&legacy, 1_000));
+        assert_eq!(BOOTSTRAP_RETRY_DELAY, 300);
+    }
+
+    #[test]
+    fn the_saved_shape_stays_readable_by_earlier_builds() {
+        let bytes = serde_json::to_vec(&spent()).unwrap();
+        assert_eq!(bytes, br#"{"failures":4,"next_at":5000}"#);
+        let old: BootstrapBudget =
+            serde_json::from_slice(br#"{"failures":7,"next_at":1793340901}"#).unwrap();
+        assert_eq!(
+            (old.failures, old.next_at, old.healthy_since),
+            (7, 1_793_340_901, None)
+        );
     }
 }

@@ -2090,6 +2090,11 @@ fn inspect_and_start_service(
 ) -> Result<(), String> {
     local_event_runtime::reconcile_running(state, paths);
     let observed = recovery_windows::inspect(state, paths)?;
+    if healthy_on_normal_install(&observed, &paths.client) {
+        // A recovery error only describes a failure that is still current; once the service runs
+        // from the normal install again, keeping it made the console report old failures.
+        state.service_recovery_error.clear();
+    }
     let intent = recovery_windows::read_intent()?;
     let mut budget = recovery::RetryBudget {
         failures: state.service_recovery_failures,
@@ -2138,12 +2143,17 @@ fn inspect_and_start_service(
         }
     }
     // Save the retry boundary before a side effect so process restarts cannot cause a start storm.
+    let previous = budget;
     budget.record_failure(unix_timestamp());
     state.service_recovery_failures = budget.failures;
     state.service_recovery_next_at = budget.next_at;
     state.service_healthy_since = budget.healthy_since;
     write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())?;
     let local_event = local_event_runtime::start_existing(state, paths);
+    let settled = settle_start_budget(previous, budget, &local_event.action);
+    state.service_recovery_failures = settled.failures;
+    state.service_recovery_next_at = settled.next_at;
+    state.service_healthy_since = settled.healthy_since;
     match local_event.action {
         Ok(true) => {
             state.last_service_recovery_at = Some(unix_timestamp().to_string());
@@ -2159,6 +2169,33 @@ fn inspect_and_start_service(
         local_event.reporting,
     );
     write_state(&paths.state.join("agent.json"), state).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+/// `Ok(false)` from a start means nothing was started: another worker held the install guard in
+/// the same tick (R0 and R3 compete for it), or the service had left the stopped state. Counting
+/// that as a failed recovery pushed the next real attempt from 30 seconds out to minutes or an hour.
+fn settle_start_budget(
+    previous: recovery::RetryBudget,
+    attempted: recovery::RetryBudget,
+    action: &Result<bool, String>,
+) -> recovery::RetryBudget {
+    if matches!(action, Ok(false)) {
+        previous
+    } else {
+        attempted
+    }
+}
+
+#[cfg(windows)]
+fn healthy_on_normal_install(observed: &recovery_windows::ServiceObservation, fallback: &Path) -> bool {
+    observed.state == recovery::ServiceState::Running
+        && observed.trusted_path
+        && observed.normal_present
+        && !observed
+            .command
+            .to_ascii_lowercase()
+            .contains(&fallback.to_string_lossy().to_ascii_lowercase())
 }
 
 #[cfg(windows)]
@@ -2324,6 +2361,53 @@ pub fn cleanup(root: &Path, normal_install_path: Option<&Path>) -> Result<(), St
 #[cfg(all(test, windows))]
 #[path = "../tests/management_agent_status_contract/legacy_unknown_fields.rs"]
 mod legacy_unknown_fields_tests;
+
+#[cfg(all(test, windows))]
+mod recovery_error_tests {
+    use super::*;
+
+    fn observed(state: recovery::ServiceState, command: &str) -> recovery_windows::ServiceObservation {
+        recovery_windows::ServiceObservation {
+            state,
+            command: command.into(),
+            trusted_path: true,
+            normal_present: true,
+            fallback_present: true,
+            disabled_start: false,
+            process_id: Some(1),
+            account: Some("LocalSystem".into()),
+            start_type: "auto".into(),
+        }
+    }
+    const FALLBACK: &str = r"C:\ProgramData\RustDesk\Client\standard\RustDesk";
+
+    #[test]
+    fn a_start_that_did_nothing_does_not_count_as_a_failure() {
+        let previous = recovery::RetryBudget { failures: 1, next_at: 100, healthy_since: None };
+        let mut attempted = previous;
+        attempted.record_failure(200);
+        assert_eq!(settle_start_budget(previous, attempted, &Ok(false)), previous);
+        assert_eq!(settle_start_budget(previous, attempted, &Ok(true)), attempted);
+        assert_eq!(settle_start_budget(previous, attempted, &Err("start failed".into())), attempted);
+        assert_eq!(attempted.failures, 2);
+    }
+
+    #[test]
+    fn stale_recovery_error_clears_only_when_the_normal_install_serves() {
+        let fallback = Path::new(FALLBACK);
+        let normal = r#""C:\Program Files\RustDesk\RustDesk.exe" --service"#;
+        assert!(healthy_on_normal_install(&observed(recovery::ServiceState::Running, normal), fallback));
+        assert!(!healthy_on_normal_install(&observed(recovery::ServiceState::Stopped, normal), fallback));
+        let on_fallback = format!(r#""{}\RustDesk.exe" --service"#, FALLBACK.to_ascii_uppercase());
+        assert!(!healthy_on_normal_install(&observed(recovery::ServiceState::Running, &on_fallback), fallback));
+        let mut untrusted = observed(recovery::ServiceState::Running, normal);
+        untrusted.trusted_path = false;
+        assert!(!healthy_on_normal_install(&untrusted, fallback));
+        let mut deleted = observed(recovery::ServiceState::Running, normal);
+        deleted.normal_present = false;
+        assert!(!healthy_on_normal_install(&deleted, fallback));
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -120,13 +120,24 @@ fn terminal(
     )?;
     Ok(())
 }
+/// Set by an R3 action right before it may change the service configuration. Earlier failures
+/// left the service untouched (staging only writes the fallback directory) and close the attempt so
+/// a later cycle can try again; failures after it keep the attempt open for reconciliation.
+#[derive(Default)]
+pub struct MutationMark(bool);
+impl MutationMark {
+    pub fn set(&mut self) {
+        self.0 = true;
+    }
+}
+
 pub fn fallback_owned(
     context: Option<&EventContext>,
     now: u64,
-    action: impl FnOnce() -> Result<bool, String>,
+    action: impl FnOnce(&mut MutationMark) -> Result<bool, String>,
 ) -> Result<bool, String> {
     let Some(context) = context else {
-        return action();
+        return action(&mut MutationMark::default());
     };
     let mut log = LocalEvents::open(&context.path).map_err(event_error)?;
     if log.active_fallback().is_some() {
@@ -136,19 +147,66 @@ pub fn fallback_owned(
     let operation = log
         .begin_fallback(&context.binding, now)
         .map_err(event_error)?;
-    let result = action();
-    // An error after staging/configuration cannot prove that no mutation occurred.
-    if matches!(result, Ok(true)) {
-        terminal(
-            &mut log,
-            &operation,
-            &context.binding,
-            Outcome::Succeeded,
-            now,
-        )
-        .map_err(event_error)?;
+    let mut mark = MutationMark::default();
+    let result = action(&mut mark);
+    let outcome = match &result {
+        Ok(true) => Some(Outcome::Succeeded),
+        // Nothing was switched; the attempt is over and may be retried later.
+        Ok(false) | Err(_) if !mark.0 => Some(Outcome::Failed),
+        // An error after staging/configuration cannot prove that no mutation occurred.
+        _ => None,
+    };
+    if let Some(outcome) = outcome {
+        terminal(&mut log, &operation, &context.binding, outcome, now).map_err(event_error)?;
     }
     result
+}
+
+/// Resolves an R3 attempt left open by a crash or a failed start. `inspect` returns what is needed
+/// to finish when the service already points at the verified fallback, or `None` when the switch
+/// never reached the service; `finish` starts it and confirms health. Returns `None` when there was
+/// nothing to resume (including an attempt closed here as never applied).
+pub fn resume_fallback<T>(
+    context: Option<&EventContext>,
+    now: u64,
+    inspect: impl FnOnce() -> Result<Option<T>, String>,
+    finish: impl FnOnce(T) -> Result<bool, String>,
+) -> Result<Option<bool>, String> {
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let mut log = LocalEvents::open(&context.path).map_err(event_error)?;
+    let Some((operation, binding)) = log.active_fallback() else {
+        return Ok(None);
+    };
+    if !same_installation(&binding, &context.binding) {
+        return Err("local R3 original installation mismatch".into());
+    }
+    let Some(prepared) = inspect()? else {
+        terminal(&mut log, &operation, &binding, Outcome::Failed, now).map_err(event_error)?;
+        return Ok(None);
+    };
+    if !finish(prepared)? {
+        return Err("local R3 resume unconfirmed".into());
+    }
+    terminal(&mut log, &operation, &binding, Outcome::Succeeded, now).map_err(event_error)?;
+    Ok(Some(true))
+}
+
+/// Closes an R3 attempt left open once the normal install serves again: the switch it started
+/// was superseded, so it is recorded as failed rather than as a successful fallback.
+pub fn close_superseded_fallback(context: Option<&EventContext>, now: u64) -> Result<(), String> {
+    let Some(context) = context else {
+        return Ok(());
+    };
+    let mut log = LocalEvents::open(&context.path).map_err(event_error)?;
+    let Some((operation, binding)) = log.active_fallback() else {
+        return Ok(());
+    };
+    if !same_installation(&binding, &context.binding) {
+        return Err("local R3 original installation mismatch".into());
+    }
+    terminal(&mut log, &operation, &binding, Outcome::Failed, now).map_err(event_error)
 }
 
 pub fn reconcile_fallback(
@@ -967,7 +1025,7 @@ mod tests {
         let f = Fixture::new();
         let mut calls = 0;
         assert_eq!(
-            fallback_owned(Some(&f.0), 100, || {
+            fallback_owned(Some(&f.0), 100, |_| {
                 calls += 1;
                 let log = f.log();
                 assert_eq!(log.pending_events()[0].payload["status"], "running");
@@ -987,16 +1045,165 @@ mod tests {
     #[test]
     fn r34_fallback_unknown_started_retains_original_generation_and_refuses_repeat() {
         let f = Fixture::new();
-        assert!(fallback_owned(Some(&f.0), 100, || Err("SCM uncertain secret".into())).is_err());
+        assert!(fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("SCM uncertain secret".into())
+        })
+        .is_err());
         let before = std::fs::read(&f.0.path).unwrap();
         let mut newer = f.0.clone();
         newer.binding.enrollment_generation = 2;
-        let result = fallback_owned(Some(&newer), 101, || {
+        let result = fallback_owned(Some(&newer), 101, |_| {
             panic!("interrupted R3 cannot reexecute")
         });
         assert!(result.unwrap_err().contains("reconciliation"));
         assert_eq!(std::fs::read(&f.0.path).unwrap(), before);
         assert!(!String::from_utf8(before).unwrap().contains("secret"));
+    }
+    #[test]
+    fn r3_failure_before_any_change_closes_the_attempt_and_allows_a_retry() {
+        let f = Fixture::new();
+        assert_eq!(
+            fallback_owned(Some(&f.0), 100, |_| Err(
+                "R3 process appeared before switch".into()
+            ))
+            .unwrap_err(),
+            "R3 process appeared before switch"
+        );
+        let log = f.log();
+        assert!(log.active_fallback().is_none());
+        assert_eq!(log.pending_events().len(), 2);
+        assert_eq!(log.pending_events()[1].payload["status"], "failed");
+        let mut calls = 0;
+        assert_eq!(
+            fallback_owned(Some(&f.0), 101, |_| {
+                calls += 1;
+                Ok(true)
+            }),
+            Ok(true)
+        );
+        assert_eq!(calls, 1);
+        assert!(f.log().active_fallback().is_none());
+    }
+    #[test]
+    fn r3_failure_after_the_switch_began_still_requires_reconciliation() {
+        let f = Fixture::new();
+        fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("R3 fallback health unconfirmed; degraded assets retained".into())
+        })
+        .unwrap_err();
+        assert!(f.log().active_fallback().is_some());
+        assert!(
+            fallback_owned(Some(&f.0), 101, |_| panic!("must not repeat"))
+                .unwrap_err()
+                .contains("reconciliation")
+        );
+    }
+    #[test]
+    fn r3_resume_finishes_a_switch_that_reached_the_service() {
+        let f = Fixture::new();
+        fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("start timed out".into())
+        })
+        .unwrap_err();
+        let mut finished = None;
+        assert_eq!(
+            resume_fallback(
+                Some(&f.0),
+                102,
+                || Ok(Some(7u64)),
+                |build| {
+                    finished = Some(build);
+                    Ok(true)
+                }
+            ),
+            Ok(Some(true))
+        );
+        assert_eq!(finished, Some(7));
+        let log = f.log();
+        assert!(log.active_fallback().is_none());
+        assert_eq!(
+            log.pending_events().last().unwrap().payload["status"],
+            "succeeded"
+        );
+    }
+    #[test]
+    fn r3_resume_closes_a_switch_that_never_reached_the_service_and_lets_a_new_one_run() {
+        let f = Fixture::new();
+        fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("agent stopped mid-switch".into())
+        })
+        .unwrap_err();
+        assert_eq!(
+            resume_fallback(
+                Some(&f.0),
+                102,
+                || Ok(None::<u64>),
+                |_| panic!("nothing to finish")
+            ),
+            Ok(None)
+        );
+        assert!(f.log().active_fallback().is_none());
+        assert_eq!(fallback_owned(Some(&f.0), 103, |_| Ok(true)), Ok(true));
+    }
+    #[test]
+    fn r3_resume_keeps_the_attempt_open_when_the_start_fails_again() {
+        let f = Fixture::new();
+        fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("start timed out".into())
+        })
+        .unwrap_err();
+        assert_eq!(
+            resume_fallback(
+                Some(&f.0),
+                102,
+                || Ok(Some(())),
+                |_| Err("still not healthy".into())
+            ),
+            Err("still not healthy".into())
+        );
+        assert!(f.log().active_fallback().is_some());
+    }
+    #[test]
+    fn r3_superseded_attempt_closes_as_failed_and_is_idempotent() {
+        let f = Fixture::new();
+        fallback_owned(Some(&f.0), 100, |mark| {
+            mark.set();
+            Err("start timed out".into())
+        })
+        .unwrap_err();
+        close_superseded_fallback(Some(&f.0), 105).unwrap();
+        let log = f.log();
+        assert!(log.active_fallback().is_none());
+        assert_eq!(
+            log.pending_events().last().unwrap().payload["status"],
+            "failed"
+        );
+        let before = std::fs::read(&f.0.path).unwrap();
+        close_superseded_fallback(Some(&f.0), 106).unwrap();
+        assert_eq!(std::fs::read(&f.0.path).unwrap(), before);
+        assert_eq!(close_superseded_fallback(None, 107), Ok(()));
+    }
+    #[test]
+    fn r3_resume_is_a_no_op_without_an_open_attempt() {
+        let f = Fixture::new();
+        assert_eq!(
+            resume_fallback(
+                Some(&f.0),
+                100,
+                || -> Result<Option<()>, String> { panic!("no attempt") },
+                |_| panic!()
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            resume_fallback(None, 100, || Ok(Some(())), |_| Ok(true)),
+            Ok(None)
+        );
     }
     #[test]
     fn r34_started_lock_failure_prevents_action_and_keeps_original_store() {
@@ -1010,7 +1217,7 @@ mod tests {
             .share_mode(0)
             .open(f.0.path.with_extension("lock"))
             .unwrap();
-        assert!(fallback_owned(Some(&f.0), 100, || panic!("no Started no mutation")).is_err());
+        assert!(fallback_owned(Some(&f.0), 100, |_| panic!("no Started no mutation")).is_err());
         assert_eq!(std::fs::read(&f.0.path).unwrap(), before);
     }
     #[test]
@@ -1091,7 +1298,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let f = Fixture::new();
         let mut lock = None;
-        let result = fallback_owned(Some(&f.0), 100, || {
+        let result = fallback_owned(Some(&f.0), 100, |_| {
             lock = Some(
                 std::fs::OpenOptions::new()
                     .write(true)
@@ -1353,7 +1560,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         let url = format!("http://{address}");
-        fallback_owned(Some(&f.0), 100, || Ok(true)).unwrap();
+        fallback_owned(Some(&f.0), 100, |_| Ok(true)).unwrap();
         let (path, mut tx) = tx(&f);
         let mut backend = Files {
             context: f.0.clone(),
@@ -1395,7 +1602,11 @@ mod tests {
         .unwrap();
         assert_eq!(duplicates, 1);
         assert!(f.log().pending_events().is_empty());
-        fallback_owned(Some(&f.0), 104, || Err("unknown".into())).unwrap_err();
+        fallback_owned(Some(&f.0), 104, |mark| {
+            mark.set();
+            Err("unknown".into())
+        })
+        .unwrap_err();
         let mut log = f.log();
         let before = std::fs::read(&f.0.path).unwrap();
         assert!(command().args(["-r",r#"$db=new PDO('sqlite:'.getenv('AGENT_HTTP_FIXTURE_DB'));$db->exec('UPDATE device_agent_bindings SET generation=2');"#]).status().unwrap().success());

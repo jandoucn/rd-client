@@ -14,10 +14,144 @@ pub struct InstalledSource {
     pub source: std::path::PathBuf,
 }
 
-pub fn installed_source(product_code: &str) -> Result<InstalledSource, String> {
-    if product_code.len() != 38 || !product_code.bytes().enumerate().all(|(index, byte)| match index {
-        0 => byte == b'{', 37 => byte == b'}', 9 | 14 | 19 | 24 => byte == b'-', _ => byte.is_ascii_hexdigit(),
-    }) {
+/// How an installed product was tied to a candidate package.
+#[derive(Debug)]
+pub enum RegisteredPackage {
+    /// The registered source file still exists; callers keep hash-verifying it.
+    Source(InstalledSource),
+    /// The registered source was removed (the online updater installs from a temporary directory
+    /// that is deleted afterwards). Windows Installer accepts the identical package from another
+    /// location, so identity is proven by the installed product's package code instead.
+    PackageCode { package_name: String },
+}
+
+impl RegisteredPackage {
+    pub fn package_name(&self) -> &str {
+        match self {
+            RegisteredPackage::Source(source) => &source.package_name,
+            RegisteredPackage::PackageCode { package_name } => package_name,
+        }
+    }
+}
+
+/// Pure decision: the registered source file decides when present; otherwise the installed
+/// package code must equal the candidate's.
+pub fn removed_source_matches(
+    installed_package_code: &str,
+    candidate_package_code: &str,
+) -> Result<(), String> {
+    if !valid_guid(installed_package_code) || !valid_guid(candidate_package_code) {
+        return Err("installed MSI package code invalid".into());
+    }
+    if !installed_package_code.eq_ignore_ascii_case(candidate_package_code) {
+        return Err("installed MSI package code differs from local package".into());
+    }
+    Ok(())
+}
+
+fn valid_guid(value: &str) -> bool {
+    value.len() == 38
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            0 => byte == b'{',
+            37 => byte == b'}',
+            9 | 14 | 19 | 24 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+/// Like `installed_source`, but a removed registered source is not an error when `candidate` is
+/// the very package Windows Installer recorded for the product.
+pub fn registered_package(
+    product_code: &str,
+    candidate: &Path,
+) -> Result<RegisteredPackage, String> {
+    let (package_name, directory) = registered_location(product_code)?;
+    let source = directory.join(&package_name);
+    let missing = match std::fs::symlink_metadata(&source) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => return Err("installed MSI source unreadable".into()),
+        Ok(_) => false,
+    };
+    if !missing {
+        return installed_source(product_code).map(RegisteredPackage::Source);
+    }
+    let candidate_identity = inspect(candidate)?;
+    if candidate_identity.product_name != "RustDesk"
+        || !candidate_identity
+            .product_code
+            .eq_ignore_ascii_case(product_code)
+    {
+        return Err("installed MSI source product mismatch".into());
+    }
+    removed_source_matches(
+        &installed_package_code(product_code)?,
+        &package_code(candidate)?,
+    )?;
+    Ok(RegisteredPackage::PackageCode { package_name })
+}
+
+fn installed_package_code(product_code: &str) -> Result<String, String> {
+    let code = product_code
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let property = "PackageCode"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut buffer = vec![0u16; 64];
+    let mut count = buffer.len() as u32;
+    let status = unsafe {
+        MsiGetProductInfoW(
+            code.as_ptr(),
+            property.as_ptr(),
+            buffer.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    if status != 0 || count as usize >= buffer.len() {
+        return Err(format!("installed MSI package code query failed: {status}"));
+    }
+    String::from_utf16(&buffer[..count as usize])
+        .map_err(|_| "installed MSI package code encoding invalid".into())
+}
+
+fn package_code(path: &Path) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut summary = Handle(0);
+    let status = unsafe { MsiGetSummaryInformationW(0, wide.as_ptr(), 0, &mut summary.0) };
+    if status != 0 {
+        return Err(format!("MSI summary open failed: {status}"));
+    }
+    let (mut kind, mut integer, mut time) = (0u32, 0i32, 0u64);
+    let mut buffer = vec![0u16; 64];
+    let mut count = buffer.len() as u32;
+    // PID_REVNUMBER (9) holds the package code.
+    let status = unsafe {
+        MsiSummaryInfoGetPropertyW(
+            summary.0,
+            9,
+            &mut kind,
+            &mut integer,
+            &mut time,
+            buffer.as_mut_ptr(),
+            &mut count,
+        )
+    };
+    if status != 0 || count as usize >= buffer.len() {
+        return Err(format!("MSI package code read failed: {status}"));
+    }
+    String::from_utf16(&buffer[..count as usize])
+        .map_err(|_| "MSI package code encoding invalid".into())
+}
+
+fn registered_location(product_code: &str) -> Result<(String, std::path::PathBuf), String> {
+    if !valid_guid(product_code) {
         return Err("installed MSI product code invalid".into());
     }
     let code = product_code.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
@@ -48,6 +182,11 @@ pub fn installed_source(product_code: &str) -> Result<InstalledSource, String> {
         || directory.components().any(|part| matches!(part, Component::ParentDir)) {
         return Err("installed MSI source is not a local directory".into());
     }
+    Ok((name, directory))
+}
+
+pub fn installed_source(product_code: &str) -> Result<InstalledSource, String> {
+    let (name, directory) = registered_location(product_code)?;
     let source = directory.join(&name);
     let package = inspect(&source)?;
     if package.product_name != "RustDesk" || !package.product_code.eq_ignore_ascii_case(product_code) {
@@ -78,6 +217,27 @@ extern "system" {
     fn MsiViewFetch(view: u32, record: *mut u32) -> u32;
     fn MsiRecordGetStringW(record: u32, field: u32, buffer: *mut u16, count: *mut u32) -> u32;
     fn MsiCloseHandle(handle: u32) -> u32;
+    fn MsiGetProductInfoW(
+        product: *const u16,
+        property: *const u16,
+        value: *mut u16,
+        count: *mut u32,
+    ) -> u32;
+    fn MsiGetSummaryInformationW(
+        database: u32,
+        path: *const u16,
+        updates: u32,
+        summary: *mut u32,
+    ) -> u32;
+    fn MsiSummaryInfoGetPropertyW(
+        summary: u32,
+        property: u32,
+        kind: *mut u32,
+        integer: *mut i32,
+        time: *mut u64,
+        value: *mut u16,
+        count: *mut u32,
+    ) -> u32;
 }
 
 struct Handle(u32);
@@ -135,4 +295,56 @@ pub fn inspect(path: &Path) -> Result<PackageIdentity, String> {
         product_version: property(&database, "ProductVersion")?,
         upgrade_code: property(&database, "UpgradeCode")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INSTALLED: &str = "{0280AA40-A3B0-42A9-B304-1779653286C8}";
+
+    #[test]
+    fn removed_source_accepts_only_the_recorded_package() {
+        assert_eq!(
+            removed_source_matches(INSTALLED, &INSTALLED.to_ascii_lowercase()),
+            Ok(())
+        );
+        assert_eq!(
+            removed_source_matches(INSTALLED, "{1280AA40-A3B0-42A9-B304-1779653286C8}")
+                .unwrap_err(),
+            "installed MSI package code differs from local package"
+        );
+    }
+
+    #[test]
+    fn removed_source_rejects_malformed_codes() {
+        for bad in [
+            "",
+            "0280AA40-A3B0-42A9-B304-1779653286C8",
+            "{0280AA40-A3B0-42A9-B304-1779653286CZ}",
+            "{0280AA40A3B0-42A9-B304-1779653286C8-}",
+        ] {
+            assert_eq!(
+                removed_source_matches(INSTALLED, bad).unwrap_err(),
+                "installed MSI package code invalid"
+            );
+            assert_eq!(
+                removed_source_matches(bad, INSTALLED).unwrap_err(),
+                "installed MSI package code invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_package_name_is_reported_for_both_kinds() {
+        let removed = RegisteredPackage::PackageCode {
+            package_name: "rustdesk.msi".into(),
+        };
+        assert_eq!(removed.package_name(), "rustdesk.msi");
+        let present = RegisteredPackage::Source(InstalledSource {
+            package_name: "a.msi".into(),
+            source: "C:\\x\\a.msi".into(),
+        });
+        assert_eq!(present.package_name(), "a.msi");
+    }
 }

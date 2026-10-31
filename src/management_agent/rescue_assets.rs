@@ -68,6 +68,11 @@ fn rotation_installed_source(root: &Path, evidence: &serde_json::Value) -> Resul
     if evidence["mode"] == "isolated_fixture" {
         return Ok(());
     }
+    // A removed registered source (identity proven by package code) cannot sit inside the bundle
+    // being moved, so there is nothing to protect.
+    if evidence["mode"] == "installed" && evidence["source"].is_null() {
+        return Ok(());
+    }
     rotation_registered_source(
         root,
         Path::new(
@@ -326,7 +331,7 @@ fn fixture(root: &Path) -> Layout {
 
 #[cfg(test)]
 pub fn prepare_fixture(root: &Path, public: &[u8]) -> Result<serde_json::Value, String> {
-    prepare(&fixture(root), Some(public), |_, _, _, _| {
+    prepare(&fixture(root), Some(public), |_, _, _, _, _| {
         Ok(serde_json::json!({"mode":"isolated_fixture"}))
     })
 }
@@ -344,7 +349,7 @@ pub fn refresh_fixture(
 ) -> Result<serde_json::Value, String> {
     let mut layout = fixture(root);
     layout.transaction = transaction.into();
-    prepare(&layout, Some(public), |_, _, _, _| {
+    prepare(&layout, Some(public), |_, _, _, _, _| {
         Ok(serde_json::json!({"mode":"isolated_fixture"}))
     })
 }
@@ -361,6 +366,7 @@ pub fn installed_source_fixture(
     let msi = msi_metadata::inspect(package)?;
     check_installed_source(
         &msi,
+        package,
         &package_gate::cache_name(&target.primary, "msi")?,
         target,
         build,
@@ -422,15 +428,25 @@ pub fn prepare_installed_fixture(root: &Path, public: &[u8]) -> Result<serde_jso
 
 fn check_installed_source(
     msi: &msi_metadata::PackageIdentity,
+    package: &Path,
     name: &str,
     target: &hbb_common::UpdateTarget,
     build: u64,
 ) -> Result<serde_json::Value, String> {
-    let installed = msi_metadata::installed_source(&msi.product_code)?;
-    if installed.package_name != name {
+    // The online updater installs from a temporary directory that is deleted afterwards; the
+    // package being bundled (already verified against the signed manifest) then proves identity
+    // through the installed product's package code.
+    let registered = msi_metadata::registered_package(&msi.product_code, package)?;
+    if registered.package_name() != name {
         return Err("rescue registered MSI basename mismatch".into());
     }
-    let _source = package_gate::lock_verified_file(&installed.source, target)?;
+    let (source, _source_lock) = match &registered {
+        msi_metadata::RegisteredPackage::Source(installed) => (
+            Some(installed.source.clone()),
+            Some(package_gate::lock_verified_file(&installed.source, target)?),
+        ),
+        msi_metadata::RegisteredPackage::PackageCode { .. } => (None, None),
+    };
     let response = super::health_windows::probe_blocking(
         r"\\.\pipe\RustDesk\management-health-v1",
         &system_dirs::get().normal_install().join("RustDesk.exe"),
@@ -442,8 +458,8 @@ fn check_installed_source(
         return Err("rescue current client health unconfirmed".into());
     }
     Ok(
-        serde_json::json!({"mode":"installed","product_code":msi.product_code,"source":installed.source,
-        "package_name":installed.package_name,"sha256":target.sha256,"build_seq":response.build_seq,
+        serde_json::json!({"mode":"installed","product_code":msi.product_code,"source":source,
+        "package_name":registered.package_name(),"sha256":target.sha256,"build_seq":response.build_seq,
         "pid":response.pid,"ready":true}),
     )
 }
@@ -890,6 +906,7 @@ fn prepare(
     public: Option<&[u8]>,
     check_installed: impl Fn(
         &msi_metadata::PackageIdentity,
+        &Path,
         &str,
         &hbb_common::UpdateTarget,
         u64,
@@ -966,6 +983,8 @@ fn prepare(
         return Err("rescue original package basename mismatch".into());
     }
     let package = layout.transaction.join(&name);
+    // Kept apart: `package` is rebound to the bundled artifact further down.
+    let source_package = package.clone();
     let _locked = package_gate::lock_verified_file(&package, target)?;
     let msi = msi_metadata::inspect(&package)?;
     if msi.product_name != "RustDesk" {
@@ -984,7 +1003,7 @@ fn prepare(
     let installed_evidence = if published {
         serde_json::Value::Null
     } else {
-        check_installed(&msi, &name, target, build)?
+        check_installed(&msi, &source_package, &name, target, build)?
     };
     let identity = read(&layout.identity, 65536, true)?;
     valid_identity(&identity)?;
@@ -1165,7 +1184,7 @@ fn prepare(
         return Err("rescue live identity or configuration changed".into());
     }
     if let Some(old) = old_digest {
-        let installed_recheck = check_installed(&msi, &name, target, build)?;
+        let installed_recheck = check_installed(&msi, &source_package, &name, target, build)?;
         rotation_installed_source(destination, &installed_recheck)?;
         let previous_path = destination.join("previous");
         let previous = rescue_rotation::digest(&previous_path)?;

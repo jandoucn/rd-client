@@ -47,7 +47,7 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
     let original_metadata = msi_metadata::inspect(request.rollback_package)?;
     let target_metadata = msi_metadata::inspect(request.package)?;
     msi_metadata::verify_pair(&original_metadata,&target_metadata,&original_metadata.product_code,&target_metadata.product_code)?;
-    let installed_source = msi_metadata::installed_source(&original_metadata.product_code)?;
+    let installed_source = msi_metadata::registered_package(&original_metadata.product_code,request.rollback_package)?;
     let target_name = package_gate::cache_name(&target.primary,"msi")?;
     let agent_root = super::system_dirs::get().agent();
     let expected_root = agent_root.join("transactions").join(request.transaction_id);
@@ -94,7 +94,7 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
     workspace::create(root)?;
     for directory in ["backups","original","runtime"] { workspace::create(&root.join(directory))?; }
     let package = copy_asset(root,request.package,&target_name,2*1024*1024*1024)?;
-    let rollback = copy_asset(root,request.rollback_package,&format!("original/{}",installed_source.package_name),2*1024*1024*1024)?;
+    let rollback = copy_asset(root,request.rollback_package,&format!("original/{}",installed_source.package_name()),2*1024*1024*1024)?;
     let _copied_target = package_gate::lock_verified_file(&root.join(&package.relative_path),target)?;
     let _copied_original = package_gate::lock_verified_file(&root.join(&rollback.relative_path),original)?;
     let extracted = match fixture_key {

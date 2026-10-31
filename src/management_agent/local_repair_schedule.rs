@@ -139,6 +139,13 @@ fn existing_bound(
     Ok(found)
 }
 
+fn now_secs() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|v| v.as_secs())
+        .map_err(|_| "automatic local repair clock invalid".into())
+}
+
 #[derive(Clone)]
 pub struct Tick {
     pub elapsed: Duration,
@@ -146,28 +153,88 @@ pub struct Tick {
     pub retry_at: u64,
 }
 
+// Same criterion as R3: a missing RustDesk.exe counts even when the directory remains, because
+// antivirus usually quarantines only the executable. Disagreeing here left devices on the
+// fallback forever: R3 switched, this worker kept observing.
 fn normal_missing() -> Result<bool, String> {
-    use std::os::windows::fs::MetadataExt;
-    let normal = crate::management_agent::system_dirs::get().normal_install();
-    match std::fs::symlink_metadata(&normal) {
-        Ok(metadata) => {
-            if metadata.file_attributes() & 0x400 != 0 {
-                return Err("automatic local repair normal reparse refused".into());
-            }
-            Ok(false)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            for parent in normal.ancestors().skip(1) {
-                let m = std::fs::symlink_metadata(parent)
-                    .map_err(|_| "automatic local repair parent unavailable")?;
-                if !m.is_dir() || m.file_attributes() & 0x400 != 0 {
-                    return Err("automatic local repair parent invalid".into());
-                }
-            }
-            Ok(true)
-        }
-        Err(_) => Err("automatic local repair normal state unknown".into()),
+    super::rescue_assets::r3_normal_missing(
+        &crate::management_agent::system_dirs::get().normal_install(),
+    )
+    .map_err(|error| format!("automatic local repair normal state: {error}"))
+}
+
+/// Windows Installer holds `Global\_MSIExecute` while it runs an installation; a normal directory
+/// without RustDesk.exe is then an installation in progress, not damage.
+fn windows_installer_busy() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     }
+    let name = "Global\\_MSIExecute"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe { OpenMutexW(0x0010_0000, 0, name.as_ptr()) };
+    if handle.is_null() {
+        // Present but not accessible still means an installation is running.
+        return std::io::Error::last_os_error().raw_os_error() == Some(5);
+    }
+    unsafe { CloseHandle(handle) };
+    true
+}
+
+/// The repair recreates the normal directory and treats an existing one as foreign evidence. When
+/// only part of it is left (RustDesk.exe quarantined by antivirus), move the remainder into the
+/// agent's own quarantine on the same volume first. Runs under the install guard and only while no
+/// Windows Installer transaction is active, so an upgrade that briefly removes RustDesk.exe is never
+/// mistaken for damage. Only the newest remainder is kept.
+fn quarantine_damaged_normal(now: u64) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+    let dirs = crate::management_agent::system_dirs::get();
+    let normal = dirs.normal_install();
+    match std::fs::symlink_metadata(&normal) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("automatic local repair normal state unknown".into()),
+        Ok(metadata) => {
+            if metadata.file_attributes() & 0x400 != 0 || !metadata.is_dir() {
+                return Err("automatic local repair normal remainder refused".into());
+            }
+        }
+    }
+    let Some(_guard) = super::install_guard::InstallGuard::try_acquire()
+        .map_err(|_| "automatic local repair install guard unavailable")?
+    else {
+        return Err("automatic local repair installation busy".into());
+    };
+    if windows_installer_busy() {
+        return Err("automatic local repair Windows Installer busy".into());
+    }
+    if !normal_missing()? {
+        return Err("automatic local repair normal install still complete".into());
+    }
+    let root = dirs.agent().join("quarantine");
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => workspace::create(&root)?,
+        Err(_) => return Err("automatic local repair quarantine unavailable".into()),
+        Ok(_) => workspace::verify(&root)?,
+    }
+    let name = format!("normal-{now}");
+    std::fs::rename(&normal, root.join(&name))
+        .map_err(|e| format!("automatic local repair damaged normal move failed: {e}"))?;
+    // Older remainders go only after the newest one is safely moved aside.
+    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if file_name.starts_with("normal-") && file_name != name {
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| format!("automatic local repair old remainder cleanup failed: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -193,12 +260,14 @@ fn run_total_loss(
     transactions: &Path,
     public: Option<&[u8]>,
 ) -> Result<Decision, String> {
-    let id = attempt_id(a);
-    match std::fs::symlink_metadata(transactions.join(&id)) {
-        Ok(_) => return Ok(Decision::Existing(id)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.to_string()),
-    }
+    let id = match choose_attempt(a, transactions)? {
+        NextAttempt::New(id) => id,
+        NextAttempt::Blocked(id) => return Ok(Decision::Existing(id)),
+        NextAttempt::Exhausted => {
+            return Err("automatic local repair attempts exhausted for this rescue bundle".into())
+        }
+    };
+    quarantine_damaged_normal(now_secs()?)?;
     let directory = super::local_repair::prepare_total_loss(&id, public)?;
     let prepared =
         LocalRepairPlan::decode(&read(&directory.join("local-repair-plan.json"), 65536)?)?;
@@ -302,18 +371,86 @@ fn approval() -> Result<Approval, String> {
     Ok(value)
 }
 fn attempt_id(a: &Approval) -> String {
+    attempt_id_at(a, 0)
+}
+
+// Attempt 0 keeps the historical id so transactions written by earlier builds are recognised.
+fn attempt_id_at(a: &Approval, attempt: u32) -> String {
+    let suffix = if attempt == 0 {
+        String::new()
+    } else {
+        format!("\n#{attempt}")
+    };
     if let Some(source) = &a.installed_source_id {
         return hex::encode(Sha256::digest(format!(
-            "local-repair-auto-installed-v1\n{}\n{}\n{}\n{}\n{}",
+            "local-repair-auto-installed-v1\n{}\n{}\n{}\n{}\n{}{suffix}",
             a.installation_id, source, a.source_reference, a.target_key, a.package.sha256
         )))[..32]
             .to_owned();
     }
     hex::encode(Sha256::digest(format!(
-        "local-repair-auto-v1\n{}\n{}\n{}\n{}\n{}",
+        "local-repair-auto-v1\n{}\n{}\n{}\n{}\n{}{suffix}",
         a.installation_id, a.source_transaction, a.source_reference, a.target_key, a.package.sha256
     )))[..32]
         .to_owned()
+}
+
+/// Repairs allowed per rescue bundle. Only a committed attempt lets a new one start when the normal
+/// install goes missing again; an unfinished or rolled-back attempt stops automatic repair, because
+/// repeating a deterministic failure risks a failed rollback that leaves maintenance.json behind.
+pub const MAX_ATTEMPTS_PER_BUNDLE: u32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptState {
+    Absent,
+    Committed,
+    Blocking,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum NextAttempt {
+    Blocked(String),
+    New(String),
+    Exhausted,
+}
+
+/// Pure choice of the next attempt id given each candidate's state.
+pub fn next_attempt(
+    ids: &[String],
+    state: impl Fn(&str) -> Result<AttemptState, String>,
+) -> Result<NextAttempt, String> {
+    for id in ids {
+        match state(id)? {
+            AttemptState::Absent => return Ok(NextAttempt::New(id.clone())),
+            AttemptState::Blocking => return Ok(NextAttempt::Blocked(id.clone())),
+            AttemptState::Committed => {}
+        }
+    }
+    Ok(NextAttempt::Exhausted)
+}
+
+fn attempt_state(directory: &Path) -> Result<AttemptState, String> {
+    match std::fs::symlink_metadata(directory) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AttemptState::Absent),
+        Err(_) => return Err("automatic local repair attempt unavailable".into()),
+        Ok(_) => {}
+    }
+    // An unreadable or undecodable transaction is an interrupted preparation: it blocks.
+    let committed = read(&directory.join("transaction.json"), 65536)
+        .and_then(|bytes| Transaction::decode(&bytes))
+        .is_ok_and(|tx| tx.phase == Phase::Committed);
+    Ok(if committed {
+        AttemptState::Committed
+    } else {
+        AttemptState::Blocking
+    })
+}
+
+fn choose_attempt(a: &Approval, transactions: &Path) -> Result<NextAttempt, String> {
+    let ids = (0..MAX_ATTEMPTS_PER_BUNDLE)
+        .map(|attempt| attempt_id_at(a, attempt))
+        .collect::<Vec<_>>();
+    next_attempt(&ids, |id| attempt_state(&transactions.join(id)))
 }
 
 #[cfg(test)]
@@ -365,7 +502,11 @@ fn run_once(tick: &Tick, public: Option<&[u8]>) -> Result<Decision, String> {
         Some(&a.source_reference),
     )?;
     if let Some(id) = prior {
-        return Ok(Decision::Existing(id));
+        // Only a committed repair of this bundle lets the attempt numbering below continue; any
+        // other transaction (unfinished, rolled back, or another flow's) still blocks.
+        if attempt_state(&transactions.join(&id))? != AttemptState::Committed {
+            return Ok(Decision::Existing(id));
+        }
     }
     let fallback = crate::management_agent::system_dirs::get()
         .client_root()
@@ -405,14 +546,16 @@ fn run_once(tick: &Tick, public: Option<&[u8]>) -> Result<Decision, String> {
     if decision != Decision::Prepare {
         return Ok(decision);
     }
-    // Reserve this exact approval through the existing transaction namespace. Partial directories
-    // and terminal plans prevent retries across worker or agent restarts without a new counter.
-    let id = attempt_id(&a);
-    match std::fs::symlink_metadata(transactions.join(&id)) {
-        Ok(_) => return Ok(Decision::Existing(id)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("automatic local repair attempt unavailable".into()),
-    }
+    // Reserve this approval through the transaction namespace. Unfinished directories prevent
+    // retries across worker or agent restarts; finished ones move on to the next attempt number.
+    let id = match choose_attempt(&a, transactions)? {
+        NextAttempt::New(id) => id,
+        NextAttempt::Blocked(id) => return Ok(Decision::Existing(id)),
+        NextAttempt::Exhausted => {
+            return Err("automatic local repair attempts exhausted for this rescue bundle".into())
+        }
+    };
+    quarantine_damaged_normal(now)?;
     let directory = match public {
         #[cfg(test)]
         Some(public) => super::local_repair::prepare_fixture(&id, public)?,
@@ -500,7 +643,12 @@ fn start_with_key(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
                 }
                 let outcome = run_once(&tick, public.as_deref());
                 let text = match outcome {
-                    Ok(value) => format!("{value:?}"),
+                    Ok(value) => {
+                        // Same 600-second healthy window as the service path: a crash loop or a
+                        // repeatedly deleted executable keeps its backoff.
+                        budget.observe_health(value == Decision::Observe, now);
+                        format!("{value:?}")
+                    }
                     Err(error) => {
                         budget.record_failure(now);
                         format!("Error: {error}")
@@ -510,4 +658,126 @@ fn start_with_key(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
             }
         })?;
     Ok(Worker { tx, results })
+}
+
+#[cfg(test)]
+mod attempt_tests {
+    use super::*;
+
+    fn ids() -> Vec<String> {
+        (0..MAX_ATTEMPTS_PER_BUNDLE)
+            .map(|n| format!("id{n}"))
+            .collect()
+    }
+
+    #[test]
+    fn first_attempt_uses_the_historical_slot() {
+        assert_eq!(
+            next_attempt(&ids(), |_| Ok(AttemptState::Absent)),
+            Ok(NextAttempt::New("id0".into()))
+        );
+    }
+
+    #[test]
+    fn a_committed_repair_does_not_block_the_next_loss() {
+        let state = |id: &str| {
+            Ok(if id == "id0" || id == "id1" {
+                AttemptState::Committed
+            } else {
+                AttemptState::Absent
+            })
+        };
+        assert_eq!(
+            next_attempt(&ids(), state),
+            Ok(NextAttempt::New("id2".into()))
+        );
+    }
+
+    #[test]
+    fn an_unfinished_or_rolled_back_attempt_stops_automatic_repair() {
+        let state = |id: &str| {
+            Ok(match id {
+                "id0" => AttemptState::Committed,
+                "id1" => AttemptState::Blocking,
+                _ => AttemptState::Absent,
+            })
+        };
+        assert_eq!(
+            next_attempt(&ids(), state),
+            Ok(NextAttempt::Blocked("id1".into()))
+        );
+    }
+
+    #[test]
+    fn attempts_are_bounded_per_bundle() {
+        assert_eq!(
+            next_attempt(&ids(), |_| Ok(AttemptState::Committed)),
+            Ok(NextAttempt::Exhausted)
+        );
+    }
+
+    #[test]
+    fn unreadable_state_stops_the_choice() {
+        assert_eq!(
+            next_attempt(&ids(), |_| Err(
+                "automatic local repair attempt unavailable".into()
+            )),
+            Err("automatic local repair attempt unavailable".into())
+        );
+    }
+
+    #[test]
+    fn attempt_state_reads_real_transaction_directories() {
+        let root = std::env::temp_dir().join(format!("rd-attempt-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            attempt_state(&root.join("absent")).unwrap(),
+            AttemptState::Absent
+        );
+        std::fs::create_dir(root.join("empty")).unwrap();
+        assert_eq!(
+            attempt_state(&root.join("empty")).unwrap(),
+            AttemptState::Blocking
+        );
+        std::fs::create_dir(root.join("garbage")).unwrap();
+        std::fs::write(root.join("garbage").join("transaction.json"), b"not json").unwrap();
+        assert_eq!(
+            attempt_state(&root.join("garbage")).unwrap(),
+            AttemptState::Blocking
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn attempt_zero_keeps_the_id_written_by_earlier_builds() {
+        let a = Approval {
+            schema: 2,
+            installation_id: "a".repeat(32),
+            source_transaction: String::new(),
+            source_kind: Some("installed_msi".into()),
+            installation_receipt: None,
+            installed_source_id: Some("b".repeat(64)),
+            source_reference: "c".repeat(64),
+            target_key: "windows-x86_64-msi-standard".into(),
+            build_seq: 2026103002,
+            package: super::super::install_plan::Artifact {
+                relative_path: "p.msi".into(),
+                size: 1,
+                sha256: "d".repeat(64),
+            },
+        };
+        let legacy = hex::encode(Sha256::digest(format!(
+            "local-repair-auto-installed-v1\n{}\n{}\n{}\n{}\n{}",
+            a.installation_id,
+            a.installed_source_id.as_deref().unwrap(),
+            a.source_reference,
+            a.target_key,
+            a.package.sha256
+        )))[..32]
+            .to_owned();
+        assert_eq!(attempt_id(&a), legacy);
+        assert_ne!(attempt_id_at(&a, 1), legacy);
+        assert_ne!(attempt_id_at(&a, 1), attempt_id_at(&a, 2));
+    }
 }
