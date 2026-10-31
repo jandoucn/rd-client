@@ -182,7 +182,8 @@ pub(super) fn prepare(id: &str, public: Option<&[u8]>) -> Result<PathBuf, String
         super::super::msi_metadata::RegisteredPackage::Source(installed) => Some(
             package_gate::lock_verified_file(&installed.source, approved)?,
         ),
-        super::super::msi_metadata::RegisteredPackage::PackageCode { .. } => None,
+        super::super::msi_metadata::RegisteredPackage::PackageCode { .. }
+        | super::super::msi_metadata::RegisteredPackage::NotInstalled { .. } => None,
     };
     let edition = if key.ends_with("-sos") {
         "sos"

@@ -23,6 +23,10 @@ pub enum RegisteredPackage {
     /// that is deleted afterwards). Windows Installer accepts the identical package from another
     /// location, so identity is proven by the installed product's package code instead.
     PackageCode { package_name: String },
+    /// The product is not registered at all: `msiexec /x` ran without the agent's purge command,
+    /// which leaves the (permanent) agent behind. Only local repair may then install the approved
+    /// package afresh; every other caller requires an installed product.
+    NotInstalled { package_name: String },
 }
 
 impl RegisteredPackage {
@@ -30,7 +34,37 @@ impl RegisteredPackage {
         match self {
             RegisteredPackage::Source(source) => &source.package_name,
             RegisteredPackage::PackageCode { package_name } => package_name,
+            RegisteredPackage::NotInstalled { package_name } => package_name,
         }
+    }
+}
+
+/// Windows Installer properties for applying the approved package: a registered product is
+/// repaired in place (all files, machine and user data, shortcuts); an unregistered one gets a
+/// plain installation, because REINSTALL is only meaningful for an installed product.
+pub fn install_properties(installed: bool) -> &'static [&'static str] {
+    if installed {
+        &["REINSTALL=ALL", "REINSTALLMODE=amus"]
+    } else {
+        &[]
+    }
+}
+
+/// INSTALLSTATE_UNKNOWN (-1) means the product is not registered for any context; DEFAULT (5),
+/// ADVERTISED (1) and ABSENT (2, installed for another user) all mean it is registered somewhere,
+/// so a plain installation must not be attempted. Anything else is an error.
+pub fn product_installed(product_code: &str) -> Result<bool, String> {
+    if !valid_guid(product_code) {
+        return Err("installed MSI product code invalid".into());
+    }
+    let code = product_code
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    match unsafe { MsiQueryProductStateW(code.as_ptr()) } {
+        -1 => Ok(false),
+        1 | 2 | 5 => Ok(true),
+        state => Err(format!("installed MSI product state query failed: {state}")),
     }
 }
 
@@ -65,6 +99,22 @@ pub fn registered_package(
     product_code: &str,
     candidate: &Path,
 ) -> Result<RegisteredPackage, String> {
+    if !product_installed(product_code)? {
+        let candidate_identity = inspect(candidate)?;
+        if candidate_identity.product_name != "RustDesk"
+            || !candidate_identity
+                .product_code
+                .eq_ignore_ascii_case(product_code)
+        {
+            return Err("installed MSI source product mismatch".into());
+        }
+        let package_name = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("installed MSI candidate name invalid")?
+            .to_owned();
+        return Ok(RegisteredPackage::NotInstalled { package_name });
+    }
     let (package_name, directory) = registered_location(product_code)?;
     let source = directory.join(&package_name);
     let missing = match std::fs::symlink_metadata(&source) {
@@ -88,6 +138,20 @@ pub fn registered_package(
         &package_code(candidate)?,
     )?;
     Ok(RegisteredPackage::PackageCode { package_name })
+}
+
+/// Proves `candidate` is the very package Windows Installer recorded for the installed product,
+/// wherever the registered source is. Used for signed copies fetched from the approved manifest.
+pub fn bind_candidate(product_code: &str, candidate: &Path) -> Result<(), String> {
+    if !product_installed(product_code)? {
+        return Err("installed MSI product absent".into());
+    }
+    let identity = inspect(candidate)?;
+    if identity.product_name != "RustDesk" || !identity.product_code.eq_ignore_ascii_case(product_code)
+    {
+        return Err("installed MSI source product mismatch".into());
+    }
+    removed_source_matches(&installed_package_code(product_code)?, &package_code(candidate)?)
 }
 
 fn installed_package_code(product_code: &str) -> Result<String, String> {
@@ -185,6 +249,23 @@ fn registered_location(product_code: &str) -> Result<(String, std::path::PathBuf
     Ok((name, directory))
 }
 
+/// The registered package name and, while it still exists, the verified registered source.
+/// `None` means the source was removed after installation (the online updater installs from a
+/// temporary directory); callers that need the bytes must then obtain the signed package
+/// elsewhere and bind it with `registered_package`.
+pub fn registered_source(
+    product_code: &str,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
+    let (name, directory) = registered_location(product_code)?;
+    match std::fs::symlink_metadata(directory.join(&name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((name, None)),
+        Err(_) => return Err("installed MSI source unreadable".into()),
+        Ok(_) => {}
+    }
+    let installed = installed_source(product_code)?;
+    Ok((installed.package_name, Some(installed.source)))
+}
+
 pub fn installed_source(product_code: &str) -> Result<InstalledSource, String> {
     let (name, directory) = registered_location(product_code)?;
     let source = directory.join(&name);
@@ -209,6 +290,7 @@ pub fn verify_pair(original: &PackageIdentity, target: &PackageIdentity, origina
 
 #[link(name = "msi")]
 extern "system" {
+    fn MsiQueryProductStateW(product: *const u16) -> i32;
     fn MsiSourceListGetInfoW(product: *const u16, sid: *const u16, context: u32, options: u32,
         property: *const u16, value: *mut u16, count: *mut u32) -> u32;
     fn MsiOpenDatabaseW(path: *const u16, persist: *const u16, database: *mut u32) -> u32;
@@ -336,7 +418,33 @@ mod tests {
     }
 
     #[test]
+    fn an_unregistered_product_is_installed_without_reinstall_properties() {
+        assert_eq!(
+            install_properties(true),
+            ["REINSTALL=ALL", "REINSTALLMODE=amus"]
+        );
+        assert!(install_properties(false).is_empty());
+    }
+
+    #[test]
+    fn product_state_rejects_malformed_codes() {
+        assert_eq!(
+            product_installed("not-a-guid").unwrap_err(),
+            "installed MSI product code invalid"
+        );
+        // A well-formed code no product uses is simply not installed.
+        assert_eq!(
+            product_installed("{00000000-0000-0000-0000-000000000000}"),
+            Ok(false)
+        );
+    }
+
+    #[test]
     fn registered_package_name_is_reported_for_both_kinds() {
+        let fresh = RegisteredPackage::NotInstalled {
+            package_name: "fresh.msi".into(),
+        };
+        assert_eq!(fresh.package_name(), "fresh.msi");
         let removed = RegisteredPackage::PackageCode {
             package_name: "rustdesk.msi".into(),
         };

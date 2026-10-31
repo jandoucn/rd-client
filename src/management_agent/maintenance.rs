@@ -203,3 +203,34 @@ pub fn claim(state: &Path, installation: &str, transaction: &str, plan_sha256: &
     drop(file);
     super::workspace::verify_file(&path)
 }
+
+
+/// The marker's own binding, for releasing a marker whose owning transaction already ended.
+#[derive(Debug)]
+pub struct Binding {
+    pub installation_id: String,
+    pub transaction_id: String,
+    pub plan_sha256: String,
+    pub nonce: String,
+}
+
+pub fn binding(state: &Path) -> Result<Binding, String> {
+    let path = state.join("maintenance.json");
+    super::workspace::verify_file(&path)?;
+    let marker: Marker =
+        serde_json::from_slice(&read(&path)?).map_err(|_| "maintenance record malformed")?;
+    if marker.schema != 1 {
+        return Err("maintenance record malformed".into());
+    }
+    Ok(Binding {
+        installation_id: marker.installation_id,
+        transaction_id: marker.transaction_id,
+        plan_sha256: marker.plan_sha256,
+        nonce: marker.nonce,
+    })
+}
+
+/// Bounded, reparse-refusing read shared with the orphan release.
+pub fn read_record(path: &Path) -> Result<Vec<u8>, String> {
+    read(path)
+}

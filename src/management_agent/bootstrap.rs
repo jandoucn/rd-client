@@ -786,6 +786,21 @@ fn restore_missing_agent(
 
 pub fn run_once(config: &ServiceConfig, paths: &AgentPaths) -> Result<(), String> {
     require_admin()?;
+    // A marker whose transaction already ended would also keep the agent from being brought
+    // back, and with the agent gone nothing else would ever release it.
+    if !super::purge_marker_path(paths).exists() && !paths.state.join("disable-agent").exists() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default();
+        match super::maintenance_orphan::release(&paths.state, now) {
+            Ok(Some(phase)) => {
+                hbb_common::log::warn!("bootstrap released maintenance marker after {phase}")
+            }
+            Ok(None) => {}
+            Err(error) => hbb_common::log::warn!("bootstrap maintenance marker kept: {error}"),
+        }
+    }
     if super::purge_marker_path(paths).exists()
         || paths.state.join("disable-agent").exists()
         || paths.state.join("maintenance.json").exists()

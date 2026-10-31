@@ -232,6 +232,12 @@ mod local_repair;
 #[cfg(windows)]
 #[path = "management_agent/local_repair_schedule.rs"]
 mod local_repair_schedule;
+#[cfg(windows)]
+#[path = "management_agent/transaction_retention.rs"]
+mod transaction_retention;
+#[cfg(windows)]
+#[path = "management_agent/maintenance_orphan.rs"]
+mod maintenance_orphan;
 
 #[cfg(windows)]
 pub fn run_local_repair(arguments: &[std::ffi::OsString], mode: &str) -> Result<(), String> {

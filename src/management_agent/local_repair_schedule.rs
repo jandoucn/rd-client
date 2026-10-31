@@ -633,11 +633,32 @@ fn start_with_key(public: Option<Vec<u8>>) -> std::io::Result<Worker> {
         .name("agent-local-repair".into())
         .spawn(move || {
             let mut budget = super::recovery::RetryBudget::default();
+            let mut marker_checked: Option<std::time::Instant> = None;
             for tick in rx {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|v| v.as_secs())
                     .unwrap_or(0);
+                // A marker left by a transaction that already ended halts every local recovery.
+                if tick.enabled
+                    && marker_checked.map_or(true, |at| at.elapsed() >= std::time::Duration::from_secs(60))
+                {
+                    marker_checked = Some(std::time::Instant::now());
+                    match super::maintenance_orphan::release(
+                        &crate::management_agent::system_dirs::get().agent().join("state"),
+                        now,
+                    ) {
+                        Ok(Some(phase)) => hbb_common::log::warn!(
+                            "maintenance marker released after transaction ended {phase}"
+                        ),
+                        Ok(None) => {}
+                        Err(error) => hbb_common::throttled_log!(
+                            std::time::Duration::from_secs(300),
+                            warn,
+                            "maintenance marker not released: {error}"
+                        ),
+                    }
+                }
                 if !budget.due(now) {
                     continue;
                 }

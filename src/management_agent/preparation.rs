@@ -48,6 +48,7 @@ fn prepare_checked(root: &Path, request: &Request<'_>, fixture_key: Option<&[u8]
     let target_metadata = msi_metadata::inspect(request.package)?;
     msi_metadata::verify_pair(&original_metadata,&target_metadata,&original_metadata.product_code,&target_metadata.product_code)?;
     let installed_source = msi_metadata::registered_package(&original_metadata.product_code,request.rollback_package)?;
+    if matches!(installed_source, msi_metadata::RegisteredPackage::NotInstalled { .. }) { return Err("installation preparation original product absent".into()); }
     let target_name = package_gate::cache_name(&target.primary,"msi")?;
     let agent_root = super::system_dirs::get().agent();
     let expected_root = agent_root.join("transactions").join(request.transaction_id);

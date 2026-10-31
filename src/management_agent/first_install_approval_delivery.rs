@@ -635,7 +635,7 @@ pub fn deliver_installed_msi_approval(request: Request<'_>) -> Result<(), Delive
         agent,
         &identity,
         &config,
-        |code| msi_metadata::installed_source(code).map(|s| (s.package_name, s.source)),
+        msi_metadata::registered_source,
         || {},
     )
 }
@@ -854,7 +854,7 @@ fn deliver_bound(
     agent: &Path,
     identity: &Path,
     config: &Path,
-    registered: impl Fn(&str) -> Result<(String, PathBuf), String>,
+    registered: impl Fn(&str) -> Result<(String, Option<PathBuf>), String>,
     before_publish: impl FnOnce(),
 ) -> Result<(), DeliveryError> {
     if !matches!(
@@ -894,19 +894,31 @@ fn deliver_bound(
         .map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
     let (registered_name, source) =
         registered(request.product_code).map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
-    if registered_name != name || source.file_name().and_then(|v| v.to_str()) != Some(name.as_str())
+    if registered_name != name
+        || source
+            .as_ref()
+            .is_some_and(|source| source.file_name().and_then(|v| v.to_str()) != Some(name.as_str()))
     {
         return Err(DeliveryError::RegisteredSourceMismatch);
     }
-    let _package = package_gate::lock_verified_file(&source, target)
-        .map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
-    let msi =
-        msi_metadata::inspect(&source).map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
-    if msi.product_name != "RustDesk"
-        || !msi.product_code.eq_ignore_ascii_case(request.product_code)
-    {
-        return Err(DeliveryError::RegisteredSourceMismatch);
-    }
+    // A removed registered source only defers the byte check: the approval names the signed
+    // package, and preparing the rescue bundle downloads it and binds it to the installed
+    // product's package code before anything is published.
+    let _package = match &source {
+        Some(source) => {
+            let locked = package_gate::lock_verified_file(source, target)
+                .map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
+            let msi = msi_metadata::inspect(source)
+                .map_err(|_| DeliveryError::RegisteredSourceMismatch)?;
+            if msi.product_name != "RustDesk"
+                || !msi.product_code.eq_ignore_ascii_case(request.product_code)
+            {
+                return Err(DeliveryError::RegisteredSourceMismatch);
+            }
+            Some(locked)
+        }
+        None => None,
+    };
     let cache = agent.join("release-cache");
     if !cache
         .try_exists()
@@ -1007,7 +1019,7 @@ pub fn deliver_registered_at(
         layout.agent,
         &layout.identity,
         &layout.config,
-        |code| msi_metadata::installed_source(code).map(|s| (s.package_name, s.source)),
+        |code| msi_metadata::installed_source(code).map(|s| (s.package_name, Some(s.source))),
         || {},
     )
 }
@@ -1032,7 +1044,7 @@ pub fn deliver_before_publish(
                         .unwrap()
                         .to_string_lossy()
                         .into_owned(),
-                    layout.registered_source.to_owned(),
+                    Some(layout.registered_source.to_owned()),
                 ))
             },
             hook,

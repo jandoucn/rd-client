@@ -272,6 +272,16 @@ fn operation_snapshot(paths: &AgentPaths) -> serde_json::Value {
     if paths.state.join("maintenance.json").exists() && active["state"] == "idle" {
         active["state"] = "maintenance".into();
     }
+    #[cfg(windows)]
+    if let Some(detail) = super::maintenance_orphan::observe(
+        &paths.state,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default(),
+    ) {
+        active["maintenance"] = detail;
+    }
     active
 }
 

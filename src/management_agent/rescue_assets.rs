@@ -446,6 +446,9 @@ fn check_installed_source(
             Some(package_gate::lock_verified_file(&installed.source, target)?),
         ),
         msi_metadata::RegisteredPackage::PackageCode { .. } => (None, None),
+        msi_metadata::RegisteredPackage::NotInstalled { .. } => {
+            return Err("rescue installed MSI product absent".into())
+        }
     };
     let response = super::health_windows::probe_blocking(
         r"\\.\pipe\RustDesk\management-health-v1",

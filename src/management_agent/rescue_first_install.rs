@@ -1117,7 +1117,7 @@ fn copy_registered(
 fn prepare(
     layout: &Layout,
     public: Option<&[u8]>,
-    registered: impl Fn(&str, &str) -> Result<PathBuf, String>,
+    registered: impl Fn(&str, &str, &hbb_common::UpdateTarget) -> Result<PathBuf, String>,
     healthy: impl Fn(&Layout, &str, u64) -> Result<(u32, u32), String>,
 ) -> Result<serde_json::Value, String> {
     let deadline = Instant::now() + Duration::from_secs(600);
@@ -1175,7 +1175,7 @@ fn prepare(
     if target.size > 2 * 1024 * 1024 * 1024 {
         return Err("first installation package budget exceeded".into());
     }
-    let package_path = registered(&approval.product_code, &name)?;
+    let package_path = registered(&approval.product_code, &name, target)?;
     super::rotation_registered_source(&layout.destination, &package_path)?;
     let _package = package_gate::lock_verified_file(&package_path, target)?;
     let msi = msi_metadata::inspect(&package_path)?;
@@ -1349,7 +1349,7 @@ fn prepare(
     budget()?;
     check_gates(layout, installation, key)?;
     if healthy(layout, key, build)? != (client_pid, agent_pid)
-        || registered(&approval.product_code, &name)? != package_path
+        || registered(&approval.product_code, &name, target)? != package_path
         || read(&sidecar, 262144, false)? != approved
         || read(&layout.identity, 65536, true)? != identity
         || read(&layout.config, 65536, true)? != config
@@ -1377,6 +1377,9 @@ fn prepare(
     } else {
         super::publish(&stage, &current)?;
     }
+    // The verified lock denies deletion; release it so the signed copy can go now.
+    drop(_package);
+    discard_signed_sources(&layout.agent, None);
     // 保底目录换来换去会让旧包清单永远对不上，轮换成功后顺带把它换成同一版。
     let mut refreshed = false;
     if refresh {
@@ -1395,25 +1398,89 @@ fn prepare(
     )
 }
 
-fn registered(code: &str, name: &str) -> Result<PathBuf, String> {
+fn registered(code: &str, name: &str, target: &hbb_common::UpdateTarget) -> Result<PathBuf, String> {
     #[cfg(test)]
     if let Some(result) = WORKER_SCOPE.with(|v| v.borrow().as_ref().map(|s| {
         if s.product_code.eq_ignore_ascii_case(code) && s.source.file_name().and_then(|v|v.to_str()) == Some(name) {
             Ok(s.source.clone())
         } else { Err("isolated registered source mismatch".to_owned()) }
     })) { return result; }
-    let source = msi_metadata::installed_source(code)?;
-    if source.package_name != name {
+    let (registered_name, source) = msi_metadata::registered_source(code)?;
+    if registered_name != name {
         return Err("first installation registered basename mismatch".into());
     }
-    Ok(source.source)
+    match source {
+        // Local repair installs from `rescue\current`, which then becomes the registered source;
+        // rotation cannot copy from the bundle it is about to move, so it takes the signed copy.
+        Some(source) if !inside(&source, &agent_dir().join("rescue")) => Ok(source),
+        _ => signed_source(&agent_dir(), code, target),
+    }
+}
+
+fn inside(path: &Path, root: &Path) -> bool {
+    let text = |p: &Path| p.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let (path, root) = (text(path), text(root));
+    path == root || path.starts_with(&format!("{}\\", root.trim_end_matches('\\')))
+}
+
+const SIGNED_SOURCE_PREFIX: &str = "rescue-source-";
+
+fn signed_source_dir(agent: &Path, target: &hbb_common::UpdateTarget) -> Result<PathBuf, String> {
+    let key = target
+        .sha256
+        .get(..16)
+        .filter(|key| key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or("first installation package hash invalid")?;
+    Ok(agent
+        .join("release-cache")
+        .join(format!("{SIGNED_SOURCE_PREFIX}{}", key.to_ascii_lowercase())))
+}
+
+/// The online updater installs from a temporary directory that is deleted afterwards, so the
+/// registered source is often gone by the time the rescue bundle is rotated. Fetch the signed
+/// package itself (hash- and size-checked against the approved manifest) and accept it only
+/// when Windows Installer recorded exactly this package for the installed product.
+fn signed_source(agent: &Path, code: &str, target: &hbb_common::UpdateTarget) -> Result<PathBuf, String> {
+    let directory = signed_source_dir(agent, target)?;
+    discard_signed_sources(agent, Some(&directory));
+    let reused = directory.exists();
+    let (path, _locked) = match super::super::package_download::download(&directory, target) {
+        Ok(package) => package,
+        // A previous attempt can leave a partial or foreign file under the reused directory;
+        // a fresh download that failed is simply retried on the next round.
+        Err(_) if reused => {
+            std::fs::remove_dir_all(&directory)
+                .map_err(|_| "first installation signed source not reclaimed")?;
+            super::super::package_download::download(&directory, target)?
+        }
+        Err(error) => return Err(error),
+    };
+    msi_metadata::bind_candidate(code, &path)?;
+    Ok(path)
+}
+
+/// Signed copies are only needed until the bundle is published; `keep` is the one in use.
+fn discard_signed_sources(agent: &Path, keep: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(agent.join("release-cache")) else {
+        return;
+    };
+    for entry in entries.flatten().take(64) {
+        let path = entry.path();
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(SIGNED_SOURCE_PREFIX));
+        if ours && Some(path.as_path()) != keep {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 #[cfg(test)]
 pub fn prepare_fixture(agent: &Path, public: &[u8]) -> Result<serde_json::Value, String> {
     prepare(
         &super::fixture(agent),
         Some(public),
-        |_, name| Ok(agent.join("release-cache").join(name)),
+        |_, name, _| Ok(agent.join("release-cache").join(name)),
         |_, _, _| Ok((1, 2)),
     )
 }
@@ -1437,7 +1504,7 @@ pub fn fallback_change_fixture(
     prepare(
         &super::fixture(agent),
         Some(public),
-        |_, name| Ok(agent.join("release-cache").join(name)),
+        |_, name, _| Ok(agent.join("release-cache").join(name)),
         |_, _, _| {
             calls.set(calls.get() + 1);
             if change && calls.get() == 2 {
@@ -1469,8 +1536,20 @@ fn start_checked(public: Option<Vec<u8>>, #[cfg(test)] scope: Option<WorkerScope
         #[cfg(test)]
         WORKER_SCOPE.with(|v| *v.borrow_mut() = scope);
         let mut last=None;
+        #[allow(unused_mut, unused_variables)]
+        let mut pruned:Option<Instant>=None;
         for () in receiver{
             if last.is_some_and(|time:Instant|time.elapsed()<Duration::from_secs(300)){continue;}last=Some(Instant::now());
+            // Finished transactions pile up with every update; past 64 entries approval delivery stops.
+            #[cfg(not(test))]
+            if pruned.map_or(true,|time:Instant|time.elapsed()>=Duration::from_secs(6*3600)){
+                pruned=Some(Instant::now());
+                match super::super::transaction_retention::prune(&agent_dir(),std::time::SystemTime::now()){
+                    Ok(0)=>{}
+                    Ok(count)=>hbb_common::log::info!("finished transactions pruned: {count}"),
+                    Err(error)=>hbb_common::throttled_log!(Duration::from_secs(300),warn,"finished transactions not pruned: {error}"),
+                }
+            }
             let result=(||{let layout=fixed_layout()?;
                 #[cfg(not(test))]
                 if let Err(error)=finish_interrupted_rotation(&layout){hbb_common::throttled_log!(Duration::from_secs(300),warn,"first installation rotation not finished: {error}");}
@@ -2210,5 +2289,72 @@ mod report_tests {
         ] {
             assert_eq!(refusal_reason(error), reason, "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod signed_source_tests {
+    use super::*;
+
+    fn target(sha256: &str) -> hbb_common::UpdateTarget {
+        hbb_common::UpdateTarget {
+            sha256: sha256.into(),
+            ..Default::default()
+        }
+    }
+
+    fn root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rd-signed-source-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("release-cache")).unwrap();
+        root
+    }
+
+    // 下载副本按包哈希分目录，重试复用同一份，不同版本不会互相覆盖。
+    #[test]
+    fn the_signed_copy_is_keyed_by_the_package_hash() {
+        let agent = Path::new(r"C:\agent");
+        let dir = signed_source_dir(agent, &target(&"AB".repeat(32))).unwrap();
+        assert_eq!(
+            dir,
+            agent.join("release-cache").join("rescue-source-abababababababab")
+        );
+        for invalid in ["", "abc", "zzzzzzzzzzzzzzzz0000"] {
+            assert_eq!(
+                signed_source_dir(agent, &target(invalid)).unwrap_err(),
+                "first installation package hash invalid"
+            );
+        }
+    }
+
+    // R4 从救援包里装过之后，登记源就在救援目录里；轮换不能从要被移走的目录复制。
+    #[test]
+    fn a_registered_source_inside_the_rescue_tree_is_not_used() {
+        let rescue = Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue");
+        assert!(inside(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue\current\a.msi"), rescue));
+        assert!(inside(Path::new(r"c:/programdata/rustdesk/managementagent/RESCUE/previous/a.msi"), rescue));
+        assert!(!inside(Path::new(r"C:\ProgramData\RustDesk\ManagementAgent\rescue-other\a.msi"), rescue));
+        assert!(!inside(Path::new(r"C:\Windows\Temp\rd-update\a.msi"), rescue));
+    }
+
+    // 只清自己的下载副本：在用的那份和审批文件都要留下。
+    #[test]
+    fn only_superseded_signed_copies_are_discarded() {
+        let root = root("discard");
+        let cache = root.join("release-cache");
+        for name in ["rescue-source-old", "rescue-source-current", "unrelated"] {
+            std::fs::create_dir_all(cache.join(name)).unwrap();
+        }
+        std::fs::write(cache.join("first-install.json"), b"{}").unwrap();
+        discard_signed_sources(&root, Some(&cache.join("rescue-source-current")));
+        assert!(!cache.join("rescue-source-old").exists());
+        assert!(cache.join("rescue-source-current").exists());
+        assert!(cache.join("unrelated").exists());
+        assert!(cache.join("first-install.json").exists());
+        discard_signed_sources(&root, None);
+        assert!(!cache.join("rescue-source-current").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
